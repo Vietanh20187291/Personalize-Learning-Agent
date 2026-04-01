@@ -37,6 +37,29 @@ type ClassroomItem = {
   teacher_id: number;
 };
 
+const SUBJECT_ICON_OPTIONS = [
+  '📘',
+  '📚',
+  '🧠',
+  '⚛️',
+  '🧪',
+  '🧬',
+  '📐',
+  '📉',
+  '💻',
+  '🌍',
+  '🗺️',
+  '🏛️',
+  '🎨',
+  '🎵',
+  '⚙️',
+  '🧩',
+  '📦',
+  '🔗',
+  '🖥️',
+  '📡',
+];
+
 export default function TeacherSubjectsPage() {
   const router = useRouter();
   const [subjects, setSubjects] = useState<SubjectItem[]>([]);
@@ -85,7 +108,7 @@ export default function TeacherSubjectsPage() {
   const resetSubjectForm = () => {
     setName('');
     setDescription('');
-    setIcon('');
+    setIcon(SUBJECT_ICON_OPTIONS[0]);
     setEditingSubjectId(null);
   };
 
@@ -137,6 +160,9 @@ export default function TeacherSubjectsPage() {
     if (role !== 'teacher') {
       router.push('/auth');
       return;
+    }
+    if (!icon) {
+      setIcon(SUBJECT_ICON_OPTIONS[0]);
     }
     loadSubjects();
   }, [router]);
@@ -191,7 +217,7 @@ export default function TeacherSubjectsPage() {
     setEditingSubjectId(s.id);
     setName(s.name || '');
     setDescription(s.description || '');
-    setIcon(s.icon || '');
+    setIcon(s.icon || SUBJECT_ICON_OPTIONS[0]);
   };
 
   const handleDeleteSubject = async (s: SubjectItem) => {
@@ -334,12 +360,17 @@ export default function TeacherSubjectsPage() {
               placeholder="Tên môn học"
               className="w-full px-4 py-3 rounded-xl border border-slate-200 font-semibold text-slate-900 outline-none focus:border-indigo-500"
             />
-            <input
+            <p className="text-xs font-black uppercase tracking-widest text-slate-500">Icon</p>
+            <select
               value={icon}
               onChange={(e) => setIcon(e.target.value)}
-              placeholder="Icon (tuỳ chọn)"
+              title="Chọn icon môn học"
               className="w-full px-4 py-3 rounded-xl border border-slate-200 font-semibold text-slate-900 outline-none focus:border-indigo-500"
-            />
+            >
+              {SUBJECT_ICON_OPTIONS.map((iconItem) => (
+                <option key={iconItem} value={iconItem}>{iconItem}</option>
+              ))}
+            </select>
             <input
               value={description}
               onChange={(e) => setDescription(e.target.value)}

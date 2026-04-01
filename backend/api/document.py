@@ -125,8 +125,14 @@ def get_student_documents(user_id: int, subject: Optional[str] = None, db: Sessi
     if not enrolled_class_ids:
         return []
 
-    # Lấy tài liệu thuộc về các lớp đó
-    query = db.query(models.Document).filter(models.Document.class_id.in_(enrolled_class_ids))
+    # Chỉ lấy tài liệu thuộc các lớp đã tham gia VÀ được giáo viên bật hiển thị.
+    query = db.query(models.Document, models.DocumentPublication).join(
+        models.DocumentPublication,
+        models.DocumentPublication.doc_id == models.Document.id,
+    ).filter(
+        models.Document.class_id.in_(enrolled_class_ids),
+        models.DocumentPublication.is_visible_to_students == True,
+    )
     
     # Nếu có chọn môn cụ thể thì lọc thêm theo môn
     if subject and subject != "Tất cả":
@@ -135,14 +141,15 @@ def get_student_documents(user_id: int, subject: Optional[str] = None, db: Sessi
     docs = query.order_by(models.Document.id.desc()).all()
     
     result = []
-    for doc in docs:
+    for doc, publication in docs:
         time_str = (doc.upload_time + timedelta(hours=7)).strftime("%H:%M - %d/%m/%Y") if doc.upload_time else "Chưa xác định"
         result.append({
             "id": doc.id,
             "filename": doc.filename,
             "subject": doc.subject,
             "class_id": doc.class_id,
-            "upload_time": time_str
+            "upload_time": time_str,
+            "is_visible_to_students": publication.is_visible_to_students,
         })
         
     return result
@@ -156,6 +163,10 @@ def download_document(doc_id: int, db: Session = Depends(get_db)):
     doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Tài liệu không tồn tại")
+
+    publication = db.query(models.DocumentPublication).filter(models.DocumentPublication.doc_id == doc_id).first()
+    if not publication or not publication.is_visible_to_students:
+        raise HTTPException(status_code=403, detail="Tài liệu này chưa được giáo viên cho phép hiển thị")
         
     # Trỏ đúng vào thư mục temp_uploads theo logic lưu file
     file_path = os.path.join("temp_uploads", doc.filename)

@@ -31,9 +31,20 @@ def log_study_session(data: StudySessionLog, db: Session = Depends(get_db)):
     """API ngầm nhận số phút học tập từ Frontend khi học sinh tắt tab"""
     try:
         if data.duration_minutes > 0:
+            subject_name = (data.subject or "").strip()
+            if not subject_name:
+                raise HTTPException(status_code=400, detail="Thiếu môn học để lưu phiên học")
+
+            subject_obj = db.query(models.Subject).filter(models.Subject.name.ilike(subject_name)).first()
+            if not subject_obj:
+                subject_obj = models.Subject(name=subject_name, description=f"Môn {subject_name}")
+                db.add(subject_obj)
+                db.flush()
+
             new_session = models.StudySession(
                 user_id=data.user_id,
-                subject=data.subject,
+                subject_id=subject_obj.id,
+                subject=subject_obj.name,
                 duration_minutes=data.duration_minutes
             )
             db.add(new_session)
@@ -117,8 +128,21 @@ def chat_with_adaptive_tutor(req: TutorChatRequest, db: Session = Depends(get_db
             allowed_filenames=allowed_filenames,
             history=req.history
         )
+
+        # Guard cuối cùng: không để lộ lỗi API key/401 ra giao diện.
+        response_text = str(response or "").strip()
+        lowered = response_text.lower()
+        if (
+            "invalid_api_key" in lowered
+            or "error code: 401" in lowered
+            or "gia sư ai đang bận truy xuất dữ liệu" in lowered
+        ):
+            response_text = (
+                f"Mình đang hỗ trợ bạn ở chế độ dự phòng cho môn {req.subject}. "
+                "Bạn tiếp tục hỏi ngắn gọn theo đúng nội dung buổi học, mình sẽ hướng dẫn từng bước ngay."
+            )
         
-        return {"reply": response}
+        return {"reply": response_text}
         
     except Exception as e:
         print(f"❌ LỖI API CHAT: {str(e)}")

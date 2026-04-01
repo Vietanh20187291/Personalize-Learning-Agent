@@ -75,7 +75,18 @@ export default function ExamGeneratorPage() {
       toast.success("Tạo và tải đề thi thành công!", { id: toastId });
     } catch (error) {
       console.error(error);
-      toast.error("Lỗi kết nối máy chủ hoặc AI sinh đề thất bại. Hãy chắc chắn Backend đang chạy.", { id: toastId });
+      if (axios.isAxiosError(error) && error.response?.data instanceof Blob) {
+        try {
+          const text = await error.response.data.text();
+          const payload = JSON.parse(text);
+          const detail = payload?.detail || "AI sinh đề thất bại. Vui lòng thử lại.";
+          toast.error(String(detail), { id: toastId });
+        } catch {
+          toast.error("Lỗi kết nối máy chủ hoặc AI sinh đề thất bại. Hãy chắc chắn Backend đang chạy.", { id: toastId });
+        }
+      } else {
+        toast.error("Lỗi kết nối máy chủ hoặc AI sinh đề thất bại. Hãy chắc chắn Backend đang chạy.", { id: toastId });
+      }
     } finally {
       setLoading(false);
     }

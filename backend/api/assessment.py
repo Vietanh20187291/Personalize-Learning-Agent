@@ -73,7 +73,9 @@ def generate_quiz(req: QuizRequest, db: Session = Depends(get_db)):
     # ==============================================================
     # CHẶN LÀM LẠI BÀI THI: Kiểm tra xem đã có Lộ trình học chưa
     # ==============================================================
-    existing_roadmap = db.query(LearningRoadmap).filter_by(user_id=req.user_id, subject=req.subject).first()
+    existing_roadmap = db.query(LearningRoadmap).filter_by(user_id=req.user_id, subject_id=target_class.subject_id).first()
+    if not existing_roadmap:
+        existing_roadmap = db.query(LearningRoadmap).filter_by(user_id=req.user_id, subject=req.subject).first()
     if existing_roadmap:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
@@ -171,11 +173,15 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
     if not req.answers:
         raise HTTPException(status_code=400, detail="Không có câu trả lời nào.")
 
+    subject_id = get_subject_id(req.subject, db)
+
     user_map = {a.question_id: a.selected_option for a in req.answers}
     question_ids = list(user_map.keys())
 
     # Lấy Profile cũ để bảo vệ Level nếu đây là bài thi qua buổi
-    profile = db.query(LearnerProfile).filter_by(subject=req.subject, user_id=req.user_id).first()
+    profile = db.query(LearnerProfile).filter_by(subject_id=subject_id, user_id=req.user_id).first()
+    if not profile:
+        profile = db.query(LearnerProfile).filter_by(subject=req.subject, user_id=req.user_id).first()
     old_level = profile.current_level if profile else "Beginner"
 
     
@@ -232,7 +238,9 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
     # ==============================================================
     # 4. ĐIỀU HƯỚNG VÀ THĂNG CẤP LỘ TRÌNH (RPG LEVEL UP)
     # ==============================================================
-    roadmap = db.query(LearningRoadmap).filter_by(user_id=req.user_id, subject=req.subject).first()
+    roadmap = db.query(LearningRoadmap).filter_by(user_id=req.user_id, subject_id=subject_id).first()
+    if not roadmap:
+        roadmap = db.query(LearningRoadmap).filter_by(user_id=req.user_id, subject=req.subject).first()
     is_passed = True
     msg = ""
     
@@ -241,7 +249,10 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
     target_class = next((c for c in getattr(user_obj, 'enrolled_classes', []) if c.subject == req.subject), None)
     allowed_filenames = []
     if target_class:
-        allowed_docs = db.query(Document).filter(Document.class_id == target_class.id, Document.subject == req.subject).all()
+        allowed_docs = db.query(Document).filter(
+            Document.class_id == target_class.id,
+            Document.subject_id == target_class.subject_id
+        ).all()
         allowed_filenames = [doc.filename for doc in allowed_docs]
 
     adaptive_agent = AdaptiveAgent(db)
@@ -307,6 +318,7 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
     final_test_type = "session" if req.is_session_quiz and req.test_type == "baseline" else req.test_type
 
     history = AssessmentHistory(
+        subject_id=subject_id,
         subject=req.subject,
         user_id=req.user_id, 
         score=score_percent,
@@ -359,7 +371,12 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
 # --- CÁC API TRUY VẤN LỊCH SỬ VÀ ROADMAP ---
 @router.get("/roadmap/{subject}")
 def get_learning_roadmap(subject: str, user_id: int, db: Session = Depends(get_db)):
-    roadmap = db.query(LearningRoadmap).filter_by(subject=subject, user_id=user_id).first()
+    subject_obj = db.query(Subject).filter(Subject.name.ilike(subject.strip())).first()
+    roadmap = None
+    if subject_obj:
+        roadmap = db.query(LearningRoadmap).filter_by(user_id=user_id, subject_id=subject_obj.id).first()
+    if not roadmap:
+        roadmap = db.query(LearningRoadmap).filter_by(subject=subject, user_id=user_id).first()
     if not roadmap:
         return {"has_roadmap": False}
         

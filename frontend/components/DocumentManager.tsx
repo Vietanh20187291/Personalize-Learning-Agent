@@ -11,6 +11,7 @@ interface Document {
   subject: string;
   upload_time: string;
   class_id?: number; 
+  is_visible_to_students?: boolean;
 }
 
 // 1. Khai báo Interface Props để nhận classId từ TeacherPage
@@ -24,6 +25,7 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
+  const [updatingVisibilityId, setUpdatingVisibilityId] = useState<number | null>(null);
 
   // 2. Lấy danh sách tài liệu (Có lọc theo class_id nếu có)
   const fetchDocuments = async () => {
@@ -96,6 +98,22 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
     }
   };
 
+  const handleToggleVisibility = async (doc: Document) => {
+    setUpdatingVisibilityId(doc.id);
+    try {
+      const nextValue = !doc.is_visible_to_students;
+      await axios.put(`http://localhost:8000/api/upload/documents/${doc.id}/visibility`, {
+        is_visible_to_students: nextValue,
+      });
+      setDocuments((prev) => prev.map((d) => (d.id === doc.id ? { ...d, is_visible_to_students: nextValue } : d)));
+      toast.success(nextValue ? 'Đã bật hiển thị cho sinh viên' : 'Đã ẩn tài liệu khỏi sinh viên');
+    } catch {
+      toast.error('Không thể cập nhật quyền hiển thị tài liệu.');
+    } finally {
+      setUpdatingVisibilityId(null);
+    }
+  };
+
   if (loading) return (
     <div className="flex flex-col items-center justify-center p-20 gap-4">
       <Loader2 className="w-10 h-10 animate-spin text-indigo-600" />
@@ -122,6 +140,7 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
               <th className="px-6 py-4">Tên tài liệu</th>
               <th className="px-6 py-4">Môn học</th>
               <th className="px-6 py-4">Ngày tải lên</th>
+              <th className="px-6 py-4">Hiển thị cho SV</th>
               <th className="px-6 py-4 text-right">Thao tác</th>
             </tr>
           </thead>
@@ -153,6 +172,20 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
                   <td className="px-6 py-4 text-slate-500 flex items-center gap-1.5 text-xs">
                     <Clock className="w-3.5 h-3.5" />
                     {new Date(doc.upload_time).toLocaleDateString('vi-VN')}
+                  </td>
+                  <td className="px-6 py-4">
+                    <button
+                      onClick={() => handleToggleVisibility(doc)}
+                      disabled={updatingVisibilityId === doc.id}
+                      className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border transition-all disabled:opacity-60 ${
+                        doc.is_visible_to_students
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                      title="Bật/tắt hiển thị cho sinh viên"
+                    >
+                      {doc.is_visible_to_students ? 'Đang hiển thị' : 'Đang ẩn'}
+                    </button>
                   </td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex justify-end gap-1">
@@ -198,7 +231,7 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
               ))
             ) : (
               <tr>
-                <td colSpan={4} className="px-6 py-16 text-center">
+                <td colSpan={5} className="px-6 py-16 text-center">
                   <div className="flex flex-col items-center gap-2">
                     <FileText className="w-12 h-12 text-slate-100" />
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-widest">

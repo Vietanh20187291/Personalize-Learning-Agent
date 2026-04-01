@@ -99,6 +99,17 @@ class Document(Base):
     uploader = relationship("User", back_populates="uploaded_docs")
     classroom = relationship("Classroom", back_populates="documents")
     subject_obj = relationship("Subject", back_populates="documents")
+    publication = relationship("DocumentPublication", back_populates="document", uselist=False, cascade="all, delete-orphan")
+
+
+class DocumentPublication(Base):
+    __tablename__ = "document_publications"
+
+    doc_id = Column(Integer, ForeignKey("documents.id"), primary_key=True)
+    is_visible_to_students = Column(Boolean, default=False, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    document = relationship("Document", back_populates="publication")
 
 # --- BẢNG LỘ TRÌNH HỌC TẬP TỔNG THỂ ---
 class LearningRoadmap(Base):

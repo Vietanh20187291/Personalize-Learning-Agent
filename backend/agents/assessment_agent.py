@@ -7,7 +7,7 @@ from sqlalchemy import func
 from groq import Groq
 from dotenv import load_dotenv
 from rag.vector_store import get_vector_store
-from db.models import QuestionBank, LearnerProfile
+from db.models import QuestionBank, LearnerProfile, Subject
 
 load_dotenv()
 
@@ -30,6 +30,122 @@ class AssessmentAgent:
         except Exception as e:
             self.db.rollback()
             print(f"Lỗi reset data: {e}")
+
+    def _resolve_subject_id(self, subject: str):
+        sub = self.db.query(Subject).filter(Subject.name == subject).first()
+        if sub:
+            return sub.id
+        # Backward compat: nếu chưa có subject record thì tạo mới.
+        sub = Subject(name=subject, description=f"Môn {subject}")
+        self.db.add(sub)
+        self.db.flush()
+        return sub.id
+
+    def _build_fallback_questions(self, subject: str, level: str, count: int, docs: list, source_file: str):
+        """Sinh câu hỏi dự phòng khi LLM lỗi (ví dụ invalid API key).
+        Mục tiêu: hệ thống luôn có bài để sinh viên làm, tránh dead-end UX.
+        """
+        if count <= 0 or not docs:
+            return 0
+
+        subject_id = self._resolve_subject_id(subject)
+        corpus_parts = []
+        for d in docs[:60]:
+            text = re.sub(r"\s+", " ", (d.page_content or "").strip())
+            if text:
+                corpus_parts.append(text)
+
+        corpus = " ".join(corpus_parts)
+        raw_sentences = re.split(r"(?<=[\.!\?;:])\s+", corpus)
+        base_sentences = []
+        for s in raw_sentences:
+            clean = re.sub(r"\s+", " ", s).strip()
+            if 40 <= len(clean) <= 220:
+                base_sentences.append(clean)
+
+        base_sentences = list(dict.fromkeys(base_sentences))
+        if not base_sentences:
+            return 0
+
+        stopwords = {
+            "trong", "được", "không", "những", "các", "với", "cho", "của", "một", "này", "khi", "và", "hoặc",
+            "the", "and", "for", "with", "that", "from", "this", "there", "have", "into", "about"
+        }
+
+        tokens = re.findall(r"[A-Za-zÀ-ỹ0-9_]{5,}", corpus)
+        term_bank = []
+        for t in tokens:
+            low = t.lower()
+            if low not in stopwords and not low.isdigit():
+                term_bank.append(t)
+        term_bank = list(dict.fromkeys(term_bank))
+
+        def make_similar_wrong(sentence: str):
+            words = re.findall(r"[A-Za-zÀ-ỹ0-9_]{5,}", sentence)
+            candidate = sentence
+            if words and term_bank:
+                original = words[min(len(words) - 1, 1)]
+                alternatives = [t for t in term_bank if t.lower() != original.lower()]
+                if alternatives:
+                    candidate = re.sub(re.escape(original), random.choice(alternatives), candidate, count=1)
+            if " không " not in f" {candidate.lower()} ":
+                candidate = candidate.replace(" là ", " không phải là ", 1) if " là " in candidate else "Không " + candidate[0].lower() + candidate[1:]
+            return candidate
+
+        inserted_count = 0
+        max_attempts = max(count * 5, 40)
+        attempt = 0
+
+        while inserted_count < count and attempt < max_attempts:
+            attempt += 1
+            idx = (attempt - 1) % len(base_sentences)
+            correct_fact = base_sentences[idx]
+            alt_fact = base_sentences[(idx + 1) % len(base_sentences)]
+
+            question_anchor = correct_fact[:90]
+            q_text = (
+                f"Dựa trên học liệu môn '{subject}', phương án nào phản ánh CHÍNH XÁC nhất nội dung đã học về ý: \"{question_anchor}\"?"
+            )
+
+            options_raw = [
+                correct_fact,
+                make_similar_wrong(correct_fact),
+                make_similar_wrong(alt_fact),
+                alt_fact[: min(len(alt_fact), 180)],
+            ]
+
+            # Cắt độ dài đáp án để tránh quá dài gây khó đọc.
+            options_raw = [re.sub(r"\s+", " ", o).strip()[:200] for o in options_raw]
+
+            # Trộn đáp án để tránh luôn đúng ở A.
+            labels = ["A", "B", "C", "D"]
+            idxs = [0, 1, 2, 3]
+            random.shuffle(idxs)
+            final_options = []
+            correct_label = "A"
+            for pos, raw_idx in enumerate(idxs):
+                final_options.append(f"{labels[pos]}. {options_raw[raw_idx]}")
+                if raw_idx == 0:
+                    correct_label = labels[pos]
+
+            if self.db.query(QuestionBank).filter(QuestionBank.content == q_text).first():
+                continue
+
+            db_q = QuestionBank(
+                subject_id=subject_id,
+                subject=subject,
+                difficulty=level,
+                content=q_text,
+                options=json.dumps(final_options, ensure_ascii=False),
+                correct_answer=correct_label,
+                explanation="Câu hỏi dự phòng được sinh từ chính học liệu đã upload, ưu tiên phương án đúng bám sát nội dung tài liệu.",
+                is_used=False,
+                source_file=source_file,
+            )
+            self.db.add(db_q)
+            inserted_count += 1
+
+        return inserted_count
 
     def get_or_create_quiz(self, subject: str, user_id: int, num_questions: int = 20, allowed_files: list = None):
         if not allowed_files:
@@ -104,6 +220,7 @@ class AssessmentAgent:
     def _generate_batch_safe(self, subject: str, level: str, count: int, allowed_files: list = None):
         if count <= 0: return True
         try:
+            subject_id = self._resolve_subject_id(subject)
             docs = self.vector_store.similarity_search(
                 f"Kiến thức trọng tâm, bài toán thực tế, code mẫu và ứng dụng môn {subject}", 
                 k=40, 
@@ -127,7 +244,8 @@ class AssessmentAgent:
                     if os.path.basename(d.metadata.get("source", "")) in allowed_files
                 ]
 
-            if not filtered_docs: return False
+            if not filtered_docs:
+                return False
             random.shuffle(filtered_docs)
             primary_source_file = os.path.basename(filtered_docs[0].metadata.get("source", "")) if filtered_docs[0].metadata.get("source", "") else "Unknown"
             
@@ -227,6 +345,7 @@ class AssessmentAgent:
 
                 if not self.db.query(QuestionBank).filter(QuestionBank.content == q_text).first():
                     db_q = QuestionBank(
+                        subject_id=subject_id,
                         subject=subject, 
                         difficulty=level, 
                         content=q_text,
@@ -239,11 +358,39 @@ class AssessmentAgent:
                     self.db.add(db_q)
                     inserted_count += 1
 
+            # Nếu LLM trả về không dùng được, tự sinh fallback để không bị kẹt luồng tạo đề.
+            if inserted_count == 0:
+                inserted_count = self._build_fallback_questions(subject, level, count, filtered_docs, primary_source_file)
+
             self.db.commit()
             return True
         except Exception as e:
             self.db.rollback()
             print(f"❌ Lỗi sinh batch câu hỏi (Nổ Token hoặc đứt gãy JSON): {e}")
+
+            # Fallback cuối: nếu dịch vụ AI lỗi (401/timeout), vẫn tạo bộ câu hỏi dự phòng từ học liệu.
+            try:
+                docs_for_fallback = self.vector_store.similarity_search(
+                    f"Nội dung học liệu môn {subject}",
+                    k=60,
+                )
+                if allowed_files:
+                    docs_for_fallback = [
+                        d for d in docs_for_fallback
+                        if os.path.basename(d.metadata.get("source", "")) in allowed_files
+                    ]
+
+                if docs_for_fallback:
+                    primary_source_file = os.path.basename(docs_for_fallback[0].metadata.get("source", "")) if docs_for_fallback[0].metadata.get("source", "") else "Unknown"
+                    inserted = self._build_fallback_questions(subject, level, count, docs_for_fallback, primary_source_file)
+                    if inserted > 0:
+                        self.db.commit()
+                        print(f"✅ Đã kích hoạt fallback và tạo {inserted} câu hỏi dự phòng cho môn {subject}.")
+                        return True
+            except Exception as fallback_err:
+                self.db.rollback()
+                print(f"❌ Fallback cũng thất bại: {fallback_err}")
+
             return False
 
     

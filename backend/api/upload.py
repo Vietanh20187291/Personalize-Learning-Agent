@@ -15,6 +15,10 @@ router = APIRouter()
 class DocumentUpdateRequest(BaseModel):
     title: str
 
+
+class DocumentVisibilityRequest(BaseModel):
+    is_visible_to_students: bool
+
 # --- HÀM PHỤ TRỢ ---
 def validate_file_extension(filename: str):
     # Keep this list in sync with ContentAgent._get_loader support.
@@ -97,6 +101,14 @@ async def upload_document(
                 class_id=class_id # <--- GẮN TÀI LIỆU VÀO LỚP CỤ THỂ
             )
             db.add(new_doc)
+            db.flush()
+
+            # Mặc định KHÔNG hiển thị cho sinh viên đến khi giáo viên bật.
+            publication = models.DocumentPublication(
+                doc_id=new_doc.id,
+                is_visible_to_students=False,
+            )
+            db.add(publication)
             db.commit()
             db.refresh(new_doc)
 
@@ -132,7 +144,26 @@ async def get_documents(teacher_id: Optional[int] = None, class_id: Optional[int
         query = query.filter(models.Document.teacher_id == teacher_id)
         
     docs = query.order_by(models.Document.upload_time.desc()).all()
-    return docs
+    doc_ids = [doc.id for doc in docs]
+    visibility_map = {}
+    if doc_ids:
+        rows = db.query(models.DocumentPublication).filter(models.DocumentPublication.doc_id.in_(doc_ids)).all()
+        visibility_map = {row.doc_id: row.is_visible_to_students for row in rows}
+
+    return [
+        {
+            "id": doc.id,
+            "title": doc.title,
+            "filename": doc.filename,
+            "subject": doc.subject,
+            "subject_id": doc.subject_id,
+            "upload_time": doc.upload_time,
+            "teacher_id": doc.teacher_id,
+            "class_id": doc.class_id,
+            "is_visible_to_students": visibility_map.get(doc.id, False),
+        }
+        for doc in docs
+    ]
 
 
 @router.put("/documents/{doc_id}")
@@ -152,6 +183,27 @@ async def update_document_metadata(doc_id: int, payload: DocumentUpdateRequest, 
         "message": "Cập nhật tài liệu thành công",
         "id": doc.id,
         "title": doc.title,
+    }
+
+
+@router.put("/documents/{doc_id}/visibility")
+async def update_document_visibility(doc_id: int, payload: DocumentVisibilityRequest, db: Session = Depends(get_db)):
+    doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài liệu.")
+
+    publication = db.query(models.DocumentPublication).filter(models.DocumentPublication.doc_id == doc_id).first()
+    if not publication:
+        publication = models.DocumentPublication(doc_id=doc_id)
+        db.add(publication)
+
+    publication.is_visible_to_students = payload.is_visible_to_students
+    db.commit()
+
+    return {
+        "message": "Cập nhật quyền hiển thị tài liệu thành công",
+        "id": doc_id,
+        "is_visible_to_students": publication.is_visible_to_students,
     }
 
 # --- API 4: XÓA TÀI LIỆU TRIỆT ĐỂ ---

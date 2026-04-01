@@ -11,7 +11,7 @@ export default function StudentLibraryPage() {
   const [documents, setDocuments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [enrolledSubjects, setEnrolledSubjects] = useState<string[]>([]);
-  const [selectedSubject, setSelectedSubject] = useState<string>("Tất cả");
+  const [selectedSubject, setSelectedSubject] = useState<string>("");
   const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
@@ -19,7 +19,12 @@ export default function StudentLibraryPage() {
   }, []);
 
   useEffect(() => {
-    fetchDocuments();
+    if (selectedSubject) {
+      fetchDocuments(selectedSubject);
+    } else {
+      setDocuments([]);
+      setLoading(false);
+    }
   }, [selectedSubject]);
 
   const getUserId = () => {
@@ -34,12 +39,15 @@ export default function StudentLibraryPage() {
       const classes = res.data.enrolled_classes || [];
       const subjects = Array.from(new Set(classes.map((c: any) => c.subject))) as string[];
       setEnrolledSubjects(subjects);
+      if (subjects.length > 0) {
+        setSelectedSubject(subjects[0]);
+      }
     } catch (error) {
       console.error("Lỗi lấy môn học:", error);
     }
   };
 
-  const fetchDocuments = async () => {
+  const fetchDocuments = async (subjectName: string) => {
     const userId = getUserId();
     if (!userId) {
         setLoading(false);
@@ -48,7 +56,7 @@ export default function StudentLibraryPage() {
     setLoading(true);
     try {
       const res = await axios.get(`http://localhost:8000/api/documents/student/${userId}`, {
-          params: { subject: selectedSubject !== "Tất cả" ? selectedSubject : undefined }
+          params: { subject: subjectName }
       });
       setDocuments(res.data || []);
     } catch (error) {
@@ -106,16 +114,9 @@ export default function StudentLibraryPage() {
                 className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium outline-none focus:border-indigo-500 transition-all text-slate-900 placeholder:text-slate-400"
               />
             </div>
-            <div className="relative w-full sm:w-48">
-              <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-              <select 
-                value={selectedSubject} 
-                onChange={(e) => setSelectedSubject(e.target.value)}
-                className="w-full pl-9 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-bold text-slate-700 outline-none focus:border-indigo-500 appearance-none cursor-pointer shadow-sm"
-              >
-                <option value="Tất cả">Tất cả môn học</option>
-                {enrolledSubjects.map(sub => <option key={sub} value={sub}>{sub}</option>)}
-              </select>
+            <div className="w-full sm:w-64 text-xs font-bold text-slate-500 flex items-center gap-2">
+              <Filter className="w-4 h-4" />
+              Chọn môn học bên dưới để xem tài liệu
             </div>
           </div>
         </div>
@@ -133,12 +134,42 @@ export default function StudentLibraryPage() {
             <p className="text-sm text-slate-500 max-w-md text-center mb-6">Bạn cần nhập mã lớp học để mở khóa tài liệu từ giáo viên.</p>
             <button onClick={() => window.location.href = '/adaptive'} className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold uppercase text-xs shadow-md hover:bg-indigo-700 transition-all">Tham gia lớp ngay</button>
           </div>
-        ) : filteredDocs.length === 0 ? (
-          <div className="text-center py-20 bg-white rounded-3xl border border-slate-200 shadow-sm">
-            <FileText className="w-16 h-16 text-slate-200 mx-auto mb-4" />
-            <p className="text-slate-500 font-bold">Không tìm thấy tài liệu nào khớp với yêu cầu.</p>
-          </div>
         ) : (
+          <>
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 mb-5">
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-3">Danh sách môn học</p>
+              <div className="flex flex-wrap gap-2">
+                {enrolledSubjects.map((sub) => (
+                  <button
+                    key={sub}
+                    onClick={() => setSelectedSubject(sub)}
+                    className={`px-3 py-2 rounded-xl text-xs font-black uppercase tracking-wide border transition-all ${
+                      selectedSubject === sub
+                        ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                        : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    {sub}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {!selectedSubject ? (
+              <div className="text-center py-20 bg-white rounded-3xl border border-slate-200 shadow-sm">
+                <FileText className="w-16 h-16 text-slate-200 mx-auto mb-4" />
+                <p className="text-slate-500 font-bold">Hãy chọn môn học để xem tài liệu.</p>
+              </div>
+            ) : filteredDocs.length === 0 ? (
+              <div className="text-center py-20 bg-white rounded-3xl border border-slate-200 shadow-sm">
+                <FileText className="w-16 h-16 text-slate-200 mx-auto mb-4" />
+                <p className="text-slate-500 font-bold">Môn {selectedSubject} hiện chưa có tài liệu được phép hiển thị.</p>
+              </div>
+            ) : (
+              <></>
+            )}
+
+            {selectedSubject && filteredDocs.length > 0 && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 animate-in fade-in zoom-in duration-500">
             {filteredDocs.map((doc) => (
               <div key={doc.id} className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:border-indigo-300 hover:shadow-md transition-all group flex flex-col h-full">
@@ -167,6 +198,8 @@ export default function StudentLibraryPage() {
               </div>
             ))}
           </div>
+            )}
+          </>
         )}
       </div>
     </div>
