@@ -20,3 +20,11 @@ frontend/.next/
 frontend/dist/
 frontend/out/
 
+# --- Local debug/temp scripts ---
+debug_prompt*.py
+replace_prompt*.py
+
+# --- Local install logs ---
+backend/*.log
+backend/*.status
+
