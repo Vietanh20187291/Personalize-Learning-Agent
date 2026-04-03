@@ -496,78 +496,175 @@ class AssessmentAgent:
         subject = self._clean_text(subject)
         bloom_level = (bloom_level or "understand").lower()
 
-        templates = {
-            "remember": [
-                "Khái niệm nào sau đây phù hợp nhất với '{concept}'?",
-                "Phát biểu nào mô tả đúng nhất về '{concept}'?",
-            ],
-            "understand": [
-                "Trong môn '{subject}', '{concept}' được hiểu như thế nào?",
-                "Mục tiêu chính của khái niệm '{concept}' là gì?",
-            ],
-            "apply": [
-                "Trong tình huống thực tế của môn '{subject}', khái niệm '{concept}' được áp dụng như thế nào?",
-                "Khi giải quyết một bài toán của môn '{subject}', cách sử dụng đúng của '{concept}' là gì?",
-            ],
-            "analyze": [
-                "Điểm nào sau đây phân biệt đúng nhất '{concept}' với các khái niệm gần nghĩa trong môn '{subject}'?",
-                "Yếu tố nào cho thấy '{concept}' đang được áp dụng đúng trong bối cảnh môn '{subject}'?",
-            ],
+        llm_q = self._generate_mcq_with_llm(concept, subject, bloom_level)
+        if llm_q:
+            return llm_q
+
+        return self._generate_mcq_fallback(concept, subject, bloom_level)
+
+    def _generate_mcq_with_llm(self, concept: str, subject: str, bloom_level: str):
+        system_prompt = (
+            "Bạn là chuyên gia thiết kế câu hỏi trắc nghiệm đại học. "
+            "Bắt buộc tạo 1 câu hỏi chất lượng cao kiểm tra hiểu biết thực sự, không dùng diễn đạt mơ hồ. "
+            "Cấm dùng các cụm như: 'khái niệm này', 'nội dung này', 'quan trọng', 'cốt lõi', 'nền tảng', 'thiết yếu'. "
+            "Các phương án phải cùng kiểu nội dung, độ dài gần tương đương, khác nghĩa rõ ràng, và chỉ có 1 đáp án đúng."
+        )
+
+        prompt = f"""
+Sinh 1 câu hỏi MCQ cho môn "{subject}", concept "{concept}", bloom_level "{bloom_level}".
+
+Yêu cầu bắt buộc:
+1) Câu hỏi phải cụ thể, có nội dung học thuật, kiểm tra hiểu biết thật.
+2) Có đúng 4 lựa chọn.
+3) Mỗi lựa chọn là một ý riêng biệt, không được chỉ đổi từ đồng nghĩa.
+4) Nhiễu phải là hiểu sai phổ biến hoặc áp dụng sai nhưng hợp lý.
+5) Không chứa nội dung hành chính, meta, hoặc diễn đạt chung chung.
+
+Trả về JSON đúng schema:
+{{
+  "question": "...",
+  "options": ["...", "...", "...", "..."],
+  "correct_index": 0,
+  "explanation": "..."
+}}
+""".strip()
+
+        for _ in range(3):
+            try:
+                data = self._chat_json(prompt, system_prompt, temperature=0.2, max_tokens=900)
+            except Exception:
+                continue
+
+            question = self._clean_text(str(data.get("question", "")))
+            options = data.get("options", [])
+            if not isinstance(options, list):
+                continue
+
+            options = [self._clean_text(str(o)) for o in options[:4]]
+            if len(options) != 4:
+                continue
+
+            try:
+                correct_index = int(data.get("correct_index", -1))
+            except Exception:
+                correct_index = -1
+            if correct_index < 0 or correct_index > 3:
+                continue
+
+            explanation = self._clean_text(str(data.get("explanation", f"Khái niệm trọng tâm: {concept}.")))
+
+            labels = ["A", "B", "C", "D"]
+            final_options = [f"{labels[i]}. {options[i]}" for i in range(4)]
+            q = {
+                "question": question,
+                "options": final_options,
+                "correct_answer": labels[correct_index],
+                "bloom_level": bloom_level,
+                "explanation": explanation,
+            }
+
+            if self.validate_question(q):
+                return q
+
+        return None
+
+    def _generate_mcq_fallback(self, concept: str, subject: str, bloom_level: str):
+        concept_low = self._clean_text(concept).lower()
+        bloom_level = (bloom_level or "understand").lower()
+        mappings = [
+            (
+                ["tiến trình", "process"],
+                "tiến trình",
+                [
+                    "Tiến trình là chương trình đang thực thi, có không gian địa chỉ và trạng thái riêng.",
+                    "Tiến trình là vùng đệm I/O dùng chung cho mọi chương trình trong hệ điều hành.",
+                    "Tiến trình là giao thức mạng dùng để đồng bộ dữ liệu giữa các máy tính.",
+                    "Tiến trình là bảng ánh xạ tĩnh giữa địa chỉ logic và địa chỉ vật lý.",
+                ],
+                0,
+            ),
+            (
+                ["deadlock", "bế tắc"],
+                "bế tắc",
+                [
+                    "Các tiến trình giữ tài nguyên và chờ tài nguyên khác theo vòng phụ thuộc khép kín.",
+                    "Bộ lập lịch ưu tiên tiến trình có thời gian CPU ngắn nhất trong mọi chu kỳ.",
+                    "Hệ thống tăng kích thước bộ nhớ đệm để giảm số lần truy cập đĩa.",
+                    "Tiến trình giải phóng toàn bộ tài nguyên ngay khi vào trạng thái chờ I/O.",
+                ],
+                0,
+            ),
+            (
+                ["lập lịch", "cpu scheduling"],
+                "lập lịch CPU",
+                [
+                    "Tối ưu thông lượng và thời gian đáp ứng bằng cách phân phối CPU hợp lý giữa tiến trình.",
+                    "Loại bỏ hoàn toàn ngắt phần cứng để CPU chạy liên tục một tiến trình duy nhất.",
+                    "Biến mọi truy cập bộ nhớ ảo thành truy cập trực tiếp đến đĩa cứng.",
+                    "Ép mọi tiến trình dùng cùng một mức ưu tiên để tránh chuyển ngữ cảnh.",
+                ],
+                0,
+            ),
+        ]
+
+        selected = None
+        for keys, topic, opts, correct_idx in mappings:
+            if any(k in concept_low for k in keys):
+                selected = (topic, opts, correct_idx)
+                break
+
+        stem_by_bloom = {
+            "remember": "Phát biểu nào mô tả đúng nhất về {topic} trong {subject}?",
+            "understand": "Nhận định nào phản ánh đúng bản chất học thuật của {topic} trong {subject}?",
+            "apply": "Trong tình huống thực hành, lựa chọn nào áp dụng đúng {topic} của {subject}?",
+            "analyze": "Lựa chọn nào phân tích đúng cơ chế vận hành của {topic} trong {subject}?",
         }
+        stem = stem_by_bloom.get(bloom_level, stem_by_bloom["understand"])
 
-        question = random.choice(templates.get(bloom_level, templates["understand"]))
-        question = question.format(concept=concept, subject=subject)
+        if not selected:
+            topic = concept
+            q_text = stem.format(topic=topic, subject=subject)
+            opts = [
+                f"{concept} mô tả một nguyên tắc hoặc cơ chế kỹ thuật dùng để giải quyết bài toán trọng tâm của {subject}.",
+                f"{concept} là giao thức tầng vận chuyển, chỉ xử lý truyền dữ liệu giữa các máy tính trong mạng diện rộng.",
+                f"{concept} là thành phần phần cứng chuyên dụng, tự vận hành hệ thống mà không cần cơ chế quản lý phần mềm.",
+                f"{concept} là kỹ thuật mã hóa khóa công khai, mục tiêu chính là xác thực người dùng và bảo mật truyền tin.",
+            ]
+            correct_idx = 0
+        else:
+            topic, opts, correct_idx = selected
+            q_text = stem.format(topic=topic, subject=subject)
 
-        correct = self._build_correct_answer(concept, subject, bloom_level)
-        distractors = self._build_distractors(concept, subject, bloom_level)
-
-        options_raw = [correct] + distractors[:3]
-        if len(options_raw) < 4:
-            options_raw.extend([f"Nội dung khác liên quan đến {subject}"] * (4 - len(options_raw)))
-
-        order = [0, 1, 2, 3]
-        random.shuffle(order)
         labels = ["A", "B", "C", "D"]
-        final_options = []
-        correct_label = "A"
-
-        for pos, idx in enumerate(order):
-            final_options.append(f"{labels[pos]}. {options_raw[idx]}")
-            if idx == 0:
-                correct_label = labels[pos]
-
         q = {
-            "question": question,
-            "options": final_options,
-            "correct_answer": correct_label,
+            "question": self._clean_text(q_text),
+            "options": [f"{labels[i]}. {self._clean_text(opts[i])}" for i in range(4)],
+            "correct_answer": labels[correct_idx],
             "bloom_level": bloom_level,
-            "explanation": f"Khái niệm trọng tâm: '{concept}'.",
+            "explanation": f"Phương án đúng phản ánh chính xác nội hàm học thuật của '{concept}'.",
         }
         return q
 
-    def _build_correct_answer(self, concept: str, subject: str, bloom_level: str):
-        concept = self._clean_text(concept)
-        subject = self._clean_text(subject)
-        if bloom_level == "remember":
-            return f"{concept} là khái niệm cốt lõi trong môn {subject}."
-        if bloom_level == "apply":
-            return f"{concept} được dùng để xử lý tình huống thực tế của môn {subject}."
-        if bloom_level == "analyze":
-            return f"{concept} giúp phân tích cách hệ thống hoặc quá trình vận hành trong môn {subject}."
-        return f"{concept} là nội dung giúp hiểu đúng các nguyên lý của môn {subject}."
-
-    def _build_distractors(self, concept: str, subject: str, bloom_level: str):
-        subject = self._clean_text(subject)
-        concept = self._clean_text(concept)
-        base = [
-            f"Khái niệm này chỉ mang tính minh họa phụ và không quyết định bản chất của {subject}.",
-            f"Nội dung này chủ yếu liên quan đến thủ tục hành chính thay vì kiến thức chuyên môn của {subject}.",
-            f"Ý nghĩa của nội dung này thiên về mô tả bề mặt, không hỗ trợ xử lý vấn đề cốt lõi trong {subject}.",
-            f"Phát biểu này nhấn mạnh thông tin phụ trợ hơn là nguyên lý vận hành chính trong {subject}.",
+    def _is_option_too_generic(self, text: str):
+        low = self._clean_text(text).lower()
+        banned_fragments = [
+            "khái niệm này",
+            "nội dung này",
+            "thông tin này",
+            "quan trọng",
+            "cốt lõi",
+            "nền tảng",
+            "thiết yếu",
         ]
-        if bloom_level == "analyze":
-            base[1] = f"Phát biểu này chỉ phản ánh bề mặt của vấn đề và không cho thấy quan hệ cấu trúc bên trong."
-        return base
+        return any(p in low for p in banned_fragments)
+
+    def _option_fingerprint(self, text: str):
+        low = self._clean_text(text).lower()
+        low = re.sub(r"\b(quan trọng|cốt lõi|nền tảng|thiết yếu)\b", "core", low)
+        low = re.sub(r"\b(khái niệm|nội dung|thông tin)\b", "item", low)
+        tokens = re.findall(r"[a-zà-ỹ0-9]{3,}", low)
+        stop = {"trong", "của", "và", "được", "một", "những", "các", "cho", "với", "the", "that", "this"}
+        return {t for t in tokens if t not in stop}
 
     def validate_question(self, q):
         question = self._clean_text(q.get("question", ""))
@@ -586,6 +683,8 @@ class AssessmentAgent:
         for opt in options:
             opt_clean = self._clean_text(re.sub(r'^[A-D][\.)]\s*', '', str(opt)))
             if len(opt_clean) < 10:
+                return False
+            if self._is_option_too_generic(opt_clean):
                 return False
             low = opt_clean.lower()
             if any(p in low for p in forbidden_phrases):
@@ -607,6 +706,20 @@ class AssessmentAgent:
                 union = token_sets[i].union(token_sets[j])
                 if union and len(token_sets[i].intersection(token_sets[j])) / len(union) > 0.85:
                     return False
+
+        # Reject nếu các lựa chọn gần như cùng ý nghĩa (chỉ đổi từ đồng nghĩa/đảo cú pháp).
+        fp_sets = [self._option_fingerprint(o) for o in cleaned_opts]
+        for i in range(len(fp_sets)):
+            for j in range(i + 1, len(fp_sets)):
+                union = fp_sets[i].union(fp_sets[j])
+                if union and len(fp_sets[i].intersection(fp_sets[j])) / len(union) > 0.75:
+                    return False
+
+        lengths = [len(o) for o in cleaned_opts]
+        if min(lengths) == 0:
+            return False
+        if max(lengths) / min(lengths) > 2.2:
+            return False
 
         return True
 
@@ -645,9 +758,13 @@ class AssessmentAgent:
         if not unique_concepts:
             return []
 
-        for index in range(count):
-            concept = unique_concepts[index % len(unique_concepts)]
-            bloom_level = bloom_targets[index % len(bloom_targets)]
+        attempts = 0
+        max_attempts = max(count * 8, 40)
+        while len(questions) < count and attempts < max_attempts:
+            concept = unique_concepts[attempts % len(unique_concepts)]
+            bloom_level = bloom_targets[attempts % len(bloom_targets)]
+            attempts += 1
+
             q = self.generate_question(concept, subject, bloom_level=bloom_level)
             if not self.validate_question(q):
                 continue
