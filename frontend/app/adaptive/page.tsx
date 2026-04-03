@@ -6,32 +6,88 @@ import ReactMarkdown from 'react-markdown';
 import {
   Send,
   Bot,
-  Map,
   MessageSquare,
-  GraduationCap,
   UserPlus,
   Loader2,
   CheckCircle2,
-  Lock,
   PlayCircle,
-  Download,
   BookOpen,
+  FileText,
+  Presentation,
+  ExternalLink,
 } from 'lucide-react';
 
+interface EnrolledClass {
+  id: number;
+  name: string;
+  subject: string;
+  teacher_name: string;
+}
+
+interface LessonItem {
+  session: number;
+  topic: string;
+  description: string;
+}
+
+interface StudentDoc {
+  id: number;
+  filename: string;
+  subject: string;
+  class_id: number;
+}
+
+interface PreviewSegment {
+  title: string;
+  content: string;
+}
+
+interface InlineQuizQuestion {
+  id: number;
+  content: string;
+  options: string[];
+}
+
+interface InlineQuizResult {
+  score: number;
+  correct_count: number;
+  total_questions: number;
+  message: string;
+  is_passed: boolean;
+  chapter_feedback?: {
+    weak_topics?: string[];
+  };
+}
+
 export default function AdaptiveLearningPage() {
-  const [enrolledClasses, setEnrolledClasses] = useState<any[]>([]);
+  const [enrolledClasses, setEnrolledClasses] = useState<EnrolledClass[]>([]);
   const [selectedSubject, setSelectedSubject] = useState('');
 
-  const [roadmap, setRoadmap] = useState<any[]>([]);
-  const [loadingRoadmap, setLoadingRoadmap] = useState(false);
+  const [roadmap, setRoadmap] = useState<LessonItem[]>([]);
+  const [loadingContext, setLoadingContext] = useState(false);
   const [currentSessionIndex, setCurrentSessionIndex] = useState(1);
   const [learnerLevel, setLearnerLevel] = useState('BEGINNER');
-  const [isCompleted, setIsCompleted] = useState(false);
+  const [documents, setDocuments] = useState<StudentDoc[]>([]);
+  const [activeDocumentId, setActiveDocumentId] = useState<number | null>(null);
 
   const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
   const [input, setInput] = useState('');
   const [loadingChat, setLoadingChat] = useState(false);
   const [activeLessonContext, setActiveLessonContext] = useState<string>('');
+  const [activeLessonNumber, setActiveLessonNumber] = useState<number>(0);
+  const [activeLessonTopic, setActiveLessonTopic] = useState<string>('');
+  const [chapterSummary, setChapterSummary] = useState<string>('');
+  const [suggestedPrompts, setSuggestedPrompts] = useState<string[]>([]);
+  const [previewSegments, setPreviewSegments] = useState<PreviewSegment[]>([]);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [loadingSummary, setLoadingSummary] = useState(false);
+  const [quizMode, setQuizMode] = useState(false);
+  const [quizLoading, setQuizLoading] = useState(false);
+  const [quizSubmitting, setQuizSubmitting] = useState(false);
+  const [quizQuestions, setQuizQuestions] = useState<InlineQuizQuestion[]>([]);
+  const [quizAnswers, setQuizAnswers] = useState<Record<number, string>>({});
+  const [quizIndex, setQuizIndex] = useState(0);
+  const [quizResult, setQuizResult] = useState<InlineQuizResult | null>(null);
 
   const [userId, setUserId] = useState<number | null>(null);
   const [classCode, setClassCode] = useState('');
@@ -75,42 +131,135 @@ export default function AdaptiveLearningPage() {
     };
   }, [selectedSubject]);
 
-  const autoLoadRoadmap = async (uid: number, subj: string, autoStart = false, isManualClick = false) => {
+  const getFileExt = (filename: string) => {
+    const parts = filename.split('.');
+    return parts.length > 1 ? parts.pop()!.toLowerCase() : '';
+  };
+
+  const getActiveDocument = () => documents.find((d) => d.id === activeDocumentId) || null;
+
+  const getLessonByIndex = (idx: number) => {
+    const fallback = idx + 1;
+    return roadmap.find((item) => item.session === fallback) || null;
+  };
+
+  const loadDocumentPreview = async (docId: number) => {
+    setLoadingPreview(true);
+    try {
+      const res = await axios.get(`http://localhost:8000/api/documents/preview/${docId}`);
+      setPreviewSegments((res.data?.segments || []) as PreviewSegment[]);
+    } catch {
+      setPreviewSegments([]);
+    } finally {
+      setLoadingPreview(false);
+    }
+  };
+
+  const loadMaterialSummary = async (subject: string, sourceFile: string, topic: string) => {
+    if (!userIdRef.current || !subject) return;
+    setLoadingSummary(true);
+    try {
+      const res = await axios.post('http://localhost:8000/api/adaptive/material-summary', {
+        user_id: userIdRef.current,
+        subject,
+        source_file: sourceFile,
+        session_topic: topic,
+      });
+
+      const aiSummary = String(res.data?.summary || '').trim();
+      const aiPrompts = Array.isArray(res.data?.suggested_prompts) ? res.data.suggested_prompts : [];
+      if (aiSummary) {
+        setChapterSummary(aiSummary);
+      }
+      if (aiPrompts.length > 0) {
+        setSuggestedPrompts(aiPrompts.slice(0, 4));
+      }
+    } catch {
+      // fallback summary vẫn hiển thị
+    } finally {
+      setLoadingSummary(false);
+    }
+  };
+
+  const activateDocumentContext = (doc: StudentDoc, lesson: LessonItem | null, autoAsk = false) => {
+    const lessonNo = lesson?.session || 0;
+    const topic = lesson?.topic || doc.filename.replace(/\.[^/.]+$/, '');
+    const desc = lesson?.description || `Nội dung tài liệu ${doc.filename}`;
+    const context = `BUỔI ${lessonNo || '?'}: ${topic} - Mô tả: ${desc}`;
+    const baseSummary = `Bạn đang học từ tài liệu: ${doc.filename}. Chủ đề hiện tại: ${topic}. Trọng tâm: ${desc}`;
+
+    setActiveDocumentId(doc.id);
+    setActiveLessonNumber(lessonNo);
+    setActiveLessonTopic(topic);
+    setActiveLessonContext(context);
+    setChapterSummary(baseSummary);
+    setSuggestedPrompts([
+      `Tóm tắt ngắn nội dung chính của tài liệu ${doc.filename}`,
+      `Nêu 3 ý quan trọng nhất trong phần ${topic}`,
+      `Đặt 3 câu hỏi tự kiểm tra theo nội dung ${topic}`,
+    ]);
+    setMessages([{ role: 'assistant', content: `**Tóm tắt kiến thức bài đang học**\n${baseSummary}` }]);
+
+    void loadDocumentPreview(doc.id);
+    void loadMaterialSummary(selectedSubject, doc.filename, topic);
+
+    if (autoAsk) {
+      setTriggerInitialMessage(true);
+    }
+  };
+
+  const autoLoadLearningContext = async (
+    uid: number,
+    subj: string,
+    autoStart = false,
+    isManualClick = false,
+    classesSnapshot?: EnrolledClass[]
+  ) => {
     if (!subj) {
       if (isManualClick) toast.error('Vui lòng chọn môn học!');
       return;
     }
 
-    setLoadingRoadmap(true);
+    setLoadingContext(true);
     setRoadmap([]);
+    setDocuments([]);
+    setActiveDocumentId(null);
     setMessages([]);
     setActiveLessonContext('');
+    setActiveLessonNumber(0);
+    setActiveLessonTopic('');
+    setChapterSummary('');
+    setSuggestedPrompts([]);
+    setPreviewSegments([]);
+    setQuizMode(false);
+    setQuizLoading(false);
+    setQuizSubmitting(false);
+    setQuizQuestions([]);
+    setQuizAnswers({});
+    setQuizIndex(0);
+    setQuizResult(null);
 
     try {
       const res = await axios.get(`http://localhost:8000/api/assessment/roadmap/${subj}?user_id=${uid}`);
+      let loadedRoadmap: LessonItem[] = [];
+      let currentSess = 1;
+
       if (res.data?.has_roadmap) {
-        const loadedRoadmap = res.data.roadmap_data || [];
-        const currentSess = res.data.current_session || 1;
+        loadedRoadmap = res.data.roadmap_data || [];
+        currentSess = res.data.current_session || 1;
         setRoadmap(loadedRoadmap);
         setCurrentSessionIndex(currentSess);
         setLearnerLevel((res.data.level_assigned || 'Beginner').toUpperCase());
-        setIsCompleted(!!res.data.is_completed);
-
-        if (autoStart && loadedRoadmap.length > 0) {
-          const lesson = loadedRoadmap.find((l: any) => l.session === currentSess) || loadedRoadmap[0];
-          setTimeout(() => handleStartTutor(lesson), 300);
-        }
       } else {
         try {
           await axios.get(`http://localhost:8000/api/adaptive/recommend/${encodeURIComponent(subj)}?user_id=${uid}`);
           const refresh = await axios.get(`http://localhost:8000/api/assessment/roadmap/${encodeURIComponent(subj)}?user_id=${uid}`);
           if (refresh.data?.has_roadmap) {
-            const loadedRoadmap = refresh.data.roadmap_data || [];
-            const currentSess = refresh.data.current_session || 1;
+            loadedRoadmap = refresh.data.roadmap_data || [];
+            currentSess = refresh.data.current_session || 1;
             setRoadmap(loadedRoadmap);
             setCurrentSessionIndex(currentSess);
             setLearnerLevel((refresh.data.level_assigned || 'Beginner').toUpperCase());
-            setIsCompleted(!!refresh.data.is_completed);
             toast.success('Đã tự động tạo lộ trình học cho bạn.');
           } else if (isManualClick) {
             toast.error('Bạn chưa làm bài test đánh giá năng lực môn này.');
@@ -119,10 +268,24 @@ export default function AdaptiveLearningPage() {
           if (isManualClick) toast.error('Chưa thể tạo lộ trình tự động. Vui lòng thử lại sau ít phút.');
         }
       }
+
+      const docRes = await axios.get(`http://localhost:8000/api/documents/student/${uid}`);
+      const rawDocs: StudentDoc[] = docRes.data || [];
+      const classesToUse = classesSnapshot || enrolledClasses;
+      const classIds = classesToUse.filter((c) => c.subject === subj).map((c) => c.id);
+      const docs = rawDocs.filter((d) => classIds.includes(d.class_id));
+      setDocuments(docs);
+
+      if (docs.length > 0) {
+        const targetIdx = Math.max(0, Math.min((currentSess || 1) - 1, docs.length - 1));
+        const targetDoc = docs[targetIdx];
+        const lesson = loadedRoadmap.find((l) => l.session === currentSess) || getLessonByIndex(targetIdx);
+        activateDocumentContext(targetDoc, lesson, autoStart);
+      }
     } catch {
-      if (isManualClick) toast.error('Lỗi khi tải chương trình học.');
+      if (isManualClick) toast.error('Lỗi khi tải dữ liệu học tập.');
     } finally {
-      setLoadingRoadmap(false);
+      setLoadingContext(false);
     }
   };
 
@@ -136,7 +299,7 @@ export default function AdaptiveLearningPage() {
 
       try {
         const res = await axios.get(`http://localhost:8000/api/auth/me/${uid}`);
-        const classes = res.data.enrolled_classes || [];
+        const classes: EnrolledClass[] = res.data.enrolled_classes || [];
         setEnrolledClasses(classes);
 
         let targetSubject = classes.length > 0 ? classes[0].subject : '';
@@ -144,13 +307,13 @@ export default function AdaptiveLearningPage() {
         const urlSubject = params.get('subject');
         const autoStart = params.get('auto_start') === 'true';
 
-        if (urlSubject && classes.find((c: any) => c.subject === urlSubject)) {
+        if (urlSubject && classes.find((c) => c.subject === urlSubject)) {
           targetSubject = urlSubject;
         }
 
         if (targetSubject) {
           setSelectedSubject(targetSubject);
-          autoLoadRoadmap(uid, targetSubject, autoStart, false);
+          autoLoadLearningContext(uid, targetSubject, autoStart, false, classes);
         }
       } catch {
         toast.error('Không thể lấy thông tin học sinh.');
@@ -165,7 +328,7 @@ export default function AdaptiveLearningPage() {
       toast.error('Vui lòng đăng nhập lại!');
       return;
     }
-    autoLoadRoadmap(userId, selectedSubject, false, true);
+    autoLoadLearningContext(userId, selectedSubject, false, true);
   };
 
   useEffect(() => {
@@ -183,25 +346,26 @@ export default function AdaptiveLearningPage() {
 
       toast.success(joinRes.data.message || 'Tham gia lớp học thành công!');
       const meRes = await axios.get(`http://localhost:8000/api/auth/me/${userId}`);
-      const updatedClasses = meRes.data.enrolled_classes || [];
+      const updatedClasses: EnrolledClass[] = meRes.data.enrolled_classes || [];
       setEnrolledClasses(updatedClasses);
 
       const joinedSubject = joinRes.data.subject;
       setSelectedSubject(joinedSubject);
-      autoLoadRoadmap(userId, joinedSubject, false, false);
+      autoLoadLearningContext(userId, joinedSubject, false, false, updatedClasses);
       setClassCode('');
-    } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Mã lớp không hợp lệ');
+    } catch (e: unknown) {
+      const message = axios.isAxiosError(e)
+        ? (e.response?.data?.detail as string) || 'Mã lớp không hợp lệ'
+        : 'Mã lớp không hợp lệ';
+      toast.error(message);
     } finally {
       setJoining(false);
     }
   };
 
-  const handleStartTutor = (lesson: any) => {
-    const context = `BUỔI ${lesson.session}: ${lesson.topic} - Mô tả: ${lesson.description}`;
-    setActiveLessonContext(context);
-    setMessages([{ role: 'user', content: 'Chào AI, hãy bắt đầu bài học hôm nay nhé.' }]);
-    setTriggerInitialMessage(true);
+  const handleSwitchDocument = (doc: StudentDoc, idx: number) => {
+    const lesson = getLessonByIndex(idx);
+    activateDocumentContext(doc, lesson, true);
   };
 
   useEffect(() => {
@@ -210,11 +374,133 @@ export default function AdaptiveLearningPage() {
     setTriggerInitialMessage(false);
   }, [triggerInitialMessage, activeLessonContext]);
 
-  const handleTakeTest = (lesson: any) => {
-    toast.success(`Đang chuyển sang bài kiểm tra Buổi ${lesson.session}...`);
-    setTimeout(() => {
-      window.location.href = `/assessment?subject=${encodeURIComponent(selectedSubject)}&topic=${encodeURIComponent(lesson.topic)}&level=${encodeURIComponent(learnerLevel)}`;
-    }, 1000);
+  const handleTakeTest = () => {
+    void startInlineQuiz();
+  };
+
+  const startInlineQuiz = async () => {
+    const activeDoc = getActiveDocument();
+    const currentUserId = userIdRef.current;
+    if (!activeDoc || !currentUserId) {
+      toast.error('Bạn chưa chọn tài liệu để kiểm tra.');
+      return;
+    }
+
+    const topic = activeLessonTopic || activeDoc.filename;
+    setQuizLoading(true);
+    setQuizResult(null);
+    setQuizAnswers({});
+    setQuizQuestions([]);
+    setQuizIndex(0);
+
+    try {
+      const res = await axios.post('http://localhost:8000/api/assessment/generate-session', {
+        subject: selectedSubject,
+        user_id: currentUserId,
+        session_topic: topic,
+        level: learnerLevel,
+        source_file: activeDoc.filename,
+      });
+
+      const questions = (res.data?.questions || []) as InlineQuizQuestion[];
+      if (!questions.length) {
+        toast.error('Hệ thống chưa sinh được đề. Vui lòng thử lại.');
+        return;
+      }
+
+      setQuizQuestions(questions);
+      setQuizMode(true);
+      toast.success('Đã sinh đề trắc nghiệm theo tài liệu hiện tại.');
+    } catch (e: unknown) {
+      const message = axios.isAxiosError(e)
+        ? (e.response?.data?.detail as string) || 'Lỗi hệ thống khi sinh đề trắc nghiệm.'
+        : 'Lỗi hệ thống khi sinh đề trắc nghiệm.';
+      toast.error(message);
+    } finally {
+      setQuizLoading(false);
+    }
+  };
+
+  const normalizeOptionLabel = (option: string, index: number) => {
+    const match = String(option || '').trim().match(/^([A-D])[\.\:\-\)]/i);
+    if (match) return match[1].toUpperCase();
+    return ['A', 'B', 'C', 'D'][index] || 'A';
+  };
+
+  const submitInlineQuiz = async () => {
+    const activeDoc = getActiveDocument();
+    const currentUserId = userIdRef.current;
+    if (!activeDoc || !currentUserId) return;
+    if (!quizQuestions.length) return;
+
+    const missing = quizQuestions.filter((q) => !quizAnswers[q.id]);
+    if (missing.length > 0) {
+      toast.error('Bạn cần trả lời hết câu hỏi trước khi nộp bài.');
+      return;
+    }
+
+    setQuizSubmitting(true);
+    try {
+      const res = await axios.post('http://localhost:8000/api/assessment/submit', {
+        subject: selectedSubject,
+        user_id: currentUserId,
+        answers: quizQuestions.map((q) => ({
+          question_id: q.id,
+          selected_option: quizAnswers[q.id],
+        })),
+        duration_seconds: 0,
+        is_session_quiz: true,
+        test_type: 'chapter',
+        session_topic: activeLessonTopic || activeDoc.filename,
+        session_number: activeLessonNumber || currentSessionIndex || 1,
+        source_file: activeDoc.filename,
+      });
+
+      setQuizResult(res.data);
+      const refresh = await axios.get(`http://localhost:8000/api/assessment/roadmap/${encodeURIComponent(selectedSubject)}?user_id=${currentUserId}`);
+      if (refresh.data?.has_roadmap) {
+        setCurrentSessionIndex(refresh.data.current_session || currentSessionIndex);
+      }
+    } catch (e: unknown) {
+      const message = axios.isAxiosError(e)
+        ? (e.response?.data?.detail as string) || 'Lỗi hệ thống khi nộp bài.'
+        : 'Lỗi hệ thống khi nộp bài.';
+      toast.error(message);
+    } finally {
+      setQuizSubmitting(false);
+    }
+  };
+
+  const handleRelearnWrong = () => {
+    const weakTopics: string[] = quizResult?.chapter_feedback?.weak_topics || [];
+    const prompt = weakTopics.length
+      ? `Giải thích lại các phần em làm sai: ${weakTopics.join('; ')}`
+      : `Giải thích lại các nội dung em làm sai trong bài ${activeLessonTopic || 'hiện tại'}`;
+    const context = activeLessonContext;
+    setQuizMode(false);
+    setQuizResult(null);
+    setQuizAnswers({});
+    setQuizQuestions([]);
+    void handleSuggestedPromptClick(prompt);
+    if (context) {
+      toast.success('Đã quay lại chế độ học lại phần sai.');
+    }
+  };
+
+  const handleContinueNextDocument = () => {
+    const activeDoc = getActiveDocument();
+    if (!activeDoc) return;
+    const idx = documents.findIndex((d) => d.id === activeDoc.id);
+    if (idx >= 0 && idx < documents.length - 1) {
+      handleSwitchDocument(documents[idx + 1], idx + 1);
+      setQuizMode(false);
+      setQuizResult(null);
+      setQuizAnswers({});
+      setQuizQuestions([]);
+      toast.success('Đã chuyển sang tài liệu kế tiếp.');
+      return;
+    }
+    toast('Bạn đã ở tài liệu cuối cùng của môn này.');
   };
 
   const handleSendMessage = async () => {
@@ -226,6 +512,13 @@ export default function AdaptiveLearningPage() {
     await sendChatMessage(userMsg, activeLessonContext, updatedHistory);
   };
 
+  const handleSuggestedPromptClick = async (prompt: string) => {
+    if (!userId || !activeLessonContext || loadingChat) return;
+    const updatedHistory = [...messages, { role: 'user', content: prompt }];
+    setMessages(updatedHistory);
+    await sendChatMessage(prompt, activeLessonContext, updatedHistory);
+  };
+
   const sendChatMessage = async (message: string, context: string, chatHistory: { role: string; content: string }[]) => {
     setLoadingChat(true);
     try {
@@ -235,11 +528,16 @@ export default function AdaptiveLearningPage() {
         message,
         roadmap_context: context,
         user_id: Number(currentId),
+        session_topic: activeLessonTopic,
+        session_number: activeLessonNumber,
+        source_file: getActiveDocument()?.filename || '',
         history: chatHistory,
       });
       setMessages((prev) => [...prev, { role: 'assistant', content: res.data.reply }]);
-    } catch (e: any) {
-      const realError = e?.response?.data?.detail || e?.message || 'Lỗi đường truyền API';
+    } catch (e: unknown) {
+      const realError = axios.isAxiosError(e)
+        ? (e.response?.data?.detail as string) || e.message || 'Lỗi đường truyền API'
+        : 'Lỗi đường truyền API';
       setMessages((prev) => [...prev, { role: 'assistant', content: `❌ **Hệ thống báo lỗi:** ${String(realError)}` }]);
     } finally {
       setLoadingChat(false);
@@ -249,8 +547,11 @@ export default function AdaptiveLearningPage() {
   const handleSubjectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const subj = e.target.value;
     setSelectedSubject(subj);
-    if (userId) autoLoadRoadmap(userId, subj, false, false);
+    if (userId) autoLoadLearningContext(userId, subj, false, false);
   };
+
+  const activeDoc = getActiveDocument();
+  const activeDocExt = activeDoc ? getFileExt(activeDoc.filename) : '';
 
   return (
     <div className="fixed inset-0 bg-[#F8FAFC] font-sans text-slate-800 flex flex-col pt-[80px] pb-4 px-6 overflow-hidden">
@@ -301,11 +602,11 @@ export default function AdaptiveLearningPage() {
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm shrink-0 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg border border-indigo-100 shadow-sm">
-                <Map className="w-5 h-5" />
+                <BookOpen className="w-5 h-5" />
               </div>
               <div>
-                <h2 className="text-sm font-black text-slate-800 uppercase">Chương trình học</h2>
-                <p className="text-[10px] text-slate-500 font-medium tracking-tight mt-0.5">Tải lộ trình đã được thiết lập</p>
+                <h2 className="text-sm font-black text-slate-800 uppercase">Bài Đang Học</h2>
+                <p className="text-[10px] text-slate-500 font-medium tracking-tight mt-0.5">Tài liệu PDF/PPTX của buổi học hiện tại</p>
               </div>
             </div>
 
@@ -326,10 +627,10 @@ export default function AdaptiveLearningPage() {
               </select>
               <button
                 onClick={handleLoadRoadmap}
-                disabled={loadingRoadmap || enrolledClasses.length === 0}
+                disabled={loadingContext || enrolledClasses.length === 0}
                 className="px-5 bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest rounded-lg hover:bg-indigo-600 transition-all flex items-center gap-2 disabled:opacity-50 shadow-md"
               >
-                {loadingRoadmap ? <Loader2 className="animate-spin" size={14} /> : <><Download size={14} className="text-indigo-300" /> Tải lộ trình</>}
+                {loadingContext ? <Loader2 className="animate-spin" size={14} /> : <>Đồng bộ dữ liệu</>}
               </button>
             </div>
           </div>
@@ -340,57 +641,103 @@ export default function AdaptiveLearningPage() {
                 <BookOpen className="w-12 h-12 mb-3 opacity-20" />
                 <p className="text-xs font-bold uppercase tracking-widest">Bạn cần tham gia lớp học trước</p>
               </div>
-            ) : roadmap.length === 0 && !loadingRoadmap ? (
-              <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
-                <GraduationCap className="w-12 h-12 mb-3 opacity-20" />
-                <p className="text-xs font-bold uppercase tracking-widest">Chọn môn và tải lộ trình</p>
-              </div>
-            ) : loadingRoadmap ? (
+            ) : loadingContext ? (
               <div className="absolute inset-0 flex flex-col items-center justify-center text-indigo-600">
                 <Loader2 className="w-10 h-10 mb-4 animate-spin" />
-                <p className="text-xs font-bold uppercase tracking-widest animate-pulse">Đang lấy dữ liệu bài học...</p>
+                <p className="text-xs font-bold uppercase tracking-widest animate-pulse">Đang tải tài liệu...</p>
+              </div>
+            ) : documents.length === 0 ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+                <FileText className="w-12 h-12 mb-3 opacity-20" />
+                <p className="text-xs font-bold uppercase tracking-widest">Giáo viên chưa upload tài liệu cho môn này</p>
+                <p className="text-[11px] mt-2 text-center max-w-md">Xin lỗi, hiện chưa có học liệu để mở buổi học. Bạn hãy liên hệ giáo viên để được cập nhật tài liệu PDF/PPTX.</p>
               </div>
             ) : (
-              <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar relative before:absolute before:inset-0 before:ml-8 before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-slate-200 before:to-transparent">
-                <div className="flex justify-end mb-4 relative z-10">
-                  <span className="px-4 py-1.5 bg-indigo-50 text-indigo-600 text-[10px] font-black uppercase rounded-full shadow-sm ring-1 ring-indigo-100">
-                    Trình độ: {learnerLevel}
-                  </span>
+              <>
+                <div className="shrink-0 border-b border-slate-100 px-4 py-3 bg-slate-50/70">
+                  <div className="flex items-center justify-between gap-3 mb-2">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-indigo-600">Trình độ: {learnerLevel}</span>
+                    <span className="text-[10px] font-bold text-slate-500 uppercase">Buổi {activeLessonNumber || currentSessionIndex}</span>
+                  </div>
+                  <div className="flex gap-2 overflow-x-auto custom-scrollbar pb-1">
+                    {documents.map((doc, idx) => (
+                      <button
+                        key={doc.id}
+                        onClick={() => handleSwitchDocument(doc, idx)}
+                        className={`px-3 py-2 rounded-lg text-[10px] font-black uppercase whitespace-nowrap border transition-all ${
+                          activeDocumentId === doc.id
+                            ? 'bg-indigo-600 text-white border-indigo-600'
+                            : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'
+                        }`}
+                      >
+                        Tài liệu {idx + 1}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
-                {roadmap.map((lesson, idx) => {
-                  const isUnlocked = lesson.session <= currentSessionIndex;
-                  const isCurrent = lesson.session === currentSessionIndex && !isCompleted;
-
-                  return (
-                    <div key={idx} className={`relative flex items-center justify-between md:justify-normal md:odd:flex-row-reverse group transition-all duration-500 ${!isUnlocked ? 'opacity-50 grayscale select-none' : ''}`}>
-                      <div className={`flex items-center justify-center w-10 h-10 rounded-full border-4 shadow-sm shrink-0 md:order-1 md:group-odd:-translate-x-1/2 md:group-even:translate-x-1/2 z-10 ${isCurrent ? 'bg-indigo-600 border-indigo-100 text-white' : isUnlocked ? 'bg-emerald-500 border-emerald-100 text-white' : 'bg-slate-100 border-white text-slate-400'}`}>
-                        {isUnlocked && !isCurrent ? <CheckCircle2 className="w-4 h-4" /> : <span className="font-black text-xs">{lesson.session}</span>}
-                      </div>
-
-                      <div className={`w-[calc(100%-3.5rem)] md:w-[calc(50%-2.5rem)] p-4 rounded-2xl border shadow-sm transition-all ${isCurrent ? 'bg-indigo-50/50 border-indigo-200 ring-2 ring-indigo-50' : isUnlocked ? 'bg-white border-slate-200 hover:border-indigo-300' : 'bg-slate-50 border-slate-100'}`}>
-                        <div className="flex justify-between items-start mb-2">
-                          <h3 className={`font-black text-sm ${isUnlocked ? 'text-slate-800' : 'text-slate-500'}`}>{lesson.topic}</h3>
-                          {isCurrent && <span className="px-2 py-0.5 bg-indigo-600 text-white text-[9px] font-black rounded uppercase tracking-wider shadow-sm shrink-0 ml-2">Đang học</span>}
-                          {!isUnlocked && <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0 ml-2" />}
-                        </div>
-                        <p className="text-[11px] text-slate-500 font-medium leading-relaxed mb-4 line-clamp-2" title={lesson.description}>{lesson.description}</p>
-
-                        {isUnlocked && (
-                          <div className="flex flex-col xl:flex-row gap-2">
-                            <button onClick={() => handleStartTutor(lesson)} className="flex-1 px-3 py-2 bg-slate-900 text-white text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center justify-center gap-1.5 hover:bg-indigo-600 transition-colors shadow-md">
-                              <Bot className="w-3.5 h-3.5" /> Học với AI
-                            </button>
-                            <button onClick={() => handleTakeTest(lesson)} className="flex-1 px-3 py-2 bg-indigo-600 text-white text-[10px] font-black uppercase tracking-wider rounded-lg flex items-center justify-center gap-1.5 hover:bg-indigo-700 transition-colors shadow-md shadow-indigo-200">
-                              <PlayCircle className="w-3.5 h-3.5" /> Test qua bài
-                            </button>
-                          </div>
-                        )}
-                      </div>
+                <div className="flex-1 min-h-0 p-4 flex flex-col gap-3">
+                  {activeDoc && (
+                    <div className="shrink-0 px-3 py-2 rounded-lg border border-indigo-100 bg-indigo-50/50">
+                      <p className="text-xs font-black text-slate-800 truncate">{activeDoc.filename}</p>
+                      <p className="text-[11px] text-slate-600 mt-1">{activeLessonTopic || 'Đang học theo nội dung tài liệu đã chọn'}</p>
                     </div>
-                  );
-                })}
-              </div>
+                  )}
+
+                  <div className="flex-1 min-h-0 rounded-xl border border-slate-200 overflow-hidden bg-slate-50">
+                    {!activeDoc ? (
+                      <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                        <FileText className="w-12 h-12 mb-2 opacity-25" />
+                        <p className="text-xs font-bold uppercase">Chọn tài liệu để bắt đầu học</p>
+                      </div>
+                    ) : (
+                      <div className="h-full flex flex-col p-4">
+                        <div className="shrink-0 mb-3 flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            {activeDocExt === 'ppt' || activeDocExt === 'pptx' ? (
+                              <Presentation className="w-5 h-5 text-orange-500" />
+                            ) : (
+                              <FileText className="w-5 h-5 text-indigo-500" />
+                            )}
+                            <span className="text-xs font-black uppercase text-slate-700">Preview nội dung {activeDocExt.toUpperCase()}</span>
+                          </div>
+                          <a href={`http://localhost:8000/api/documents/download/${activeDoc.id}`} target="_blank" className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-700 text-[10px] font-bold inline-flex items-center gap-1">
+                            <ExternalLink size={12} /> Tải file
+                          </a>
+                        </div>
+
+                        <div className="flex-1 min-h-0 overflow-y-auto bg-white border border-slate-200 rounded-lg p-3 space-y-3 custom-scrollbar">
+                          {loadingPreview ? (
+                            <div className="h-full flex items-center justify-center text-slate-500 text-xs font-bold">
+                              Đang tải nội dung tài liệu...
+                            </div>
+                          ) : previewSegments.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs font-bold gap-2">
+                              <p>Hệ thống chưa đọc được nội dung từ file gốc.</p>
+                              <p>Vui lòng thử đồng bộ lại hoặc liên hệ giáo viên upload lại file.</p>
+                            </div>
+                          ) : (
+                            previewSegments.map((seg, idx) => (
+                              <div key={`${seg.title}-${idx}`} className="border border-slate-100 rounded-lg p-3">
+                                <p className="text-[10px] font-black uppercase text-indigo-600 mb-1">{seg.title}</p>
+                                <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">{seg.content}</p>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    onClick={handleTakeTest}
+                    disabled={!activeDoc || quizLoading}
+                    className="shrink-0 w-full px-4 py-3 bg-indigo-600 text-white text-xs font-black uppercase tracking-wider rounded-xl flex items-center justify-center gap-2 hover:bg-indigo-700 disabled:opacity-50 transition-all"
+                  >
+                    {quizLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <PlayCircle className="w-4 h-4" />} Làm bài kiểm tra trắc nghiệm theo tài liệu này
+                  </button>
+                </div>
+              </>
             )}
           </div>
         </div>
@@ -411,6 +758,29 @@ export default function AdaptiveLearningPage() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/50 custom-scrollbar">
+            {activeLessonContext && (
+              <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-3 space-y-2">
+                <p className="text-[10px] font-black uppercase tracking-wider text-indigo-700">Tóm tắt kiến thức tài liệu</p>
+                <p className="text-xs text-slate-700 font-medium leading-relaxed">
+                  {loadingSummary ? 'AI đang tóm tắt toàn bộ tài liệu, vui lòng chờ...' : chapterSummary}
+                </p>
+                {suggestedPrompts.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {suggestedPrompts.map((prompt, idx) => (
+                      <button
+                        key={`${idx}-${prompt}`}
+                        onClick={() => handleSuggestedPromptClick(prompt)}
+                        disabled={loadingChat}
+                        className="px-2.5 py-1.5 rounded-lg bg-white border border-indigo-200 text-[10px] font-bold text-indigo-700 hover:bg-indigo-100 transition-all disabled:opacity-50"
+                      >
+                        {prompt}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {messages.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center opacity-30 text-center">
                 <MessageSquare size={48} className="mb-4" />
@@ -467,6 +837,106 @@ export default function AdaptiveLearningPage() {
           </div>
         </div>
       </div>
+
+      {quizMode && quizQuestions.length > 0 && (
+        <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-4xl max-h-[90vh] overflow-hidden bg-white rounded-2xl border border-slate-200 shadow-2xl flex flex-col">
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <p className="text-[10px] uppercase font-black text-indigo-600 tracking-wider">Trắc nghiệm theo tài liệu</p>
+                <p className="text-sm font-bold text-slate-800">Câu {quizIndex + 1}/{quizQuestions.length}</p>
+              </div>
+              {!quizResult && (
+                <button
+                  onClick={() => setQuizMode(false)}
+                  className="px-3 py-1.5 text-[10px] font-black uppercase rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-100"
+                >
+                  Đóng
+                </button>
+              )}
+            </div>
+
+            {!quizResult ? (
+              <>
+                <div className="p-5 overflow-y-auto custom-scrollbar space-y-4">
+                  <h4 className="text-base font-bold text-slate-800 whitespace-pre-wrap">{quizQuestions[quizIndex].content}</h4>
+                  <div className="space-y-2">
+                    {(quizQuestions[quizIndex].options || []).map((opt, idx) => {
+                      const label = normalizeOptionLabel(opt, idx);
+                      const chosen = quizAnswers[quizQuestions[quizIndex].id] === label;
+                      return (
+                        <button
+                          key={`${label}-${idx}`}
+                          onClick={() => setQuizAnswers((prev) => ({ ...prev, [quizQuestions[quizIndex].id]: label }))}
+                          className={`w-full text-left p-3 rounded-xl border transition-all ${chosen ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 hover:border-indigo-300'}`}
+                        >
+                          <span className="text-xs font-black text-indigo-600 mr-2">{label}.</span>
+                          <span className="text-sm text-slate-700">{String(opt).replace(/^[A-D][\.\:\-\)]\s*/i, '')}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="px-5 py-4 border-t border-slate-100 flex gap-3">
+                  <button
+                    onClick={() => setQuizIndex((v) => Math.max(0, v - 1))}
+                    disabled={quizIndex === 0}
+                    className="px-4 py-2 rounded-lg border border-slate-300 text-xs font-black uppercase text-slate-600 disabled:opacity-40"
+                  >
+                    Câu trước
+                  </button>
+                  {quizIndex < quizQuestions.length - 1 ? (
+                    <button
+                      onClick={() => setQuizIndex((v) => Math.min(quizQuestions.length - 1, v + 1))}
+                      className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-xs font-black uppercase"
+                    >
+                      Câu tiếp
+                    </button>
+                  ) : (
+                    <button
+                      onClick={submitInlineQuiz}
+                      disabled={quizSubmitting}
+                      className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-xs font-black uppercase disabled:opacity-50"
+                    >
+                      {quizSubmitting ? 'Đang nộp...' : 'Nộp bài'}
+                    </button>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="p-6 overflow-y-auto custom-scrollbar space-y-4">
+                <p className="text-lg font-black text-slate-800">Kết quả: {Math.round(Number(quizResult.score || 0))}% ({quizResult.correct_count}/{quizResult.total_questions})</p>
+                <p className="text-sm text-slate-700">{quizResult.message}</p>
+
+                {quizResult?.chapter_feedback?.weak_topics?.length > 0 && (
+                  <div className="bg-red-50 border border-red-100 rounded-xl p-3">
+                    <p className="text-[10px] uppercase font-black text-red-600 mb-2">Các phần cần học lại</p>
+                    {quizResult.chapter_feedback.weak_topics.map((w: string, i: number) => (
+                      <p key={`${i}-${w}`} className="text-xs text-red-800">- {w}</p>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-2 pt-2">
+                  {quizResult?.is_passed ? (
+                    <>
+                      <button onClick={handleRelearnWrong} className="px-4 py-2 rounded-lg border border-slate-300 text-xs font-black uppercase text-slate-700">Học lại chỗ sai</button>
+                      <button onClick={handleContinueNextDocument} className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-xs font-black uppercase">Sang tài liệu khác</button>
+                      <button onClick={() => { setQuizMode(false); setQuizResult(null); }} className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-xs font-black uppercase">Hoàn tất</button>
+                    </>
+                  ) : (
+                    <>
+                      <button onClick={handleRelearnWrong} className="px-4 py-2 rounded-lg border border-slate-300 text-xs font-black uppercase text-slate-700">Học lại phần sai</button>
+                      <button onClick={startInlineQuiz} className="px-4 py-2 rounded-lg bg-red-600 text-white text-xs font-black uppercase">Làm lại bài trắc nghiệm</button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

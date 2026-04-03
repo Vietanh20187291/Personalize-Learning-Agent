@@ -15,6 +15,9 @@ class TutorChatRequest(BaseModel):
     message: str
     roadmap_context: str 
     user_id: int 
+    session_topic: str = ""
+    session_number: int = 0
+    source_file: str = ""
     history: List[Dict[str, str]] = []
 
 # NHẬN DỮ LIỆU THỜI GIAN HỌC TỪ FRONTEND
@@ -22,6 +25,13 @@ class StudySessionLog(BaseModel):
     user_id: int
     subject: str
     duration_minutes: int
+
+
+class MaterialSummaryRequest(BaseModel):
+    user_id: int
+    subject: str
+    source_file: str
+    session_topic: str = ""
 
 # ==========================================
 # 1. API: LƯU THỜI GIAN HỌC TẬP (HỖ TRỢ TÍNH EFFORT SCORE)
@@ -116,6 +126,10 @@ def chat_with_adaptive_tutor(req: TutorChatRequest, db: Session = Depends(get_db
         allowed_docs = db.query(models.Document).filter(models.Document.class_id == target_class.id).all()
         allowed_filenames = [doc.filename for doc in allowed_docs]
 
+        requested_file = (req.source_file or "").strip()
+        if requested_file and requested_file in allowed_filenames:
+            allowed_filenames = [requested_file]
+
         if not allowed_filenames:
             return {"reply": "Giáo viên hiện chưa tải tài liệu lên hệ thống."}
 
@@ -126,6 +140,8 @@ def chat_with_adaptive_tutor(req: TutorChatRequest, db: Session = Depends(get_db
             user_message=req.message, 
             roadmap_context=req.roadmap_context, 
             allowed_filenames=allowed_filenames,
+            session_topic=req.session_topic,
+            source_file=requested_file,
             history=req.history
         )
 
@@ -149,3 +165,28 @@ def chat_with_adaptive_tutor(req: TutorChatRequest, db: Session = Depends(get_db
         import traceback
         traceback.print_exc()
         return {"reply": "Gia sư AI đang bận xử lý dữ liệu, vui lòng thử lại sau."}
+
+
+@router.post("/material-summary")
+def summarize_material(req: MaterialSummaryRequest, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == req.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng.")
+
+    target_class = next((c for c in getattr(user, 'enrolled_classes', []) if c.subject == req.subject), None)
+    if not target_class:
+        raise HTTPException(status_code=400, detail=f"Bạn chưa tham gia lớp học nào cho môn {req.subject}.")
+
+    allowed_docs = db.query(models.Document).filter(models.Document.class_id == target_class.id).all()
+    allowed_filenames = [doc.filename for doc in allowed_docs]
+    if req.source_file not in allowed_filenames:
+        raise HTTPException(status_code=403, detail="Bạn không có quyền truy cập tài liệu này.")
+
+    agent = AdaptiveAgent(db)
+    summary_data = agent.summarize_material(
+        subject=req.subject,
+        source_file=req.source_file,
+        session_topic=req.session_topic,
+        allowed_filenames=allowed_filenames,
+    )
+    return summary_data

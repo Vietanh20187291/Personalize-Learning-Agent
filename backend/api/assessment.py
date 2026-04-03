@@ -4,9 +4,10 @@ from db.database import get_db, engine, Base
 from db.models import LearnerProfile, QuestionBank, AssessmentHistory, User, Document, LearningRoadmap, Classroom, Subject
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 import json
 import re
+from sqlalchemy import func
 
 from agents.assessment_agent import AssessmentAgent
 from agents.evaluation_agent import EvaluationAgent
@@ -42,10 +43,19 @@ class SessionQuizRequest(BaseModel):
     user_id: int
     session_topic: str  # Tên bài học (VD: "Cấu trúc dữ liệu mảng")
     level: str          # Trình độ (VD: "Intermediate")
+    source_file: Optional[str] = None
 
 class AnswerSubmission(BaseModel):
     question_id: int
     selected_option: str 
+
+class SaveQuizResultRequest(BaseModel):
+    """Schema để save quiz result + call EvaluationAgent"""
+    subject: str
+    user_id: int
+    source_file: str  # Tên file tài liệu đã test
+    answers: List[AnswerSubmission]  # [{question_id, selected_option}]
+    total_questions: int = 15  # Mặc định 15 câu/chương
 
 class SubmitRequest(BaseModel):
     subject: str
@@ -54,6 +64,9 @@ class SubmitRequest(BaseModel):
     duration_seconds: int = 300 
     is_session_quiz: bool = False
     test_type: str = "baseline" 
+    session_topic: Optional[str] = None
+    session_number: Optional[int] = None
+    source_file: Optional[str] = None
 
 # --- 1. SINH ĐỀ THI ĐÁNH GIÁ TỔNG QUAN (ĐẦU VÀO) ---
 @router.post("/generate")
@@ -70,17 +83,7 @@ def generate_quiz(req: QuizRequest, db: Session = Depends(get_db)):
     if not target_class:
         raise HTTPException(status_code=400, detail=f"Bạn chưa tham gia lớp học nào cho môn '{req.subject}'.")
 
-    # ==============================================================
-    # CHẶN LÀM LẠI BÀI THI: Kiểm tra xem đã có Lộ trình học chưa
-    # ==============================================================
-    existing_roadmap = db.query(LearningRoadmap).filter_by(user_id=req.user_id, subject_id=target_class.subject_id).first()
-    if not existing_roadmap:
-        existing_roadmap = db.query(LearningRoadmap).filter_by(user_id=req.user_id, subject=req.subject).first()
-    if existing_roadmap:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
-            detail=f"Bạn đã hoàn thành bài đánh giá năng lực môn '{req.subject}'. Vui lòng vào mục Lộ trình để bắt đầu học!"
-        )
+    # Cho phép làm lại bài đánh giá đầu vào bất cứ lúc nào, không khóa theo roadmap.
 
     # LẤY TÀI LIỆU CỦA ĐÚNG LỚP ĐÓ - DÙNG SUBJECT_ID FK THAY VÌ SUBJECT STRING
     allowed_docs = db.query(Document).filter(
@@ -89,7 +92,7 @@ def generate_quiz(req: QuizRequest, db: Session = Depends(get_db)):
     ).all()
     
     allowed_filenames = [doc.filename for doc in allowed_docs]
-    
+
     if not allowed_filenames:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, 
@@ -132,6 +135,10 @@ def generate_session_assessment(req: SessionQuizRequest, db: Session = Depends(g
     ).all()
     allowed_filenames = [doc.filename for doc in allowed_docs]
 
+    requested_file = (req.source_file or "").strip()
+    if requested_file and requested_file in allowed_filenames:
+        allowed_filenames = [requested_file]
+
     # Gọi Agent tạo đề thi bám sát Topic và Level
     agent = AdaptiveAgent(db)
     raw_questions = agent.generate_session_quiz(
@@ -165,7 +172,123 @@ def generate_session_assessment(req: SessionQuizRequest, db: Session = Depends(g
             "options": q_data.get("options", [])
         })
         
-    return {"questions": saved_questions, "subject": req.subject}
+    return {
+        "questions": saved_questions,
+        "subject": req.subject,
+        "min_pass_correct": 4,
+        "source_file": requested_file or None,
+    }
+
+# --- 2B. SINH 15 CÂU TRỰ NGHIỆM THEO CHƯƠNG/TÀI LIỆU ---
+@router.post("/generate-chapter-quiz")
+def generate_chapter_quiz(req: SessionQuizRequest, db: Session = Depends(get_db)):
+    """Sinh 15 câu trắc nghiệm theo một chương (document/source_file) cụ thể.
+    Sử dụng AssessmentAgent để đảm bảo content chuyên sâu và diverse."""
+    
+    if not req.subject or not req.source_file:
+        raise HTTPException(status_code=400, detail="Cần chỉ định môn học (subject) và tên file tài liệu (source_file)")
+
+    user = db.query(User).filter(User.id == req.user_id).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Người dùng không hợp lệ.")
+
+    # TÌM LỚP HỌC MÀ SINH VIÊN ĐÃ THAM GIA 
+    target_class = next((c for c in getattr(user, 'enrolled_classes', []) if c.subject == req.subject), None)
+    if not target_class:
+        raise HTTPException(status_code=400, detail=f"Bạn chưa tham gia lớp học nào cho môn '{req.subject}'.")
+
+    # Kiểm tra xem source_file có phải tài liệu của lớp này không
+    doc = db.query(Document).filter(
+        Document.class_id == target_class.id,
+        Document.filename == req.source_file.strip()
+    ).first()
+    
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy tài liệu '{req.source_file}' trong lớp học của bạn.")
+
+    # ==========================================
+    # MỘT LẦN CHỈ SINH QUI 15 CÂU CỦA CHƯƠNG ĐÓ
+    # ==========================================
+    agent = AssessmentAgent(db)
+    
+    # Kiểm tra thử xem đã có 15 câu cho chương này chưa
+    existing = db.query(QuestionBank).filter(
+        QuestionBank.subject == req.subject,
+        QuestionBank.source_file == req.source_file
+    ).all()
+    
+    if len(existing) >= 15:
+        # Đã có sẵn, chỉ cần random 15 câu và trả về
+        questions = db.query(QuestionBank).filter(
+            QuestionBank.subject == req.subject,
+            QuestionBank.source_file == req.source_file
+        ).order_by(func.random()).limit(15).all()
+        
+        result = []
+        for q in questions:
+            try:
+                parsed_options = json.loads(q.options) if isinstance(q.options, str) else q.options
+            except:
+                parsed_options = []
+            
+            result.append({
+                "id": q.id,
+                "content": q.content,
+                "options": parsed_options,
+                "correct_answer": q.correct_answer,
+                "explanation": q.explanation
+            })
+        
+        return {
+            "questions": result,
+            "subject": req.subject,
+            "source_file": req.source_file,
+            "min_pass_correct": 5,  # Cần 5/15 câu đúng thì mới pass
+            "total_questions": 15
+        }
+    
+    # Chưa có 15 câu, gọi AI sinh đề chuyên sâu
+    print(f"🚀 AI 70B đang sinh {15} câu chuyên sâu cho chương: {req.source_file}...")
+    
+    level = (req.level or "Intermediate").strip()
+    success = agent._generate_batch_safe(
+        subject=req.subject,
+        level=level,
+        count=15,
+        allowed_files=[req.source_file]  # Chỉ lấy nội dung từ file này
+    )
+    
+    if not success:
+        raise HTTPException(status_code=500, detail="AI chưa chuẩn bị xong 15 câu cho chương này. Hãy thử lại!")
+    
+    # Lấy 15 câu vừa sinh
+    questions = db.query(QuestionBank).filter(
+        QuestionBank.subject == req.subject,
+        QuestionBank.source_file == req.source_file
+    ).order_by(func.random()).limit(15).all()
+    
+    result = []
+    for q in questions:
+        try:
+            parsed_options = json.loads(q.options) if isinstance(q.options, str) else q.options
+        except:
+            parsed_options = []
+        
+        result.append({
+            "id": q.id,
+            "content": q.content,
+            "options": parsed_options,
+            "correct_answer": q.correct_answer,
+            "explanation": q.explanation
+        })
+    
+    return {
+        "questions": result,
+        "subject": req.subject,
+        "source_file": req.source_file,
+        "min_pass_correct": 5,  # Cần 5/15 câu đúng thì mới pass
+        "total_questions": 15
+    }
 
 # --- 3. NỘP BÀI, CHẤM ĐIỂM & ĐIỀU HƯỚNG LỘ TRÌNH (THĂNG CẤP) ---
 @router.post("/submit")
@@ -243,6 +366,7 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
         roadmap = db.query(LearningRoadmap).filter_by(user_id=req.user_id, subject=req.subject).first()
     is_passed = True
     msg = ""
+    chapter_feedback = None
     
     # Chuẩn bị file tài liệu
     user_obj = db.query(User).filter(User.id == req.user_id).first()
@@ -267,8 +391,46 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
             
     else:
         total_sessions = len(roadmap.roadmap_data) if roadmap.roadmap_data else 11
-        
-        if score_percent >= 60.0:
+
+        if req.is_session_quiz:
+            required_correct = 4
+            is_passed = correct_count >= required_correct
+
+            if is_passed:
+                # Chỉ mở bài tiếp theo nếu người học đang thi đúng buổi hiện tại.
+                if req.session_number and req.session_number != roadmap.current_session:
+                    msg = "Bạn đã hoàn thành bài kiểm tra của buổi này. Hãy tiếp tục theo buổi hiện tại trên lộ trình."
+                elif roadmap.current_session < total_sessions:
+                    roadmap.current_session += 1
+                    msg = "Chúc mừng! Bạn đã qua bài và mở khóa chapter tiếp theo."
+                else:
+                    roadmap.is_completed = True
+                    msg = "Tuyệt vời! Bạn đã hoàn thành chapter cuối cùng của lộ trình hiện tại."
+
+                chapter_feedback = {
+                    "is_session_quiz": True,
+                    "required_correct": required_correct,
+                    "passed": True,
+                    "weak_topics": [],
+                    "session_topic": req.session_topic,
+                    "source_file": req.source_file,
+                }
+            else:
+                weak_topics = [item.get("question", "")[:120] for item in wrong_questions_log[:3] if item.get("question")]
+                msg = (
+                    f"Bạn mới đúng {correct_count}/{total_q} câu. Cần tối thiểu {required_correct} câu để qua chapter. "
+                    "Hệ thống đã gợi ý phần cần ôn để bạn học lại và làm lại bài."
+                )
+                chapter_feedback = {
+                    "is_session_quiz": True,
+                    "required_correct": required_correct,
+                    "passed": False,
+                    "weak_topics": weak_topics,
+                    "session_topic": req.session_topic,
+                    "source_file": req.source_file,
+                }
+
+        elif score_percent >= 60.0:
             is_passed = True
             
             # TRƯỜNG HỢP A: CHƯA HỌC HẾT 11 BÀI
@@ -359,6 +521,7 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
         "results": detailed_results,
         "is_passed": is_passed,
         "message": msg,
+        "chapter_feedback": chapter_feedback,
         
         # Trả về bộ dữ liệu từ Evaluation Agent để hiển thị UI
         "actual_test_score": performance_data["actual_test_score"],
@@ -366,6 +529,109 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
         "progress_score": performance_data["progress_score"],
         "final_score": performance_data["final_score"],
         "ai_feedback": performance_data["evaluation_msg"]
+    }
+
+# --- 4. SAVE QUIZ RESULT + EVALUATION AGENT ANALYSIS ---
+@router.post("/save-quiz-result")
+def save_quiz_result(req: SaveQuizResultRequest, db: Session = Depends(get_db)):
+    """
+    Lưu kết quả quiz + gọi EvaluationAgent phân tích từng câu sai chi tiết.
+    Dùng cho Quiz page mới - mở tab riêng, sau khi submit bài thì lưu kết quả + phân tích.
+    """
+    
+    if not req.subject or not req.source_file:
+        raise HTTPException(status_code=400, detail="Cần subject và source_file để save result")
+    
+    if not req.answers:
+        raise HTTPException(status_code=400, detail="Không có câu trả lời nào")
+    
+    user = db.query(User).filter(User.id == req.user_id).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Người dùng không hợp lệ")
+    
+    # Xử lý chấm điểm
+    user_map = {a.question_id: a.selected_option for a in req.answers}
+    question_ids = list(user_map.keys())
+    
+    questions_db = db.query(QuestionBank).filter(
+        QuestionBank.id.in_(question_ids),
+        QuestionBank.subject == req.subject,
+        QuestionBank.source_file == req.source_file
+    ).all()
+    
+    correct_count = 0
+    question_answer_pairs = []
+    
+    for q in questions_db:
+        user_choice = user_map.get(q.id, "")
+        db_correct_label = q.correct_answer.strip().upper() if q.correct_answer else ""
+        
+        if len(db_correct_label) > 1:
+            match_db = re.search(r'^(?:ĐÁP ÁN\s*|CHỌN\s*)?([A-D])\s*[\.\:\-\)]', db_correct_label, re.IGNORECASE)
+            db_correct_label = match_db.group(1).upper() if match_db else db_correct_label[0].upper()
+        
+        user_label = user_choice.strip().upper() if user_choice else ""
+        is_correct = (user_label == db_correct_label)
+        
+        if is_correct:
+            correct_count += 1
+        
+        # Parse options
+        try:
+            parsed_options = json.loads(q.options) if isinstance(q.options, str) else q.options
+        except:
+            parsed_options = []
+        
+        question_answer_pairs.append({
+            "question_id": q.id,
+            "question_text": q.content,
+            "user_answer": user_label,
+            "correct_answer": db_correct_label,
+            "is_correct": is_correct,
+            "options": parsed_options,
+            "explanation": q.explanation
+        })
+    
+    total_q = len(questions_db)
+    score_percent = round((correct_count / total_q * 100), 2) if total_q > 0 else 0.0
+    
+    # Gọi EvaluationAgent phân tích từng câu sai
+    eval_agent = EvaluationAgent(db)
+    analysis_results = eval_agent.analyze_quiz_answers(
+        subject=req.subject,
+        question_answer_pairs=question_answer_pairs,
+        source_file=req.source_file
+    )
+    
+    # Lưu vào AssessmentHistory
+    subject_id = get_subject_id(req.subject, db)
+    history = AssessmentHistory(
+        subject_id=subject_id,
+        subject=req.subject,
+        user_id=req.user_id,
+        score=score_percent,
+        test_type="session",  # Luôn lưu dưới dạng session quiz
+        level_at_time="Beginner",
+        duration_seconds=0,
+        correct_count=correct_count,
+        total_questions=total_q,
+        wrong_detail=json.dumps([p for p in question_answer_pairs if not p["is_correct"]], ensure_ascii=False),
+        timestamp=datetime.utcnow()
+    )
+    db.add(history)
+    db.commit()
+    
+    is_passed = correct_count >= 5  # Cần 5/15 để pass
+    
+    return {
+        "score": score_percent,
+        "correct_count": correct_count,
+        "total_questions": total_q,
+        "is_passed": is_passed,
+        "min_pass_correct": 5,
+        "analysis": analysis_results,  # Chi tiết phân tích từng câu từ EvaluationAgent
+        "message": f"Bạn trả lời đúng {correct_count}/{total_q} câu. {'✅ Vượt qua!' if is_passed else '❌ Chưa đạt, hãy làm lại!'}",
+        "source_file": req.source_file
     }
 
 # --- CÁC API TRUY VẤN LỊCH SỬ VÀ ROADMAP ---

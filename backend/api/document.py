@@ -6,11 +6,162 @@ from db.database import get_db
 from db import models
 from typing import Optional
 from datetime import timedelta
+from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
+from pptx import Presentation
 
 # Import hàm lấy vector store
 from rag.vector_store import get_vector_store 
 
 router = APIRouter()
+
+
+def _extract_preview_segments(file_path: str, filename: str):
+    """Trích xuất nội dung text từ các file để hiển thị preview.
+    Format tốt hơn để presentation rõ ràng.
+    """
+    ext = os.path.splitext(filename)[1].lower()
+    
+    try:
+        if ext == ".pptx":
+            slides = []
+            try:
+                prs = Presentation(file_path)
+                for i, slide in enumerate(prs.slides, start=1):
+                    slide_lines = []
+                    
+                    for shape in slide.shapes:
+                        try:
+                            if hasattr(shape, "text_frame"):
+                                for paragraph in shape.text_frame.paragraphs:
+                                    text = " ".join(paragraph.text.split()).strip()
+                                    if text:
+                                        slide_lines.append(text)
+                            elif hasattr(shape, "text") and isinstance(shape.text, str):
+                                text = " ".join(shape.text.split()).strip()
+                                if text:
+                                    slide_lines.append(text)
+                        except Exception as shape_err:
+                            continue
+                    
+                    if slide_lines:
+                        # Format better: join with bullet points
+                        formatted_content = "\n".join([f"• {line}" for line in slide_lines])
+                        slides.append({
+                            "title": f"📊 Slide {i}",
+                            "content": formatted_content
+                        })
+                
+                if slides:
+                    return {"type": "pptx", "segments": slides}
+                else:
+                    return {"type": "pptx", "segments": []}
+                    
+            except Exception as pptx_err:
+                print(f"❌ Lỗi parse PPTX '{filename}': {pptx_err}")
+                return {"type": "pptx", "segments": []}
+
+        if ext == ".pdf":
+            pages = []
+            try:
+                loader = PyPDFLoader(file_path)
+                docs = loader.load()
+                
+                for idx, doc in enumerate(docs, start=1):
+                    text = " ".join((doc.page_content or "").split()).strip()
+                    if text:
+                        pages.append({
+                            "title": f"📄 Trang {idx}",
+                            "content": text[:500] + ("..." if len(text) > 500 else "")
+                        })
+                
+                if pages:
+                    return {"type": "pdf", "segments": pages}
+                else:
+                    return {"type": "pdf", "segments": []}
+                    
+            except Exception as pdf_err:
+                print(f"❌ Lỗi parse PDF '{filename}': {pdf_err}")
+                return {"type": "pdf", "segments": []}
+
+        if ext == ".docx":
+            try:
+                loader = Docx2txtLoader(file_path)
+                docs = loader.load()
+                content = "\n".join([(d.page_content or "").strip() for d in docs if (d.page_content or "").strip()])
+                
+                blocks = [b.strip() for b in content.split("\n") if b.strip()]
+                
+                if blocks:
+                    segments = [{"title": f"📋 Đoạn {i+1}", "content": b} for i, b in enumerate(blocks[:150])]
+                    return {"type": "docx", "segments": segments}
+                else:
+                    return {"type": "docx", "segments": []}
+                    
+            except Exception as docx_err:
+                print(f"❌ Lỗi parse DOCX '{filename}': {docx_err}")
+                return {"type": "docx", "segments": []}
+
+        if ext == ".txt":
+            try:
+                loader = TextLoader(file_path, encoding="utf-8")
+                docs = loader.load()
+                content = "\n".join([(d.page_content or "").strip() for d in docs if (d.page_content or "").strip()])
+                
+                blocks = [b.strip() for b in content.split("\n") if b.strip()]
+                
+                if blocks:
+                    segments = [{"title": f"📝 Dòng {i+1}", "content": b} for i, b in enumerate(blocks[:200])]
+                    return {"type": "txt", "segments": segments}
+                else:
+                    return {"type": "txt", "segments": []}
+                    
+            except Exception as txt_err:
+                print(f"⚠️ Lỗi parse TXT (UTF-8) '{filename}': {txt_err}")
+                try:
+                    loader = TextLoader(file_path, encoding="cp1252")
+                    docs = loader.load()
+                    content = "\n".join([(d.page_content or "").strip() for d in docs if (d.page_content or "").strip()])
+                    blocks = [b.strip() for b in content.split("\n") if b.strip()]
+                    
+                    if blocks:
+                        segments = [{"title": f"📝 Dòng {i+1}", "content": b} for i, b in enumerate(blocks[:200])]
+                        return {"type": "txt", "segments": segments}
+                except:
+                    pass
+                return {"type": "txt", "segments": []}
+
+        return {"type": "unknown", "segments": []}
+        
+    except Exception as general_err:
+        print(f"❌ Lỗi chung khi parse '{filename}': {general_err}")
+        return {"type": "unknown", "segments": []}
+
+
+def _extract_preview_from_vector(source_filename: str):
+    try:
+        vector_store = get_vector_store()
+        collection = vector_store._collection
+        data = collection.get(include=["documents", "metadatas"])
+        docs = data.get("documents", []) or []
+        metas = data.get("metadatas", []) or []
+
+        matched = []
+        for i, meta in enumerate(metas):
+            source = ""
+            if meta and isinstance(meta, dict):
+                source = str(meta.get("source", ""))
+            if os.path.basename(source) == source_filename:
+                txt = str(docs[i] or "").strip()
+                if txt:
+                    matched.append(txt)
+
+        segments = [
+            {"title": f"Nội dung {idx + 1}", "content": text}
+            for idx, text in enumerate(matched[:80])
+        ]
+        return segments
+    except Exception:
+        return []
 
 # ==========================================
 # 1. API CHO GIÁO VIÊN: LẤY DANH SÁCH TÀI LIỆU
@@ -179,3 +330,41 @@ def download_document(doc_id: int, db: Session = Depends(get_db)):
         filename=doc.filename,
         media_type='application/octet-stream' # Ép trình duyệt tự động tải file xuống
     )
+
+
+@router.get("/preview/{doc_id}")
+def preview_document(doc_id: int, db: Session = Depends(get_db)):
+    """Trích xuất nội dung text để preview trực tiếp trong ứng dụng."""
+    doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Tài liệu không tồn tại")
+
+    publication = db.query(models.DocumentPublication).filter(models.DocumentPublication.doc_id == doc_id).first()
+    if not publication or not publication.is_visible_to_students:
+        raise HTTPException(status_code=403, detail="Tài liệu này chưa được giáo viên cho phép hiển thị")
+
+    file_path = os.path.join("temp_uploads", doc.filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File vật lý không tồn tại trên server")
+
+    try:
+        parsed = _extract_preview_segments(file_path, doc.filename)
+        segments = parsed.get("segments", [])
+        if not segments:
+            segments = _extract_preview_from_vector(doc.filename)
+        return {
+            "doc_id": doc.id,
+            "filename": doc.filename,
+            "file_type": parsed.get("type", "unknown"),
+            "segments": segments,
+        }
+    except Exception as e:
+        fallback_segments = _extract_preview_from_vector(doc.filename)
+        if fallback_segments:
+            return {
+                "doc_id": doc.id,
+                "filename": doc.filename,
+                "file_type": "vector_fallback",
+                "segments": fallback_segments,
+            }
+        raise HTTPException(status_code=500, detail=f"Không thể preview tài liệu: {str(e)}")

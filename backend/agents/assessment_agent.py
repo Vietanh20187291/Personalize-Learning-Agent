@@ -2,395 +2,430 @@ import os
 import json
 import random
 import re
+import urllib.request
+import urllib.error
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 from groq import Groq
 from dotenv import load_dotenv
-from rag.vector_store import get_vector_store
 from db.models import QuestionBank, LearnerProfile, Subject
+from rag.vector_store import get_vector_store
 
 load_dotenv()
 
 class AssessmentAgent:
     def __init__(self, db: Session):
         self.db = db
-        self.vector_store = get_vector_store()
+        self.provider = os.getenv("ASSESSMENT_LLM_PROVIDER", "ollama").strip().lower()
+        self.model = os.getenv(
+            "ASSESSMENT_LLM_MODEL",
+            "qwen2.5:14b" if self.provider == "ollama" else "deepseek-r1-distill-llama-70b",
+        )
+
+        self.client = None
         self.api_key = os.getenv("GROQ_KEY_ASSESSMENT")
-        if not self.api_key:
-            raise ValueError("Cần cấu hình GROQ_KEY_ASSESSMENT trong file .env")
-        
-        self.client = Groq(api_key=self.api_key)
-        self.model = "llama-3.3-70b-versatile" 
+        self.ollama_host = os.getenv("ASSESSMENT_OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 
-    def force_reset_subject(self, subject: str):
-        try:
-            self.db.query(QuestionBank).filter_by(subject=subject).delete()
-            self.db.commit()
-            print(f"🧹 Đã xóa sạch dữ liệu cũ của môn {subject}.")
-        except Exception as e:
-            self.db.rollback()
-            print(f"Lỗi reset data: {e}")
+        if self.provider == "groq":
+            if not self.api_key:
+                raise ValueError("Thiếu GROQ_KEY_ASSESSMENT cho provider=groq")
+            self.client = Groq(api_key=self.api_key)
 
+        self.vector_store = get_vector_store()
+
+    def _chat_json(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int):
+        if self.provider == "groq":
+            res = self.client.chat.completions.create(
+                model=self.model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            raw = res.choices[0].message.content
+            clean = re.sub(r'```json|```', '', raw).strip()
+            return json.loads(clean)
+
+        # Ollama (free local): gọi REST API, ép output JSON qua prompt.
+        payload = {
+            "model": self.model,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
+        }
+
+        req = urllib.request.Request(
+            f"{self.ollama_host}/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            content = data.get("message", {}).get("content", "")
+            clean = re.sub(r'```json|```', '', content).strip()
+            return json.loads(clean)
+
+    # ========================
+    # SUBJECT HELPER
+    # ========================
     def _resolve_subject_id(self, subject: str):
         sub = self.db.query(Subject).filter(Subject.name == subject).first()
         if sub:
             return sub.id
-        # Backward compat: nếu chưa có subject record thì tạo mới.
+
         sub = Subject(name=subject, description=f"Môn {subject}")
         self.db.add(sub)
         self.db.flush()
         return sub.id
 
-    def _build_fallback_questions(self, subject: str, level: str, count: int, docs: list, source_file: str):
-        """Sinh câu hỏi dự phòng khi LLM lỗi (ví dụ invalid API key).
-        Mục tiêu: hệ thống luôn có bài để sinh viên làm, tránh dead-end UX.
-        """
-        if count <= 0 or not docs:
-            return 0
+    def _clean_text(self, text: str):
+        return re.sub(r"\s+", " ", text or "").strip()
 
-        subject_id = self._resolve_subject_id(subject)
-        corpus_parts = []
-        for d in docs[:60]:
-            text = re.sub(r"\s+", " ", (d.page_content or "").strip())
-            if text:
-                corpus_parts.append(text)
+    def _is_meaningful_text(self, text: str, min_len: int = 10):
+        t = self._clean_text(text)
+        if len(t) < min_len:
+            return False
+        if not re.search(r"[A-Za-zÀ-ỹ]", t):
+            return False
+        if re.search(r"^(a|b|c|d)$", t.lower()):
+            return False
+        if re.search(r"[\uFFFD]", t):
+            return False
+        return True
 
-        corpus = " ".join(corpus_parts)
-        raw_sentences = re.split(r"(?<=[\.!\?;:])\s+", corpus)
-        base_sentences = []
-        for s in raw_sentences:
-            clean = re.sub(r"\s+", " ", s).strip()
-            if 40 <= len(clean) <= 220:
-                base_sentences.append(clean)
+    def _is_valid_question(self, q: str, concept: str):
+        q_clean = self._clean_text(q).lower()
+        c_clean = self._clean_text(concept).lower()
 
-        base_sentences = list(dict.fromkeys(base_sentences))
-        if not base_sentences:
-            return 0
+        if len(q_clean) < 18 or len(q_clean) > 260:
+            return False
+        if "_____" in q_clean or "chi tiết còn thiếu" in q_clean:
+            return False
+        if c_clean and c_clean not in q_clean and len(set(re.findall(r"[A-Za-zÀ-ỹ0-9_]{4,}", q_clean)).intersection(set(re.findall(r"[A-Za-zÀ-ỹ0-9_]{4,}", c_clean)))) == 0:
+            return False
+        return True
 
-        stopwords = {
-            "trong", "được", "không", "những", "các", "với", "cho", "của", "một", "này", "khi", "và", "hoặc",
-            "the", "and", "for", "with", "that", "from", "this", "there", "have", "into", "about"
-        }
+    def _is_valid_options(self, options):
+        if len(options) != 4:
+            return False
 
-        tokens = re.findall(r"[A-Za-zÀ-ỹ0-9_]{5,}", corpus)
-        term_bank = []
-        for t in tokens:
-            low = t.lower()
-            if low not in stopwords and not low.isdigit():
-                term_bank.append(t)
-        term_bank = list(dict.fromkeys(term_bank))
+        seen = set()
+        for opt in options:
+            clean = re.sub(r'^[A-D][\.\)]\s*', '', str(opt)).strip()
+            low = clean.lower()
+            if not self._is_meaningful_text(clean, min_len=8):
+                return False
+            if low in seen:
+                return False
+            seen.add(low)
+        return True
 
-        def make_similar_wrong(sentence: str):
-            words = re.findall(r"[A-Za-zÀ-ỹ0-9_]{5,}", sentence)
-            candidate = sentence
-            if words and term_bank:
-                original = words[min(len(words) - 1, 1)]
-                alternatives = [t for t in term_bank if t.lower() != original.lower()]
-                if alternatives:
-                    candidate = re.sub(re.escape(original), random.choice(alternatives), candidate, count=1)
-            if " không " not in f" {candidate.lower()} ":
-                candidate = candidate.replace(" là ", " không phải là ", 1) if " là " in candidate else "Không " + candidate[0].lower() + candidate[1:]
-            return candidate
+    def _build_rag_context(self, subject: str):
+        # Dùng toàn bộ retrieval cho môn để trích xuất phạm vi khái niệm trước khi tạo câu hỏi.
+        docs = self.vector_store.similarity_search(
+            f"Tổng hợp tất cả khái niệm cốt lõi và chương mục của môn {subject}",
+            k=80,
+        )
 
-        inserted_count = 0
-        max_attempts = max(count * 5, 40)
-        attempt = 0
+        if not docs:
+            return ""
 
-        while inserted_count < count and attempt < max_attempts:
-            attempt += 1
-            idx = (attempt - 1) % len(base_sentences)
-            correct_fact = base_sentences[idx]
-            alt_fact = base_sentences[(idx + 1) % len(base_sentences)]
+        lines = []
+        seen = set()
+        for d in docs:
+            for raw_ln in (d.page_content or "").splitlines():
+                ln = self._clean_text(raw_ln)
+                if len(ln) < 20:
+                    continue
+                key = ln.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                lines.append(ln)
 
-            question_anchor = correct_fact[:90]
-            q_text = (
-                f"Dựa trên học liệu môn '{subject}', phương án nào phản ánh CHÍNH XÁC nhất nội dung đã học về ý: \"{question_anchor}\"?"
+        return "\n".join(lines)[:30000]
+
+    def _extract_concepts_from_rag(self, subject: str, rag_context: str):
+        if not rag_context:
+            return []
+
+        prompt = f"""
+Bạn là giảng viên đại học môn "{subject}".
+
+Nhiệm vụ:
+1. Đọc toàn bộ ngữ cảnh RAG.
+2. Trích xuất TẤT CẢ khái niệm liên quan trực tiếp đến môn học.
+3. Chỉ trả về danh sách khái niệm ngắn gọn, ví dụ:
+   - Lập lịch tiến trình
+   - Thao tác với tiến trình
+   - Truyền thông giữa các tiến trình
+
+Yêu cầu:
+- Không trả câu giải thích dài.
+- Không trả dữ liệu rác.
+- Không trả trùng lặp.
+
+Output JSON:
+{{"concepts": ["..."]}}
+
+Ngữ cảnh RAG:
+<<<
+{rag_context}
+>>>
+"""
+
+        try:
+            data = self._chat_json(
+                prompt=prompt,
+                system_prompt="Chỉ trả JSON hợp lệ.",
+                temperature=0.2,
+                max_tokens=2500,
             )
 
-            options_raw = [
-                correct_fact,
-                make_similar_wrong(correct_fact),
-                make_similar_wrong(alt_fact),
-                alt_fact[: min(len(alt_fact), 180)],
-            ]
+            concepts = []
+            for c in data.get("concepts", []):
+                text = self._clean_text(str(c))
+                if len(text) < 4 or len(text) > 120:
+                    continue
+                concepts.append(text)
 
-            # Cắt độ dài đáp án để tránh quá dài gây khó đọc.
-            options_raw = [re.sub(r"\s+", " ", o).strip()[:200] for o in options_raw]
+            # de-dup theo lowercase
+            unique = []
+            seen = set()
+            for c in concepts:
+                key = c.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(c)
 
-            # Trộn đáp án để tránh luôn đúng ở A.
-            labels = ["A", "B", "C", "D"]
-            idxs = [0, 1, 2, 3]
-            random.shuffle(idxs)
-            final_options = []
-            correct_label = "A"
-            for pos, raw_idx in enumerate(idxs):
-                final_options.append(f"{labels[pos]}. {options_raw[raw_idx]}")
-                if raw_idx == 0:
-                    correct_label = labels[pos]
+            return unique
+        except Exception as e:
+            print(f"❌ Lỗi trích xuất concepts từ RAG: {e}")
+            return []
 
-            if self.db.query(QuestionBank).filter(QuestionBank.content == q_text).first():
+    def _generate_question_for_concept(self, subject: str, concept: str):
+        prompt = f"""
+Bạn là giảng viên đại học.
+
+Hãy tạo 1 câu hỏi kiểm tra kiến thức cho khái niệm sau trong môn "{subject}":
+{concept}
+
+Yêu cầu:
+- Câu hỏi rõ nghĩa, trực tiếp, tự nhiên.
+- Ưu tiên kiểu: "{concept} là gì?" hoặc hỏi vai trò/đặc điểm cốt lõi.
+- Không dài dòng.
+
+Output JSON:
+{{"question": "..."}}
+"""
+
+        try:
+            data = self._chat_json(
+                prompt=prompt,
+                system_prompt="Chỉ trả JSON hợp lệ.",
+                temperature=0.3,
+                max_tokens=300,
+            )
+            return self._clean_text(data.get("question", ""))
+        except Exception as e:
+            print(f"❌ Lỗi tạo câu hỏi cho concept '{concept}': {e}")
+            return ""
+
+    def _generate_answers_for_question(self, subject: str, concept: str, question: str):
+        # Theo yêu cầu: AI tự tạo đáp án, không dùng hoặc phụ thuộc trực tiếp câu văn tài liệu.
+        prompt = f"""
+Bạn là giảng viên đại học.
+
+Môn: {subject}
+Khái niệm: {concept}
+Câu hỏi: {question}
+
+Nhiệm vụ:
+1. Tạo 1 đáp án đúng.
+2. Tạo 3 đáp án sai nhưng cùng domain, rất giống phong cách diễn đạt, và chắc chắn sai.
+
+Yêu cầu:
+- Không trả nhãn A/B/C/D trong nội dung đáp án.
+- Không trả câu vô nghĩa.
+- Không lặp lại đáp án.
+- Không dùng nội dung tài liệu nguồn; chỉ dựa vào hiểu biết chuyên môn của AI.
+
+Output JSON:
+{{
+  "correct_answer": "...",
+  "wrong_answers": ["...", "...", "..."]
+}}
+"""
+
+        try:
+            data = self._chat_json(
+                prompt=prompt,
+                system_prompt="Chỉ trả JSON hợp lệ.",
+                temperature=0.4,
+                max_tokens=700,
+            )
+
+            correct = self._clean_text(str(data.get("correct_answer", "")))
+            wrongs = [self._clean_text(str(x)) for x in data.get("wrong_answers", [])]
+            wrongs = [w for w in wrongs if w]
+
+            return correct, wrongs
+        except Exception as e:
+            print(f"❌ Lỗi tạo đáp án cho concept '{concept}': {e}")
+            return "", []
+
+    def _create_mcq_from_concept(self, subject: str, concept: str, max_retries: int = 3):
+        # Validation + regenerate: nếu câu hỏi/đáp án rác thì sinh lại.
+        for _ in range(max_retries):
+            question = self._generate_question_for_concept(subject, concept)
+            if not self._is_valid_question(question, concept):
                 continue
 
-            db_q = QuestionBank(
-                subject_id=subject_id,
-                subject=subject,
-                difficulty=level,
-                content=q_text,
-                options=json.dumps(final_options, ensure_ascii=False),
-                correct_answer=correct_label,
-                explanation="Câu hỏi dự phòng được sinh từ chính học liệu đã upload, ưu tiên phương án đúng bám sát nội dung tài liệu.",
-                is_used=False,
-                source_file=source_file,
-            )
-            self.db.add(db_q)
-            inserted_count += 1
+            correct, wrongs = self._generate_answers_for_question(subject, concept, question)
+            if not self._is_meaningful_text(correct, min_len=8):
+                continue
+            if len(wrongs) < 3:
+                continue
 
-        return inserted_count
+            options_raw = [correct] + wrongs[:3]
+            if not self._is_valid_options(options_raw):
+                continue
 
-    def get_or_create_quiz(self, subject: str, user_id: int, num_questions: int = 20, allowed_files: list = None):
-        if not allowed_files:
-            return None
+            order = [0, 1, 2, 3]
+            random.shuffle(order)
+            labels = ["A", "B", "C", "D"]
+            final_options = []
+            correct_label = "A"
+            for pos, idx in enumerate(order):
+                final_options.append(f"{labels[pos]}. {options_raw[idx]}")
+                if idx == 0:
+                    correct_label = labels[pos]
 
-        # ---QUÉT SẠCH CÂU HỎI RÁC DO LỖI CŨ ĐỂ LẠI ---
-        existing_qs = self.db.query(QuestionBank).filter(
-            QuestionBank.subject == subject,
-            QuestionBank.source_file.in_(allowed_files)
+            return {
+                "question": question,
+                "options": final_options,
+                "correct_answer": correct_label,
+                "explanation": f"Câu hỏi sinh theo khái niệm '{concept}'.",
+            }
+
+        return None
+
+    # ========================
+    # MAIN API
+    # ========================
+    def get_or_create_quiz(self, subject: str, user_id: int, num_questions: int = 20):
+        self._resolve_subject_id(subject)
+
+        # Nếu đã có thì lấy random
+        existing = self.db.query(QuestionBank).filter(
+            QuestionBank.subject == subject
         ).all()
-        
-        if existing_qs:
-            count_A = sum(1 for q in existing_qs if q.correct_answer == 'A')
-            is_looping_garbage = sum(1 for q in existing_qs if "phương thức nào" in str(q.content).lower() or "đoạn mã sau" in str(q.content).lower()) > (len(existing_qs) * 0.4)
-            
-            has_garbage_options = False
-            for q in existing_qs:
-                if len(str(q.options)) < 40 or "A. A\"" in str(q.options) or "B. B\"" in str(q.options):
-                    has_garbage_options = True
-                    break
-            
-            if has_garbage_options or is_looping_garbage or (len(existing_qs) > 5 and (count_A / len(existing_qs) > 0.8)):
-                print(f"⚠️ Phát hiện bộ đề cũ bị lỗi (Lặp từ / Đáp án rỗng). Đang TIÊU DIỆT TỰ ĐỘNG...")
-                self.db.query(QuestionBank).filter(
-                    QuestionBank.subject == subject,
-                    QuestionBank.source_file.in_(allowed_files)
-                ).delete(synchronize_session=False)
-                self.db.commit()
-                self.db.expire_all()
 
-        profile = self.db.query(LearnerProfile).filter_by(subject=subject, user_id=user_id).first()
-        current_level = profile.current_level if profile else "Beginner"
+        if len(existing) >= num_questions:
+            random.shuffle(existing)
+            return self._format(existing[:num_questions])
+
+        # Nếu chưa đủ → generate mới
+        needed = num_questions - len(existing)
+        print(f"🚀 Generating {needed} questions for subject: {subject}")
+
+        self._generate_from_rag_concepts(subject, needed)
 
         questions = self.db.query(QuestionBank).filter(
-            QuestionBank.subject == subject,
-            QuestionBank.source_file.in_(allowed_files)
-        ).limit(num_questions).all()
-
-        if len(questions) < num_questions:
-            needed = num_questions - len(questions)
-            print(f"🚀 AI 70B đang tạo {needed} câu hỏi CHUYÊN NGHIỆP CHO GIÁO VIÊN...")
-            
-            success = self._generate_batch_safe(subject, current_level, needed, allowed_files)
-            if not success:
-                print("⚠️ Thử tạo lại với số lượng nhỏ hơn để tránh nổ Token API...")
-                self._generate_batch_safe(subject, current_level, min(10, needed), allowed_files)
-            
-            questions = self.db.query(QuestionBank).filter(
-                QuestionBank.subject == subject,
-                QuestionBank.source_file.in_(allowed_files)
-            ).order_by(func.random()).limit(num_questions).all()
-
-        if not questions: return None 
+            QuestionBank.subject == subject
+        ).all()
 
         random.shuffle(questions)
-        final_result = []
-        for q in questions[:num_questions]:
+        return self._format(questions[:num_questions])
+
+    # ========================
+    # FORMAT OUTPUT
+    # ========================
+    def _format(self, questions):
+        result = []
+        for q in questions:
             try:
-                parsed_options = json.loads(q.options) if isinstance(q.options, str) else q.options
+                options = json.loads(q.options)
             except:
-                parsed_options = []
-            final_result.append({
+                options = []
+
+            result.append({
                 "id": q.id,
                 "content": q.content,
-                "options": parsed_options,
+                "options": options,
                 "correct_answer": q.correct_answer,
                 "explanation": q.explanation
             })
+        return result
 
-        return final_result
-
-    def _generate_batch_safe(self, subject: str, level: str, count: int, allowed_files: list = None):
-        if count <= 0: return True
+    # ========================
+    # CORE GENERATION (RAG CONCEPT -> MCQ)
+    # ========================
+    def _generate_from_rag_concepts(self, subject: str, count: int):
         try:
             subject_id = self._resolve_subject_id(subject)
-            docs = self.vector_store.similarity_search(
-                f"Kiến thức trọng tâm, bài toán thực tế, code mẫu và ứng dụng môn {subject}", 
-                k=40, 
-                filter={"subject": {"$eq": subject}}
-            )
+            rag_context = self._build_rag_context(subject)
+            concepts = self._extract_concepts_from_rag(subject, rag_context)
 
-            if allowed_files:
-                filtered_docs = [d for d in docs if os.path.basename(d.metadata.get("source", "")) in allowed_files]
-            else:
-                filtered_docs = docs
+            if not concepts:
+                print("⚠️ Không trích xuất được concept từ RAG.")
+                return
 
-            # Backward-compat: dữ liệu cũ có thể bị gắn subject sai (ví dụ "Khác").
-            # Fallback theo filename để vẫn truy xuất đúng tri thức của lớp.
-            if not filtered_docs and allowed_files:
-                docs_no_subject_filter = self.vector_store.similarity_search(
-                    f"Kiến thức trọng tâm, bài toán thực tế, code mẫu và ứng dụng môn {subject}",
-                    k=80,
-                )
-                filtered_docs = [
-                    d for d in docs_no_subject_filter
-                    if os.path.basename(d.metadata.get("source", "")) in allowed_files
-                ]
+            inserted = 0
+            attempts = 0
+            max_attempts = max(count * 6, 24)
+            used_questions = set()
 
-            if not filtered_docs:
-                return False
-            random.shuffle(filtered_docs)
-            primary_source_file = os.path.basename(filtered_docs[0].metadata.get("source", "")) if filtered_docs[0].metadata.get("source", "") else "Unknown"
-            
-            context = "\n".join([d.page_content for d in filtered_docs[:30]])[:20000]
+            while inserted < count and attempts < max_attempts:
+                concept = concepts[attempts % len(concepts)]
+                attempts += 1
 
-            # BỘ ĐỆM AN TOÀN: Chỉ xin dư 3 câu để KHÔNG BAO GIỜ bị quá tải Token làm đứt gãy JSON
-            ask_count = count + 3 
-
-            prompt = f"""
-            BẠN LÀ HỘI ĐỒNG RA ĐỀ THI XUẤT BẢN CẤP QUỐC GIA CHO MÔN: "{subject}" (Trình độ: {level.upper()}).
-            
-            [TÀI LIỆU CỐT LÕI MÔN HỌC]:
-            {context}
-
-            [🔴 CÁC LỆNH CẤM TUYỆT ĐỐI (HỦY DIỆT SỰ LẶP LẠI VÀ ẢO GIÁC)]:
-            1. CHỐNG LẶP LẠI (ANTI-LOOP): TẤT CẢ {ask_count} câu hỏi phải khai thác {ask_count} VẤN ĐỀ HOÀN TOÀN KHÁC NHAU. TUYỆT ĐỐI KHÔNG ĐƯỢC lặp lại bất kỳ câu hỏi hay đoạn code nào đã viết trước đó!
-            2. CẤM ĐÁP ÁN RỖNG: Mảng "options" PHẢI CHỨA TEXT ĐÁP ÁN THẬT SỰ (Ví dụ: "Lỗi biên dịch do...", "Kết quả là 55"). CẤM TUYỆT ĐỐI việc chỉ trả về ["A", "B", "C", "D"].
-            3. CHẤT LƯỢNG GIẢI THÍCH: Phần 'explanation' BẮT BUỘC phải giải thích chi tiết tại sao đúng/sai (ít nhất 2-3 câu). TUYỆT ĐỐI KHÔNG trả về từ khóa cộc lốc.
-            4. VĂN PHONG ĐA DẠNG: Đừng mãi dùng chữ "Đoạn mã sau...". Hãy dùng: "Xét hàm...", "Trong mô hình...", "Khi hệ thống...".
-
-            [KPI ĐAN XEN TƯ DUY - PHẢI TẠO ĐÚNG {ask_count} CÂU]:
-            1. THỰC HÀNH/BÀI TẬP (35%):
-               - Lập trình/CNTT: Bắt buộc có mã code (dùng \\n). Hỏi về output, tìm lỗi, hoặc điền vào chỗ trống.
-               - Toán/Kinh tế: Đưa ra thông số, bắt tính toán.
-            2. TÌNH HUỐNG/CASE STUDY (35%): Xây dựng bối cảnh dự án, phần mềm thực tế. Yêu cầu chọn phương án thiết kế tốt nhất.
-            3. LÝ THUYẾT NÂNG CAO (30%): So sánh sự khác biệt bản chất. Phân tích ưu/nhược điểm. 
-
-            [CẤU TRÚC JSON BẮT BUỘC]:
-            {{
-                "questions": [
-                    {{
-                        "concept_tested": "Tên vấn đề cốt lõi (Không trùng lặp)",
-                        "question_type": "Thực hành / Bài tập" HOẶC "Tình huống (Case study)" HOẶC "Lý thuyết nâng cao",
-                        "is_code_included": true/false,
-                        "question": "Nội dung câu hỏi sâu sắc, dùng \\n để xuống dòng trình bày code/đoạn văn...",
-                        "options": [
-                            "Nội dung đáp án 1 (Phải là text thực tế)", 
-                            "Nội dung đáp án 2 (Phải là text thực tế)", 
-                            "Nội dung đáp án 3 (Phải là text thực tế)", 
-                            "Nội dung đáp án 4 (Phải là text thực tế)"
-                        ],
-                        "correct_answer": "C",
-                        "explanation": "Giải thích chi tiết lý do chọn đáp án này, phân tích tối thiểu 2 câu."
-                    }}
-                ]
-            }}
-            Chỉ xuất ra chuỗi JSON. KHÔNG CHÈN TEXT BÊN NGOÀI.
-            """
-
-            chat_completion = self.client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": f"You are a strict national-level examiner. Output valid JSON ONLY. Generate exactly {ask_count} highly diverse questions. NEVER output empty 'A,B,C,D' arrays in options. ZERO tolerance for repeating the same question."},
-                    {"role": "user", "content": prompt}
-                ],
-                model=self.model,
-                temperature=0.8, # Tăng lên 0.8 để bắt nó phải bung sự sáng tạo
-                max_tokens=8000, 
-                response_format={"type": "json_object"}
-            )
-            
-            raw_content = chat_completion.choices[0].message.content
-            clean_content = re.sub(r'```json\s*|\s*```', '', raw_content, flags=re.IGNORECASE).strip()
-            
-            data = json.loads(clean_content)
-            questions_list = data.get("questions", [])
-
-            inserted_count = 0
-            for item in questions_list:
-                if inserted_count >= count:
-                    break
-                    
-                q_text = str(item.get('question', '')).strip()
-                raw_options = item.get('options', [])
-                correct_ans = str(item.get('correct_answer', 'A')).strip().upper()
-                
-                if not q_text or len(raw_options) < 4: continue 
-
-                # LỚP KHIÊN THÉP: Chặn đứng đáp án rỗng hoặc chỉ chứa chữ A,B,C,D
-                is_garbage = False
-                for opt in raw_options:
-                    clean_opt = re.sub(r'^[A-D][\.\:\-\)]\s*', '', str(opt)).strip()
-                    if clean_opt in ["A", "B", "C", "D", ""] or len(clean_opt) <= 1:
-                        is_garbage = True
-                        break
-                
-                if is_garbage:
+                mcq = self._create_mcq_from_concept(subject, concept, max_retries=3)
+                if not mcq:
                     continue
 
-                match = re.search(r'([A-D])', correct_ans)
-                final_key = match.group(1) if match else "A"
+                q = mcq["question"]
+                final_opts = mcq["options"]
+                ans = mcq["correct_answer"]
+                exp = mcq["explanation"]
 
-                labels = ["A", "B", "C", "D"]
-                final_options = []
-                for i in range(4):
-                    clean_text = re.sub(r'^[A-D][\.\:\-\)]\s*', '', str(raw_options[i])).strip()
-                    final_options.append(f"{labels[i]}. {clean_text}")
+                q_key = q.lower()
+                if q_key in used_questions:
+                    continue
+                if self.db.query(QuestionBank).filter(QuestionBank.subject == subject, QuestionBank.content == q).first():
+                    continue
+                used_questions.add(q_key)
 
-                if not self.db.query(QuestionBank).filter(QuestionBank.content == q_text).first():
-                    db_q = QuestionBank(
-                        subject_id=subject_id,
-                        subject=subject, 
-                        difficulty=level, 
-                        content=q_text,
-                        options=json.dumps(final_options, ensure_ascii=False), 
-                        correct_answer=final_key,
-                        explanation=f"[{item.get('question_type', 'Tư duy')}] {item.get('explanation', '')}",
-                        is_used=False,
-                        source_file=primary_source_file
-                    )
-                    self.db.add(db_q)
-                    inserted_count += 1
+                # Insert DB
+                db_q = QuestionBank(
+                    subject_id=subject_id,
+                    subject=subject,
+                    difficulty="Basic",
+                    content=q,
+                    options=json.dumps(final_opts, ensure_ascii=False),
+                    correct_answer=ans,
+                    explanation=exp,
+                    is_used=False,
+                    source_file="AI_GENERATED"
+                )
 
-            # Nếu LLM trả về không dùng được, tự sinh fallback để không bị kẹt luồng tạo đề.
-            if inserted_count == 0:
-                inserted_count = self._build_fallback_questions(subject, level, count, filtered_docs, primary_source_file)
+                self.db.add(db_q)
+                inserted += 1
 
             self.db.commit()
-            return True
+            print(f"✅ Generated {inserted} questions from {len(concepts)} concepts")
+
         except Exception as e:
             self.db.rollback()
-            print(f"❌ Lỗi sinh batch câu hỏi (Nổ Token hoặc đứt gãy JSON): {e}")
-
-            # Fallback cuối: nếu dịch vụ AI lỗi (401/timeout), vẫn tạo bộ câu hỏi dự phòng từ học liệu.
-            try:
-                docs_for_fallback = self.vector_store.similarity_search(
-                    f"Nội dung học liệu môn {subject}",
-                    k=60,
-                )
-                if allowed_files:
-                    docs_for_fallback = [
-                        d for d in docs_for_fallback
-                        if os.path.basename(d.metadata.get("source", "")) in allowed_files
-                    ]
-
-                if docs_for_fallback:
-                    primary_source_file = os.path.basename(docs_for_fallback[0].metadata.get("source", "")) if docs_for_fallback[0].metadata.get("source", "") else "Unknown"
-                    inserted = self._build_fallback_questions(subject, level, count, docs_for_fallback, primary_source_file)
-                    if inserted > 0:
-                        self.db.commit()
-                        print(f"✅ Đã kích hoạt fallback và tạo {inserted} câu hỏi dự phòng cho môn {subject}.")
-                        return True
-            except Exception as fallback_err:
-                self.db.rollback()
-                print(f"❌ Fallback cũng thất bại: {fallback_err}")
-
-            return False
-
-    
+            print(f"❌ Error: {e}")

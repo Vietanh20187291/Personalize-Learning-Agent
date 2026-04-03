@@ -29,6 +29,8 @@ const AssessmentForm = () => {
   const [step, setStep] = useState<'select_subject' | 'quiz' | 'result'>('select_subject');
   const [subject, setSubject] = useState("");
   const [sessionTopic, setSessionTopic] = useState(""); 
+  const [sessionNumber, setSessionNumber] = useState<number | null>(null);
+  const [sourceFile, setSourceFile] = useState<string>('');
   
   const [enrolledSubjects, setEnrolledSubjects] = useState<string[]>([]);
   const [loadingSubjects, setLoadingSubjects] = useState(true);
@@ -95,9 +97,18 @@ const AssessmentForm = () => {
     const urlSubject = params.get("subject");
     const urlTopic = params.get("topic");
     const urlLevel = params.get("level");
+    const urlSession = params.get("session");
+    const urlSourceFile = params.get("source_file");
+
+    if (urlSession) {
+      const parsedSession = Number(urlSession);
+      if (!Number.isNaN(parsedSession) && parsedSession > 0) {
+        setSessionNumber(parsedSession);
+      }
+    }
 
     if (urlSubject && urlTopic && urlLevel && step === 'select_subject') {
-      handleStartSessionQuiz(urlSubject, urlTopic, urlLevel);
+      handleStartSessionQuiz(urlSubject, urlTopic, urlLevel, urlSession || undefined, urlSourceFile || undefined);
     }
   }, []);
 
@@ -206,6 +217,7 @@ const AssessmentForm = () => {
 
     setSubject(selectedSub);
     setSessionTopic(""); // Đảm bảo tuyệt đối topic trống cho bài Đánh giá
+    setSessionNumber(null);
     setLoading(true);
     setAnswers({});
     setTimer(0);
@@ -233,9 +245,18 @@ const AssessmentForm = () => {
     }
   };
 
-  const handleStartSessionQuiz = async (urlSubject: string, urlTopic: string, urlLevel: string) => {
+  const handleStartSessionQuiz = async (urlSubject: string, urlTopic: string, urlLevel: string, urlSession?: string, urlSourceFile?: string) => {
     const userId = getUserId();
     if (!userId) { toast.error("Vui lòng đăng nhập lại."); return; }
+
+    setSessionNumber(null);
+    if (urlSession) {
+      const parsedSession = Number(urlSession);
+      if (!Number.isNaN(parsedSession) && parsedSession > 0) {
+        setSessionNumber(parsedSession);
+      }
+    }
+    setSourceFile(urlSourceFile || '');
 
     setSubject(urlSubject);
     setSessionTopic(urlTopic); 
@@ -253,7 +274,8 @@ const AssessmentForm = () => {
         subject: urlSubject,
         user_id: userId,
         session_topic: urlTopic,
-        level: urlLevel
+        level: urlLevel,
+        source_file: urlSourceFile || null,
       });
       
       if (res.data.questions && res.data.questions.length > 0) {
@@ -297,7 +319,10 @@ const AssessmentForm = () => {
       })),
       duration_seconds: timer,
       is_session_quiz: hasTopic,
-      test_type: testType 
+      test_type: testType,
+      session_topic: hasTopic ? sessionTopic : null,
+      session_number: hasTopic ? sessionNumber : null,
+      source_file: hasTopic ? sourceFile || null : null,
     };
 
     try {
@@ -443,6 +468,16 @@ const AssessmentForm = () => {
                   <p className={`text-sm font-medium leading-relaxed text-justify ${isPassed ? 'text-amber-900' : 'text-red-900'}`}>
                     {resultData.message}
                   </p>
+                  {!isPassed && resultData?.chapter_feedback?.weak_topics?.length > 0 && (
+                    <div className="mt-4 rounded-xl bg-white/70 border border-red-100 p-3">
+                      <p className="text-[10px] uppercase font-black text-red-500 mb-2">Nội dung cần ôn lại</p>
+                      <ul className="list-disc pl-4 space-y-1">
+                        {resultData.chapter_feedback.weak_topics.map((topic: string, idx: number) => (
+                          <li key={`${idx}-${topic}`} className="text-xs text-red-800 font-medium">{topic}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex flex-col justify-between gap-4">

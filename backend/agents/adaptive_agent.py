@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import random
 from sqlalchemy.orm import Session
 from groq import Groq
 from dotenv import load_dotenv
@@ -66,6 +68,101 @@ class AdaptiveAgent:
             f"{('Trích từ học liệu: ' + short_context) if short_context else 'Học liệu đang được cập nhật, bạn có thể gửi câu hỏi cụ thể hơn để mình hướng dẫn từng bước.'}"
         )
 
+    def summarize_material(self, subject: str, source_file: str, session_topic: str = "", allowed_filenames: list = None):
+        query = f"Tóm tắt toàn bộ tài liệu {source_file} cho môn {subject}. {session_topic}".strip()
+
+        search_filter = {"subject": {"$eq": subject}}
+        if allowed_filenames:
+            search_filter = {"$and": [{"subject": {"$eq": subject}}, {"source": {"$in": allowed_filenames}}]}
+        if source_file:
+            search_filter = {
+                "$and": [
+                    {"subject": {"$eq": subject}},
+                    {"source": {"$eq": source_file}}
+                ]
+            }
+
+        try:
+            # Tăng k lên 60 để đảm bảo AI đọc toàn bộ nội dung tài liệu
+            docs = self.vector_store.similarity_search(query, k=60, filter=search_filter)
+            if not docs and source_file:
+                # Fallback khi metadata source lưu dạng đường dẫn thay vì tên file thuần.
+                docs_all = self.vector_store.similarity_search(query, k=100, filter={"subject": {"$eq": subject}})
+                docs = [d for d in docs_all if os.path.basename(str(d.metadata.get("source", ""))) == source_file]
+        except Exception:
+            docs = []
+
+        context_docs = "\n\n".join([d.page_content for d in docs if (d.page_content or "").strip()])[:18000]
+        if not context_docs:
+            return {
+                "summary": f"Mình chưa đọc được nội dung chi tiết của tài liệu {source_file}. Bạn mở phần nội dung bên trái rồi gửi câu hỏi cụ thể, mình sẽ hỗ trợ từng phần.",
+                "suggested_prompts": [
+                    "Nêu mục tiêu chính của tài liệu này",
+                    "Cho mình 3 ý quan trọng nhất cần nhớ",
+                    "Đặt 3 câu trắc nghiệm tự kiểm tra từ tài liệu này",
+                ],
+            }
+
+        fallback_sentences = [s.strip() for s in re.split(r"(?<=[\.!?;:])\s+", context_docs) if s.strip()]
+        fallback_summary = " ".join(fallback_sentences[:6])[:700]
+        fallback_prompts = [
+            "Từ tài liệu này, phần nào dễ nhầm nhất?",
+            "Hãy tóm tắt lại theo 5 ý chính ngắn gọn",
+            "Tạo 5 câu trắc nghiệm bám sát nội dung tài liệu",
+        ]
+
+        if not self.client:
+            return {"summary": fallback_summary, "suggested_prompts": fallback_prompts}
+
+        prompt = f"""
+Bạn là gia sư AI chuyên nghiệp. 
+
+🔴 LỆNH TUYỆT ĐỐI: ĐỌC TOÀN BỘ NỘI DUNG TÀI LIỆU ĐƯỢC CUNG CẤP VÀ TÓM TẮT ĐẦY ĐỦ.
+
+Hãy đọc toàn bộ nội dung tài liệu để cung cấp:
+1. **summary**: Tóm tắt súc tích 8-12 câu, bao quát TOÀN BỘ nội dung tài liệu, có cấu trúc rõ ràng, gồm phần giới thiệu + nội dung chính + kết luận.
+2. **suggested_prompts**: 4 câu hỏi học tập sâu sắc giúp người học đào sâu kiến thức tài liệu này.
+
+Trả JSON hợp lệ:
+{{
+  "summary": "Tóm tắt toàn bộ nội dung...",
+  "suggested_prompts": ["câu hỏi 1", "câu hỏi 2", "câu hỏi 3", "câu hỏi 4"]
+}}
+
+Ràng buộc KHÔNG ĐƯỢC VI PHẠM:
+- summary phải dựa trên TOÀN BỘ nội dung tài liệu, không bịa, không bỏ sót phần quan trọng.
+- suggested_prompts phải là câu hỏi học tập hữu ích giúp đào sâu từng mảng nội dung.
+- Viết bằng tiếng Việt rõ ràng.
+
+Môn: {subject}
+Tên tài liệu: {source_file}
+Ngữ cảnh buổi: {session_topic or 'Không xác định'}
+
+NỘI DUNG TÀI LIỆU (HÃY ĐỌC TOÀN BỘ):
+{context_docs}
+"""
+
+        try:
+            completion = self.client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "You are a helpful tutor. Output valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                model=self.model,
+                temperature=0.2,
+                max_tokens=1600,
+                response_format={"type": "json_object"},
+            )
+            data = json.loads(completion.choices[0].message.content)
+            summary = str(data.get("summary") or "").strip() or fallback_summary
+            prompts = data.get("suggested_prompts") or fallback_prompts
+            if not isinstance(prompts, list):
+                prompts = fallback_prompts
+            prompts = [str(p).strip() for p in prompts if str(p).strip()][:4] or fallback_prompts
+            return {"summary": summary, "suggested_prompts": prompts}
+        except Exception:
+            return {"summary": fallback_summary, "suggested_prompts": fallback_prompts}
+
     # ==========================================
     # 1. HÀM SINH LỘ TRÌNH HỌC (ROADMAP)
     # ==========================================
@@ -91,10 +188,10 @@ class AdaptiveAgent:
                 else:
                     search_query = f"Mục lục, giới thiệu, các khái niệm cơ bản, tổng quan của môn {subject_name}"
 
-                # Tăng k lên 25 để AI nhìn được bức tranh toàn cảnh cuốn giáo trình
+                # Tăng k lên 40 để AI nhìn được bức tranh toàn cảnh toàn bộ cuốn giáo trình
                 docs = self.vector_store.similarity_search(
                     search_query, 
-                    k=25, 
+                    k=40, 
                     filter={"source": {"$in": allowed_filenames}}
                 )
                 context_summary = "\n".join([doc.page_content for doc in docs])
@@ -194,16 +291,29 @@ class AdaptiveAgent:
     # ==========================================
     # 2. HÀM GIA SƯ AI CHAT 
     # ==========================================
-    def chat_with_tutor(self, subject: str, user_message: str, roadmap_context: str, allowed_filenames: list = None, history: list = None):
+    def chat_with_tutor(self, subject: str, user_message: str, roadmap_context: str, allowed_filenames: list = None, session_topic: str = "", source_file: str = "", history: list = None):
         if history is None: history = []
         
         context_docs = ""
         search_filter = {"subject": {"$eq": subject}}
         if allowed_filenames:
             search_filter = {"$and": [{"subject": {"$eq": subject}}, {"source": {"$in": allowed_filenames}}]}
+        if source_file:
+            search_filter = {
+                "$and": [
+                    {"subject": {"$eq": subject}},
+                    {"source": {"$eq": source_file}}
+                ]
+            }
+
+        chapter_query = f"{session_topic}. {user_message}" if session_topic else user_message
 
         try:
-            docs = self.vector_store.similarity_search(user_message, k=5, filter=search_filter)
+            # Tăng k từ 5 lên 20 để AI có đủ context từ tài liệu khi trả lời câu hỏi
+            docs = self.vector_store.similarity_search(chapter_query, k=20, filter=search_filter)
+            if not docs and source_file:
+                docs_all = self.vector_store.similarity_search(chapter_query, k=50, filter={"subject": {"$eq": subject}})
+                docs = [d for d in docs_all if os.path.basename(str(d.metadata.get("source", ""))) == source_file]
             context_docs = "\n\n".join([doc.page_content for doc in docs])
         except Exception as e:
             context_docs = "Dữ liệu kiến thức đang được cập nhật."
@@ -216,10 +326,11 @@ class AdaptiveAgent:
             profile = self.db.query(LearnerProfile).filter_by(subject=subject).first()
         current_level = profile.current_level if profile else "Beginner"
 
-        system_prompt = f"""BẠN LÀ MỘT GIA SƯ AI TƯƠNG TÁC 1-1 CỰC KỲ XUẤT SẮC CỦA MÔN {subject}. 
+        system_prompt = f"""BẠN LÀ MỘT GIA SƯ AI TƯƠNG TÁC 1-1 CỰC KỲ XUẤT SẮC CỦA MÔN {subject}.
+🔴 LỆNH TUYỆT ĐỐI: PHẢI LUÔN TRÍCH DẪN NỘI DUNG CỤ THỂ TỪ TÀI LIỆU KHI TRẢ LỜI, KHÔNG CHỈ GIẢI THÍCH CHUNG CHUNG.
 TRÌNH ĐỘ HỌC VIÊN: {current_level}
 [NỘI DUNG BUỔI HỌC HÔM NAY]: {roadmap_context}
-[KIẾN THỨC TỪ TÀI LIỆU CỦA GIÁO VIÊN]: {context_docs[:4000]}
+[KIẾN THỨC TỪ TÀI LIỆU CỦA GIÁO VIÊN]: {context_docs[:5000]}
 
 [NGUYÊN TẮC TỐI THƯỢNG]:
 - TUYỆT ĐỐI KHÔNG giảng bài dài dòng. Mỗi tin nhắn chỉ đưa ra MỘT mẩu kiến thức nhỏ gắn liền với MỘT câu hỏi gợi mở.
@@ -229,7 +340,8 @@ TRÌNH ĐỘ HỌC VIÊN: {current_level}
 """
 
         api_messages = [{"role": "system", "content": system_prompt}]
-        for msg in history[-6:]: # Chỉ lấy 6 tin nhắn gần nhất để tối ưu context
+        # Lấy 8 tin nhắn gần nhất để AI có context tốt hơn về cuộc trò chuyện
+        for msg in history[-8:]: 
             role = msg.get("role", "user")
             content = msg.get("content", "")
             if role in ["user", "assistant"] and content:

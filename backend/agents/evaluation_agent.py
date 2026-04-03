@@ -1,9 +1,11 @@
 import os
 import json
+import re
 from groq import Groq
 from dotenv import load_dotenv
 from sqlalchemy import func
-from db.models import StudySession, AssessmentHistory
+from db.models import StudySession, AssessmentHistory, QuestionBank
+from rag.vector_store import get_vector_store
 
 # Tải biến môi trường
 load_dotenv()
@@ -17,6 +19,7 @@ class EvaluationAgent:
         self.client = Groq(api_key=self.api_key)
         self.model = "llama-3.3-70b-versatile" 
         self.db = db_session
+        self.vector_store = get_vector_store()
 
     # --- HÀM ĐÁNH GIÁ HIỆU SUẤT TỔNG THỂ (CẤU TRÚC 1-10-1) ---
     def evaluate_performance(self, user_id: int, subject: str, current_score: float, test_type: str):
@@ -122,3 +125,132 @@ class EvaluationAgent:
             if score >= 80: return "Kết quả rất tốt! Hãy tiếp tục duy trì phong độ này nhé."
             if score < 50: return "Kết quả chưa tốt lắm, hãy trao đổi thêm với Gia sư AI nhé."
             return "Bạn đã hoàn thành bài thi. Hãy cố gắng hơn ở lần sau!"
+
+    # ==========================================
+    # HÀM PHÂN TÍCH QUIZ THEO TỪNG CÂU
+    # ==========================================
+    def analyze_quiz_answers(self, subject: str, question_answer_pairs: list, source_file: str = ""):
+        """
+        Phân tích chi tiết từng câu trắc nghiệm sai.
+        Input:
+            subject: Môn học
+            question_answer_pairs: [
+                {
+                    "question_id": 1,
+                    "question_text": "Câu hỏi...",
+                    "user_answer": "B",
+                    "correct_answer": "C",
+                    "is_correct": false,
+                    "options": ["A...", "B...", "C...", "D..."]
+                },
+                ...
+            ]
+            source_file: Tên tài liệu để lấy context
+        
+        Output:
+            [
+                {
+                    "question_id": 1,
+                    "is_correct": false,
+                    "analysis": "Chi tiết tại sao sai, lời giải thích AI."
+                },
+                ...
+            ]
+        """
+        results = []
+        
+        for item in question_answer_pairs:
+            # Nếu đúng, không cần phân tích
+            if item.get("is_correct"):
+                results.append({
+                    "question_id": item.get("question_id"),
+                    "is_correct": True,
+                    "analysis": "✅ Câu trả lời chính xác!"
+                })
+                continue
+            
+            # Nếu sai → AI phân tích
+            question_id = item.get("question_id")
+            question_text = item.get("question_text", "")
+            user_answer = item.get("user_answer", "")
+            correct_answer = item.get("correct_answer", "")
+            options = item.get("options", [])
+            
+            # Tìm nội dung option được chọn và option đúng
+            user_answer_text = ""
+            correct_answer_text = ""
+            
+            label_map = {0: "A", 1: "B", 2: "C", 3: "D"}
+            for idx, opt in enumerate(options):
+                label = label_map.get(idx, "?")
+                if label == user_answer:
+                    user_answer_text = opt
+                if label == correct_answer:
+                    correct_answer_text = opt
+            
+            # Lấy context từ tài liệu
+            doc_context = ""
+            if source_file:
+                try:
+                    docs = self.vector_store.similarity_search(
+                        question_text,
+                        k=5,
+                        filter={"source": {"$regex": source_file}}
+                    )
+                    doc_context = "\n".join([d.page_content for d in docs[:3]])[:1000]
+                except:
+                    doc_context = ""
+            
+            # Gọi AI phân tích
+            analysis = self._analyze_wrong_answer(
+                question_text,
+                user_answer_text,
+                correct_answer_text,
+                options,
+                doc_context
+            )
+            
+            results.append({
+                "question_id": question_id,
+                "is_correct": False,
+                "analysis": analysis
+            })
+        
+        return results
+
+    def _analyze_wrong_answer(self, question: str, user_answer: str, correct_answer: str, options: list, doc_context: str):
+        """AI phân tích tại sao học sinh trả lời sai."""
+        
+        context_text = f"\n\nTrích từ tài liệu:\n{doc_context}" if doc_context else ""
+        
+        prompt = f"""
+        Bạn là một giáo viên chuyên phân tích lỗi học tập. 
+        
+        Câu hỏi: {question}
+        
+        Đáp án của học sinh: {user_answer}
+        Đáp án đúng: {correct_answer}
+        
+        Các lựa chọn:
+        {chr(10).join([f'- {opt}' for opt in options])}
+        {context_text}
+        
+        NHIỆM VỤ:
+        1. Giải thích tại sao đáp án của học sinh là SAIQA) (Phân tích logic sai, khái niệm nhầm, v.v.)
+        2. Giải thích tại sao đáp án "{correct_answer}" là ĐÚNG (Dựa vào kiến thức)
+        3. Nêu điểm nhầm lẫn chính
+        
+        VĂN PHONG: Ngắn gọn (tối đa 5-6 câu), chân thành, hướng dẫn cách sửa.
+        """
+        
+        try:
+            completion = self.client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=self.model,
+                temperature=0.4,
+                max_tokens=400
+            )
+            return completion.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"❌ Lỗi phân tích câu sai: {e}")
+            return f"❌ Bạn chọn '{user_answer}' nhưng đáp án đúng là '{correct_answer}'. Hãy review lại phần này trong tài liệu."
