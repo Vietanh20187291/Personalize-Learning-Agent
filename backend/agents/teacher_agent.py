@@ -1,649 +1,640 @@
 import json
 import os
+import random
 import re
-import urllib.error
-import urllib.request
-from pathlib import Path
-from typing import Dict, List, Tuple
+from collections import defaultdict
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
-from db.models import AssessmentHistory, Classroom, Document, User
-from rag.vector_store import get_vector_store
+from db.models import AssessmentHistory, Classroom, Document, QuestionBank, Subject, User
+from memory import ActionRouter, IntentClassifier, get_conversation_memory
 
 
 class TeacherAgent:
     def __init__(self, db: Session):
         self.db = db
-        self.provider = os.getenv("TEACHER_AGENT_LLM_PROVIDER", "ollama").strip().lower()
+        self.classifier = IntentClassifier()
+        self.router = ActionRouter()
 
-        default_model = "gpt-4o-mini" if self.provider == "openai" else "llama3"
-        self.model = os.getenv("TEACHER_AGENT_MODEL", default_model).strip()
+    def _clean_text(self, text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "")).strip()
 
-        self.openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.openai_base_url = os.getenv("TEACHER_AGENT_OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-        self.openai_fallback_to_ollama = os.getenv("TEACHER_AGENT_OPENAI_FALLBACK_TO_OLLAMA", "true").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
+    def _normalize(self, text: str) -> str:
+        return self._clean_text(text).lower()
 
-        self.ollama_host = os.getenv("TEACHER_AGENT_OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-        self.ollama_model = os.getenv(
-            "TEACHER_AGENT_OLLAMA_MODEL",
-            os.getenv("ASSESSMENT_OLLAMA_FALLBACK_MODEL", "llama3"),
-        ).strip()
-        self.fallback_model = os.getenv("TEACHER_AGENT_FALLBACK_MODEL", "qwen2.5:14b").strip()
-        self.request_timeout = int(os.getenv("TEACHER_AGENT_REQUEST_TIMEOUT", "20"))
-        self.vector_store = get_vector_store()
+    def _subject_candidates(self) -> List[Subject]:
+        return self.db.query(Subject).order_by(Subject.name.asc()).all()
 
-    def _get_ollama_models(self):
-        req = urllib.request.Request(
-            f"{self.ollama_host}/api/tags",
-            headers={"Content-Type": "application/json"},
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                models = data.get("models", []) or []
-                names = []
-                for model in models:
-                    name = str(model.get("name", "")).strip()
-                    if name:
-                        names.append(name)
-                return names
-        except Exception:
-            return []
+    def _classroom_candidates(self) -> List[Classroom]:
+        return self.db.query(Classroom).order_by(Classroom.id.asc()).all()
 
-    def _check_ollama_available(self):
-        return bool(self._get_ollama_models())
+    def _student_candidates(self) -> List[User]:
+        return self.db.query(User).filter(User.role == "student").order_by(User.full_name.asc()).all()
 
-    def _clean_text(self, text: str):
-        return re.sub(r"\s+", " ", text or "").strip()
+    def _subject_display(self, subject: Optional[Subject], context: Dict[str, Any]) -> str:
+        if subject:
+            return subject.name
+        return self._clean_text(context.get("last_subject_name") or context.get("last_subject") or "")
 
-    def _resolve_classroom(self, class_id: int, teacher_id: int):
-        classroom = self.db.query(Classroom).filter(Classroom.id == class_id).first()
-        if not classroom:
-            raise ValueError("Không tìm thấy lớp học")
-        if classroom.teacher_id != teacher_id:
-            raise ValueError("Bạn không có quyền truy cập lớp học này")
-        return classroom
+    def _resolve_subject(self, entities: Dict[str, Any], context: Dict[str, Any], classroom: Optional[Classroom] = None) -> Optional[Subject]:
+        subject_name = self._clean_text(entities.get("subject_name") or "")
+        if not subject_name and classroom:
+            subject_name = self._clean_text(getattr(classroom.subject_obj, "name", "") or classroom.subject or "")
 
-    def _build_class_stats(self, classroom: Classroom):
-        students = [student for student in classroom.students if getattr(student, "role", "student") == "student"]
-        student_ids = [student.id for student in students]
-        student_name_map = {student.id: self._clean_text(getattr(student, "full_name", "") or f"SV {student.id}") for student in students}
+        if not subject_name:
+            subject_name = self._clean_text(context.get("last_subject_name") or context.get("last_subject") or "")
 
-        if student_ids:
-            histories = self.db.query(AssessmentHistory).filter(
-                AssessmentHistory.user_id.in_(student_ids),
-                AssessmentHistory.subject_id == classroom.subject_id,
-            ).order_by(desc(AssessmentHistory.timestamp)).all()
-        else:
-            histories = []
+        if not subject_name:
+            return None
 
-        avg_score = 0.0
-        if histories:
-            avg_score = sum(float(item.score or 0) for item in histories) / len(histories)
+        normalized = self._normalize(subject_name)
+        exact = self.db.query(Subject).filter(func.lower(Subject.name) == normalized).first()
+        if exact:
+            return exact
 
-        latest_scores = []
-        latest_by_student: Dict[int, float] = {}
-        seen_students = set()
-        for item in histories:
-            if item.user_id in seen_students:
-                continue
-            seen_students.add(item.user_id)
-            score = float(item.score or 0)
-            latest_scores.append(score)
-            latest_by_student[item.user_id] = score
+        for subject in self._subject_candidates():
+            candidate = self._normalize(subject.name)
+            if candidate == normalized or normalized in candidate or candidate in normalized:
+                return subject
+        return None
 
-        score_bands = {"<40": 0, "40-60": 0, "60-80": 0, ">=80": 0}
-        for score in latest_scores:
-            if score < 40:
-                score_bands["<40"] += 1
-            elif score < 60:
-                score_bands["40-60"] += 1
-            elif score < 80:
-                score_bands["60-80"] += 1
-            else:
-                score_bands[">=80"] += 1
+    def _resolve_classroom(self, entities: Dict[str, Any], context: Dict[str, Any], subject: Optional[Subject] = None) -> Optional[Classroom]:
+        class_name = self._clean_text(entities.get("class_name") or "")
+        if not class_name:
+            class_name = self._clean_text(context.get("last_class_name") or "")
 
-        weak_students = []
-        for uid, score in sorted(latest_by_student.items(), key=lambda x: x[1]):
-            if score <= 55:
-                weak_students.append({
-                    "user_id": uid,
-                    "name": student_name_map.get(uid, f"SV {uid}"),
-                    "score": round(score, 1),
-                })
-        weak_students = weak_students[:5]
+        if not class_name:
+            return None
 
-        weak_area_hint = "Chưa đủ dữ liệu đánh giá"
-        if latest_scores:
-            lowest = min(latest_scores)
-            if lowest < 40:
-                weak_area_hint = "Cần củng cố kiến thức nền tảng và ôn lại khái niệm cơ bản"
-            elif lowest < 60:
-                weak_area_hint = "Nên tăng bài tập vận dụng và kiểm tra nhanh theo chương"
-            else:
-                weak_area_hint = "Có thể nâng độ khó bài tập và chuyển sang bài phân tích"
+        normalized = self._normalize(class_name)
+        classrooms = self._classroom_candidates()
+        if subject:
+            classrooms = [item for item in classrooms if item.subject_id == subject.id or self._normalize(item.subject or "") == self._normalize(subject.name)]
 
-        return {
-            "student_count": len(students),
-            "document_count": self.db.query(Document).filter(Document.class_id == classroom.id).count(),
-            "history_count": len(histories),
-            "avg_score": round(avg_score, 1),
-            "weak_area_hint": weak_area_hint,
-            "score_bands": score_bands,
-            "weak_students": weak_students,
-        }
+        for classroom in classrooms:
+            candidate_names = [self._normalize(classroom.name), self._normalize(classroom.class_code or "")]
+            if normalized in candidate_names or any(normalized == candidate or normalized in candidate or candidate in normalized for candidate in candidate_names):
+                return classroom
 
-    def _detect_intent(self, message: str):
-        low = self._clean_text(message).lower()
-        if (
-            any(k in low for k in ["tình hình lớp", "tinh hinh lop", "lớp", "class", "sĩ số", "si so"])
-            and any(k in low for k in ["tóm tắt", "tom tat", "summary", "đề xuất", "de xuat"])
-        ):
-            return "class_overview"
-        if (
-            any(k in low for k in ["học sinh", "hoc sinh", "sinh viên", "sinh vien", "student"])
-            and any(k in low for k in ["tóm tắt", "tom tat", "tình hình", "ket qua", "kết quả", "cải thiện", "cai thien"])
-        ):
-            return "student_overview"
-        if any(k in low for k in ["đề", "quiz", "câu hỏi", "kiểm tra", "trắc nghiệm"]):
-            return "quiz"
-        if any(k in low for k in ["tóm tắt", "tom tat", "summary", "nội dung tài liệu", "hoc lieu"]):
-            return "summary"
-        if any(k in low for k in ["điểm yếu", "yeu", "phân tích", "phan tich", "cải thiện", "cai thien"]):
-            return "analysis"
-        if any(k in low for k in ["kế hoạch", "ke hoach", "lộ trình", "lo trinh", "buổi tới", "buoi toi"]):
-            return "plan"
-        return "general"
+        # Try exact prefix/substring fallback across all classrooms.
+        for classroom in self._classroom_candidates():
+            candidate = self._normalize(classroom.name)
+            if normalized in candidate or candidate in normalized:
+                return classroom
+        return None
 
-    def _calc_trend(self, scores: List[float]):
-        if len(scores) < 2:
-            return 0.0
-        return round(float(scores[-1]) - float(scores[0]), 1)
+    def _resolve_student(self, entities: Dict[str, Any], context: Dict[str, Any], classroom: Optional[Classroom] = None) -> Optional[User]:
+        student_name = self._clean_text(entities.get("student_name") or entities.get("student_identifier") or "")
+        if not student_name:
+            student_name = self._clean_text(
+                (context.get("last_student_name") or "")
+                or (context.get("last_student_asked") or {}).get("name", "")
+            )
 
-    def _find_student_in_class(self, classroom: Classroom, message: str):
-        clean_msg = self._clean_text(message).lower()
+        if not student_name:
+            return None
+
+        normalized = self._normalize(student_name)
         candidates = []
-        for student in classroom.students:
+        if classroom is not None:
+            for student in classroom.students:
+                if getattr(student, "role", "student") != "student":
+                    continue
+                candidates.append(student)
+        else:
+            candidates = self._student_candidates()
+
+        for student in candidates:
+            fields = [
+                self._normalize(getattr(student, "full_name", "") or ""),
+                self._normalize(getattr(student, "student_id", "") or ""),
+                self._normalize(getattr(student, "username", "") or ""),
+            ]
+            if any(normalized == field or normalized in field or field in normalized for field in fields if field):
+                return student
+        return None
+
+    def _latest_scores_for_students(self, histories: List[AssessmentHistory]) -> Dict[int, float]:
+        latest_scores: Dict[int, float] = {}
+        for item in histories:
+            if item.user_id is None or item.user_id in latest_scores:
+                continue
+            latest_scores[item.user_id] = float(item.score or 0)
+        return latest_scores
+
+    def _class_score_summary(self, classroom: Classroom, subject: Optional[Subject] = None) -> Dict[str, Any]:
+        subject_id = subject.id if subject else classroom.subject_id
+        histories = (
+            self.db.query(AssessmentHistory)
+            .filter(
+                AssessmentHistory.user_id.in_([student.id for student in classroom.students if getattr(student, "role", "student") == "student"]),
+                AssessmentHistory.subject_id == subject_id,
+            )
+            .order_by(desc(AssessmentHistory.timestamp))
+            .all()
+        )
+
+        latest_scores = self._latest_scores_for_students(histories)
+        scores = list(latest_scores.values())
+        student_count = len([student for student in classroom.students if getattr(student, "role", "student") == "student"])
+        avg_score = round(sum(scores) / len(scores), 1) if scores else 0.0
+        pass_count = len([score for score in scores if score >= 50])
+        fail_count = len([score for score in scores if score < 50])
+        distribution = {
+            "Yếu (<40)": len([score for score in scores if score < 40]),
+            "Trung bình (40-60)": len([score for score in scores if 40 <= score < 60]),
+            "Khá (60-80)": len([score for score in scores if 60 <= score < 80]),
+            "Giỏi (>=80)": len([score for score in scores if score >= 80]),
+        }
+        weak_students = []
+        for student in sorted(classroom.students, key=lambda item: item.id):
             if getattr(student, "role", "student") != "student":
                 continue
-            full_name = self._clean_text(getattr(student, "full_name", ""))
-            username = self._clean_text(getattr(student, "username", ""))
-            student_code = self._clean_text(getattr(student, "student_id", ""))
+            score = latest_scores.get(student.id)
+            if score is not None and score < 60:
+                weak_students.append({
+                    "id": student.id,
+                    "name": self._clean_text(getattr(student, "full_name", "") or getattr(student, "username", "") or f"SV {student.id}"),
+                    "score": round(score, 1),
+                })
 
-            keys = [full_name.lower(), username.lower(), student_code.lower()]
-            score = 0
-            for key in keys:
-                if key and key in clean_msg:
-                    score += len(key)
-            if score > 0:
-                candidates.append((score, student))
+        return {
+            "student_count": student_count,
+            "avg_score": avg_score,
+            "pass_rate": round((pass_count / len(scores)) * 100, 1) if scores else 0.0,
+            "pass_count": pass_count,
+            "fail_count": fail_count,
+            "distribution": distribution,
+            "weak_students": weak_students[:5],
+            "histories_count": len(histories),
+            "scores": scores,
+        }
 
-        if not candidates:
-            return None
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        return candidates[0][1]
+    def _class_overview_reply(self, classroom: Classroom, subject: Optional[Subject], context: Dict[str, Any]) -> Dict[str, Any]:
+        summary = self._class_score_summary(classroom, subject)
+        weak_text = ", ".join([f"{item['name']} ({item['score']})" for item in summary["weak_students"][:3]]) or "chưa đủ dữ liệu để xác định"
+        reply = (
+            f"Tình hình học tập lớp {classroom.name}: có {summary['student_count']} sinh viên, điểm trung bình {summary['avg_score']:.1f}, "
+            f"tỷ lệ đỗ {summary['pass_rate']:.1f}%. Phân bố điểm: {summary['distribution']['Yếu (<40)']} yếu, "
+            f"{summary['distribution']['Trung bình (40-60)']} trung bình, {summary['distribution']['Khá (60-80)']} khá, "
+            f"{summary['distribution']['Giỏi (>=80)']} giỏi. Nhóm cần hỗ trợ ngay: {weak_text}."
+        )
+        actions = [
+            "Xem chi tiết phân bố điểm của lớp",
+            "Lọc danh sách sinh viên dưới 60 điểm",
+            "Đề xuất kế hoạch củng cố 1 buổi cho lớp",
+        ]
+        return {"reply": reply, "suggested_actions": actions}
 
-    def _build_student_overview(self, student: User):
-        enrolled_classes = [c for c in getattr(student, "enrolled_classes", []) if getattr(student, "id", None)]
-        class_count = len(enrolled_classes)
+    def _course_info_reply(self, subject: Subject) -> Dict[str, Any]:
+        classes = (
+            self.db.query(Classroom)
+            .filter(Classroom.subject_id == subject.id)
+            .order_by(Classroom.name.asc())
+            .all()
+        )
+        class_names = [classroom.name for classroom in classes]
+        student_total = sum(len([student for student in classroom.students if getattr(student, "role", "student") == "student"]) for classroom in classes)
+        reply = (
+            f"Môn {subject.name} hiện có {len(classes)} lớp: {', '.join(class_names) if class_names else 'chưa có lớp nào'}. "
+            f"Tổng số sinh viên đang theo học các lớp của môn này là {student_total}."
+        )
+        actions = [
+            f"Mở danh sách lớp của môn {subject.name}",
+            "Xem thống kê điểm trung bình từng lớp",
+            "Kiểm tra môn này đang thiếu bao nhiêu tài liệu",
+        ]
+        return {"reply": reply, "suggested_actions": actions}
 
+    def _class_analytics_reply(self, classroom: Optional[Classroom], subject: Optional[Subject]) -> Dict[str, Any]:
+        if classroom is not None:
+            summary = self._class_score_summary(classroom, subject)
+            weak_text = ", ".join([f"{item['name']} ({item['score']})" for item in summary["weak_students"][:3]]) or "chưa đủ dữ liệu"
+            reply = (
+                f"Phân tích lớp {classroom.name}: điểm trung bình {summary['avg_score']:.1f}, tỷ lệ đỗ {summary['pass_rate']:.1f}%. "
+                f"Phổ điểm hiện tại cho thấy {summary['distribution']['Yếu (<40)']} sinh viên yếu, {summary['distribution']['Giỏi (>=80)']} sinh viên giỏi. "
+                f"Sinh viên cần ưu tiên hỗ trợ: {weak_text}."
+            )
+            actions = [
+                "Xem biểu đồ phân bố điểm của lớp này",
+                "Lọc sinh viên dưới 60 điểm",
+                "Tạo kế hoạch phụ đạo ngắn cho nhóm yếu",
+            ]
+            return {"reply": reply, "suggested_actions": actions}
+
+        if subject is not None:
+            classes = self.db.query(Classroom).filter(Classroom.subject_id == subject.id).all()
+            class_summaries = []
+            for item in classes:
+                summary = self._class_score_summary(item, subject)
+                class_summaries.append((item.name, summary["avg_score"], summary["pass_rate"]))
+            class_summaries.sort(key=lambda item: item[1], reverse=True)
+
+            if not class_summaries:
+                reply = f"Môn {subject.name} chưa có lớp hoặc chưa có dữ liệu đánh giá để phân tích."
+                actions = ["Tạo lớp cho môn này", "Nhập dữ liệu đánh giá", "Tải thêm tài liệu môn học"]
+                return {"reply": reply, "suggested_actions": actions}
+
+            best = class_summaries[0]
+            worst = class_summaries[-1]
+            reply = (
+                f"Trong các lớp của môn {subject.name}, lớp học tốt nhất hiện là {best[0]} với điểm trung bình {best[1]:.1f} và tỷ lệ đỗ {best[2]:.1f}%. "
+                f"Lớp cần hỗ trợ nhiều nhất là {worst[0]} với điểm trung bình {worst[1]:.1f} và tỷ lệ đỗ {worst[2]:.1f}%."
+            )
+            actions = [
+                "Mở chi tiết lớp tốt nhất để xem chiến lược học tập",
+                "Xem lớp kém nhất để lập kế hoạch phụ đạo",
+                "So sánh phổ điểm giữa các lớp của môn này",
+            ]
+            return {"reply": reply, "suggested_actions": actions}
+
+        reply = "Bạn chưa chỉ rõ lớp hoặc môn cần phân tích."
+        actions = ["Nêu rõ lớp X", "Hoặc nêu rõ môn X để so sánh các lớp trong môn đó", "Ví dụ: Trong các lớp môn Toán thì lớp nào học tốt?"]
+        return {"reply": reply, "suggested_actions": actions}
+
+    def _student_overview_reply(self, student: User) -> Dict[str, Any]:
         histories = (
             self.db.query(AssessmentHistory)
             .filter(AssessmentHistory.user_id == student.id)
             .order_by(AssessmentHistory.timestamp.asc())
             .all()
         )
-
-        total_tests = len(histories)
-        scores = [float(h.score or 0) for h in histories]
-        overall_avg = round(sum(scores) / len(scores), 1) if scores else 0.0
-        trend = self._calc_trend(scores)
-
-        by_subject: Dict[str, List[float]] = {}
-        for item in histories:
-            subject_name = self._clean_text(getattr(item, "subject", "")) or (
-                self._clean_text(getattr(getattr(item, "subject_obj", None), "name", ""))
-            ) or "Chưa rõ môn"
-            by_subject.setdefault(subject_name, []).append(float(item.score or 0))
-
-        subject_avgs: List[Tuple[str, float]] = []
-        for subject_name, subject_scores in by_subject.items():
-            if not subject_scores:
-                continue
-            subject_avgs.append((subject_name, round(sum(subject_scores) / len(subject_scores), 1)))
-        subject_avgs.sort(key=lambda x: x[1], reverse=True)
-
-        strongest_subject = subject_avgs[0] if subject_avgs else ("Chưa đủ dữ liệu", 0.0)
-        weakest_subject = subject_avgs[-1] if subject_avgs else ("Chưa đủ dữ liệu", 0.0)
-
-        recent_scores = scores[-5:] if len(scores) > 5 else scores
+        scores = [float(item.score or 0) for item in histories]
+        avg_score = round(sum(scores) / len(scores), 1) if scores else 0.0
+        recent_scores = scores[-5:]
         recent_avg = round(sum(recent_scores) / len(recent_scores), 1) if recent_scores else 0.0
+        trend = 0.0
+        if len(recent_scores) >= 2:
+            trend = round(recent_scores[-1] - recent_scores[0], 1)
 
-        return {
-            "class_count": class_count,
-            "total_tests": total_tests,
-            "overall_avg": overall_avg,
-            "recent_avg": recent_avg,
-            "trend": trend,
-            "strongest_subject": strongest_subject,
-            "weakest_subject": weakest_subject,
-        }
+        by_subject: Dict[str, List[float]] = defaultdict(list)
+        for item in histories:
+            subject_name = self._clean_text(getattr(item, "subject", "") or getattr(getattr(item, "subject_obj", None), "name", "") or "Chưa rõ môn")
+            by_subject[subject_name].append(float(item.score or 0))
 
-    def _extract_key_phrases(self, context: str, limit: int = 6):
-        tokens = re.findall(r"[A-Za-zÀ-ỹ0-9]{4,}", (context or "").lower())
-        stop = {
-            "trong", "được", "các", "những", "theo", "với", "cho", "của", "một", "này",
-            "that", "this", "from", "with", "have", "will", "about", "trên", "dưới",
-        }
-        freq: Dict[str, int] = {}
-        for token in tokens:
-            if token in stop or token.isdigit():
-                continue
-            freq[token] = freq.get(token, 0) + 1
-        ranked = sorted(freq.items(), key=lambda x: x[1], reverse=True)
-        return [item[0] for item in ranked[:limit]]
-
-    def _rule_based_reply(self, classroom: Classroom, message: str, stats: dict, allowed_files: List[str], context: str):
-        intent = self._detect_intent(message)
-        avg_score = float(stats.get("avg_score", 0))
-        weak_students = stats.get("weak_students", []) or []
-        score_bands = stats.get("score_bands", {}) or {}
-        top_terms = self._extract_key_phrases(context, limit=6)
-
-        if intent == "class_overview":
-            weakest_group = ", ".join(
-                [f"{item['name']} ({item['score']})" for item in weak_students[:3]]
-            ) if weak_students else "chưa xác định vì thiếu dữ liệu điểm gần nhất"
-            docs_text = ", ".join(allowed_files[:3]) if allowed_files else "chưa có tài liệu"
-            reply = (
-                f"Tình hình lớp {classroom.name}: có {stats.get('student_count', 0)} sinh viên, "
-                f"{stats.get('document_count', 0)} tài liệu đã upload, điểm trung bình hiện tại {avg_score:.1f}. "
-                f"Phân bố điểm gần nhất: <40 là {score_bands.get('<40', 0)}, 40-60 là {score_bands.get('40-60', 0)}, "
-                f"60-80 là {score_bands.get('60-80', 0)}, >=80 là {score_bands.get('>=80', 0)}. "
-                f"Nhóm cần hỗ trợ ngay: {weakest_group}. Tài liệu tiêu biểu: {docs_text}."
-            )
-            actions = [
-                "Mở phụ đạo 20 phút cho nhóm dưới 60 điểm trong buổi gần nhất",
-                "Ra 1 mini-quiz 8-10 câu cho 3 chủ điểm trọng tâm của lớp",
-                "Chốt checklist đầu ra buổi tới và đối chiếu lại sau khi kiểm tra nhanh",
-            ]
-            return reply, actions
-
-        if intent == "student_overview":
-            target_student = self._find_student_in_class(classroom, message)
-            if not target_student:
-                sample_names = [
-                    self._clean_text(getattr(s, "full_name", ""))
-                    for s in classroom.students
-                    if getattr(s, "role", "student") == "student"
-                ]
-                sample_text = ", ".join([n for n in sample_names[:5] if n]) or "chưa có danh sách"
-                reply = (
-                    f"Mình chưa xác định được học sinh cụ thể trong lớp {classroom.name}. "
-                    f"Bạn hãy nêu rõ họ tên hoặc mã sinh viên. Danh sách gợi ý: {sample_text}."
-                )
-                actions = [
-                    "Gửi lại yêu cầu kèm đúng tên học sinh (ví dụ: ABX)",
-                    "Có thể kèm MSSV để nhận diện chính xác hơn",
-                    "Sau khi xác định học sinh, mình sẽ tóm tắt kết quả và đề xuất cải thiện",
-                ]
-                return reply, actions
-
-            student_data = self._build_student_overview(target_student)
-            strong_name, strong_score = student_data["strongest_subject"]
-            weak_name, weak_score = student_data["weakest_subject"]
-            trend_text = (
-                "đang cải thiện" if student_data["trend"] > 3 else
-                "giảm nhẹ" if student_data["trend"] < -3 else
-                "đang ổn định"
-            )
-            student_label = self._clean_text(getattr(target_student, "full_name", "")) or self._clean_text(getattr(target_student, "username", ""))
-
-            reply = (
-                f"Tình hình học tập của {student_label}: đã tham gia {student_data['class_count']} lớp, "
-                f"có {student_data['total_tests']} bài đánh giá, điểm trung bình toàn bộ {student_data['overall_avg']:.1f} "
-                f"(5 bài gần nhất {student_data['recent_avg']:.1f}) và xu hướng {trend_text}. "
-                f"Môn mạnh nhất hiện tại: {strong_name} ({strong_score:.1f}). "
-                f"Môn cần cải thiện: {weak_name} ({weak_score:.1f})."
-            )
-            actions = [
-                f"Cho {student_label} luyện 2 bài ngắn bám môn {weak_name} trong tuần này",
-                "Đặt mốc kiểm tra lại sau 7 ngày bằng quiz 10 câu",
-                "Kèm 1 phiên ôn tập cá nhân theo lỗi sai thường gặp",
-            ]
-            return reply, actions
-
-        if intent == "quiz":
-            if avg_score < 45:
-                mix = "60% nhớ-hiểu, 30% vận dụng cơ bản, 10% phân tích"
-            elif avg_score < 65:
-                mix = "35% nhớ-hiểu, 45% vận dụng, 20% phân tích"
-            else:
-                mix = "20% nhớ-hiểu, 45% vận dụng, 35% phân tích"
-
-            reply = (
-                f"Đề xuất cho lớp {classroom.name}: tạo quiz 12-15 câu theo tỉ lệ {mix}. "
-                f"Ưu tiên bám 3 chủ điểm xuất hiện nhiều trong tài liệu: {', '.join(top_terms[:3]) if top_terms else 'khái niệm cốt lõi của môn học'}. "
-                f"Kết thúc bằng 2 câu phân tích lỗi sai thường gặp để đo mức hiểu thật."
-            )
-            actions = [
-                "Sinh 15 câu trắc nghiệm theo Bloom cho buổi tới",
-                "Tạo 1 mini-quiz 5 câu mở đầu để rà lại kiến thức nền",
-                "Lưu kết quả quiz để so sánh trước/sau buổi học",
-            ]
-            return reply, actions
-
-        if intent == "summary":
-            docs_text = ", ".join(allowed_files[:5]) if allowed_files else "chưa có tài liệu"
-            focus_text = ", ".join(top_terms[:5]) if top_terms else "chưa trích được từ khóa nổi bật"
-            reply = (
-                f"Tóm tắt nhanh lớp {classroom.name}: có {stats.get('student_count', 0)} sinh viên, "
-                f"điểm trung bình {avg_score:.1f}, hiện có {stats.get('document_count', 0)} tài liệu ({docs_text}). "
-                f"Các trọng tâm nên dạy: {focus_text}. "
-                f"Nên chia buổi học theo nhịp 15-20-15 phút: ôn nền, luyện vận dụng, chốt lỗi sai."
-            )
-            actions = [
-                "Yêu cầu agent tạo dàn ý slide theo 3 trọng tâm",
-                "Tạo checklist kiến thức tối thiểu cần đạt sau buổi",
-                "Soạn 3 câu hỏi khởi động và 3 câu hỏi kết thúc buổi",
-            ]
-            return reply, actions
-
-        if intent == "analysis":
-            weak_text = (
-                "; ".join([f"{item['name']} ({item['score']})" for item in weak_students[:3]])
-                if weak_students
-                else "Chưa có danh sách cụ thể từ dữ liệu hiện tại"
-            )
-            reply = (
-                f"Phân tích lớp {classroom.name}: điểm TB {avg_score:.1f}, phân bố điểm "
-                f"<{score_bands.get('<40', 0)} | 40-60:{score_bands.get('40-60', 0)} | 60-80:{score_bands.get('60-80', 0)} | >=80:{score_bands.get('>=80', 0)}. "
-                f"Nhóm cần hỗ trợ ưu tiên: {weak_text}."
-            )
-            actions = [
-                "Tổ chức nhóm phụ đạo 20 phút cho SV <=55 điểm",
-                "Thiết kế 1 worksheet chỉ tập trung các lỗi sai chính",
-                "Đánh giá lại sau 1 buổi bằng mini-quiz 8 câu",
-            ]
-            return reply, actions
-
-        if intent == "plan":
-            reply = (
-                f"Kế hoạch buổi tới cho lớp {classroom.name}: 10 phút ôn nhanh, 25 phút dạy trọng tâm, "
-                f"20 phút luyện bài tập theo cặp, 10 phút kiểm tra nhanh. "
-                f"Giữ trọng tâm ở: {', '.join(top_terms[:3]) if top_terms else 'nội dung chính của tài liệu lớp'}."
-            )
-            actions = [
-                "Chuẩn bị mục tiêu học tập theo 3 mức: đạt, khá, tốt",
-                "Tạo 2 bài tập tình huống bám tài liệu lớp",
-                "Chốt buổi bằng 5 câu exit ticket",
-            ]
-            return reply, actions
+        subject_avgs = sorted(
+            ((name, round(sum(values) / len(values), 1)) for name, values in by_subject.items() if values),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        strongest = subject_avgs[0] if subject_avgs else ("Chưa đủ dữ liệu", 0.0)
+        weakest = subject_avgs[-1] if subject_avgs else ("Chưa đủ dữ liệu", 0.0)
+        enrolled_classes = [classroom.name for classroom in student.enrolled_classes]
+        enrolled_subjects = sorted({self._clean_text(getattr(classroom.subject_obj, "name", "") or classroom.subject or "") for classroom in student.enrolled_classes if classroom.subject_id})
 
         reply = (
-            f"Tôi đã tổng hợp dữ liệu lớp {classroom.name}: {stats.get('student_count', 0)} sinh viên, "
-            f"{stats.get('document_count', 0)} tài liệu, điểm TB {avg_score:.1f}. "
-            f"Bạn có thể yêu cầu theo 4 hướng: tóm tắt tài liệu, tạo quiz, phân tích điểm yếu, hoặc lập kế hoạch buổi học."
+            f"Sinh viên {self._clean_text(student.full_name or student.username or f'SV {student.id}')}: đang tham gia {len(enrolled_classes)} lớp, "
+            f"điểm trung bình tổng thể {avg_score:.1f}, trung bình 5 bài gần nhất {recent_avg:.1f}. "
+            f"Xu hướng gần đây {'đang cải thiện' if trend > 0 else 'đang giảm' if trend < 0 else 'ổn định'}. "
+            f"Môn mạnh nhất: {strongest[0]} ({strongest[1]:.1f}); môn cần cải thiện: {weakest[0]} ({weakest[1]:.1f})."
+        )
+        if enrolled_classes:
+            reply += f" Các lớp đang tham gia: {', '.join(enrolled_classes)}."
+        actions = [
+            "Xem chi tiết kết quả theo từng môn",
+            "Lọc ra các lỗi sai phổ biến của sinh viên này",
+            "Gợi ý kế hoạch cải thiện cho môn yếu nhất",
+        ]
+        return {"reply": reply, "suggested_actions": actions}
+
+    def _material_reply(self, subject: Optional[Subject], classroom: Optional[Classroom], message: str) -> Dict[str, Any]:
+        clean_msg = self._normalize(message)
+        if any(phrase in clean_msg for phrase in ["môn nào thiếu tài liệu", "thiếu tài liệu", "thieu tai lieu"]):
+            subjects = self._subject_candidates()
+            missing = []
+            for item in subjects:
+                doc_count = self.db.query(Document).filter(Document.subject_id == item.id).count()
+                if doc_count == 0:
+                    missing.append(item.name)
+            if not missing:
+                reply = "Hiện tại tất cả các môn trong hệ thống đều đã có ít nhất một tài liệu."
+            else:
+                reply = f"Các môn đang thiếu tài liệu gồm: {', '.join(missing)}."
+            actions = [
+                "Mở danh sách môn thiếu tài liệu",
+                "Tải tài liệu cho môn còn trống",
+                "Kiểm tra lại tài liệu đã công khai cho sinh viên",
+            ]
+            return {"reply": reply, "suggested_actions": actions}
+
+        if subject is None and classroom is not None:
+            subject = self._resolve_subject({"subject_name": classroom.subject}, {}, classroom)
+
+        if subject is None:
+            reply = "Bạn chưa nêu rõ môn học cần xem tài liệu."
+            actions = ["Ví dụ: Cho tôi tài liệu môn Cơ sở Hệ điều hành", "Hoặc hỏi: Môn X có tài liệu gì?", "Nếu muốn, tôi có thể kiểm tra môn nào đang thiếu tài liệu"]
+            return {"reply": reply, "suggested_actions": actions}
+
+        documents = (
+            self.db.query(Document)
+            .filter(Document.subject_id == subject.id)
+            .order_by(Document.upload_time.desc())
+            .all()
+        )
+        if not documents:
+            reply = f"Môn {subject.name} hiện chưa có tài liệu nào được upload."
+            actions = ["Tải tài liệu cho môn này", "Kiểm tra danh sách môn thiếu tài liệu", "Tạo bộ tài liệu cơ bản cho môn học"]
+            return {"reply": reply, "suggested_actions": actions}
+
+        names = [doc.title or doc.filename or f"Tài liệu {doc.id}" for doc in documents[:8]]
+        classes = sorted({doc.classroom.name for doc in documents if doc.classroom is not None})
+        reply = (
+            f"Môn {subject.name} hiện có {len(documents)} tài liệu: {', '.join(names)}. "
+            f"Các tài liệu này đang dùng cho lớp: {', '.join(classes) if classes else 'chưa gắn cho lớp nào'}."
         )
         actions = [
-            "Tóm tắt học liệu chính của lớp",
-            "Đề xuất bộ câu hỏi kiểm tra theo mức độ",
-            "Phân tích nhóm sinh viên cần hỗ trợ",
+            "Mở từng tài liệu để xem nội dung",
+            "Kiểm tra tài liệu nào đang bị ẩn với sinh viên",
+            "Liệt kê thêm tài liệu cho môn này",
         ]
-        return reply, actions
+        return {"reply": reply, "suggested_actions": actions}
 
-    def _build_relevant_context(self, classroom: Classroom, message: str, allowed_files: List[str]):
-        query = f"{classroom.subject}. {classroom.name}. {message}"
-        try:
-            docs = self.vector_store.similarity_search(query, k=30, filter={"subject": {"$eq": classroom.subject}})
-        except Exception:
-            docs = []
+    def _generate_exam_versions(self, subject: Subject, exam_type: str, num_questions: int, num_versions: int, difficulty: Optional[str] = None) -> Dict[str, Any]:
+        bank = self.db.query(QuestionBank).filter(QuestionBank.subject_id == subject.id).all()
+        if difficulty:
+            filtered = [item for item in bank if self._normalize(item.difficulty or "") == difficulty]
+            if filtered:
+                bank = filtered
 
-        allowed_set = {self._clean_text(str(name)).lower() for name in allowed_files if self._clean_text(str(name))}
-        filtered_docs = []
-        for doc in docs:
-            source = self._clean_text(str((doc.metadata or {}).get("source", ""))).lower()
-            source_base = Path(source).name.lower() if source else ""
-            if not allowed_set or source in allowed_set or source_base in allowed_set:
-                filtered_docs.append(doc)
+        if not bank:
+            return {
+                "reply": f"Môn {subject.name} chưa có ngân hàng câu hỏi để xuất đề trắc nghiệm.",
+                "suggested_actions": [
+                    "Tải câu hỏi vào ngân hàng đề",
+                    "Đồng bộ câu hỏi từ tài liệu môn học",
+                    "Tạo lại đề sau khi có dữ liệu câu hỏi",
+                ],
+            }
 
-        docs = filtered_docs or docs
+        unique_questions = bank[:]
+        random.shuffle(unique_questions)
+        needed = num_questions
+        if len(unique_questions) < needed:
+            needed = len(unique_questions)
 
-        snippets = []
-        seen = set()
-        for doc in docs:
-            text = self._clean_text(getattr(doc, "page_content", ""))
-            if len(text) < 25:
-                continue
-            compact = text[:320]
-            key = compact.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            snippets.append(compact)
+        versions = []
+        for version_index in range(num_versions):
+            random.shuffle(unique_questions)
+            selected = unique_questions[:needed]
+            version_lines = [f"Đề {version_index + 1} - Môn {subject.name} - {exam_type} - {needed} câu"]
+            for idx, item in enumerate(selected, start=1):
+                title = self._clean_text(item.content or f"Câu hỏi {item.id}")
+                version_lines.append(f"{idx}. {title}")
+            versions.append({
+                "version": version_index + 1,
+                "questions": [
+                    {
+                        "id": item.id,
+                        "content": item.content,
+                        "options": item.options,
+                        "answer": item.correct_answer,
+                        "source_file": item.source_file,
+                    }
+                    for item in selected
+                ],
+                "text": "\n".join(version_lines),
+            })
 
-        return "\n".join(snippets[:8])
-
-    def _chat_json_openai(self, system_prompt: str, prompt: str, temperature: float = 0.2, max_tokens: int = 900):
-        if not self.openai_api_key:
-            raise RuntimeError("Thiếu OPENAI_API_KEY cho TEACHER_AGENT_LLM_PROVIDER=openai")
-
-        payload = {
-            "model": self.model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
+        reply = (
+            f"Tôi đã chuẩn bị {len(versions)} mã đề trắc nghiệm cho môn {subject.name} với {needed} câu mỗi đề. "
+            f"Ngân hàng hiện có ít hơn số câu bạn yêu cầu nên tôi chỉ có thể dùng {len(unique_questions)} câu sẵn có. "
+            f"Nếu bạn muốn đủ 30 câu, cần bổ sung thêm câu hỏi vào ngân hàng đề."
+        )
+        actions = [
+            "Xuất đề sang file Word",
+            "Xem lại câu hỏi theo mức độ khó",
+            "Chỉnh sửa số câu hoặc số mã đề",
+        ]
+        return {
+            "reply": reply,
+            "suggested_actions": actions,
+            "generated_exam": {
+                "subject": subject.name,
+                "exam_type": exam_type,
+                "num_questions": needed,
+                "num_versions": num_versions,
+                "versions": versions,
+            },
         }
 
-        req = urllib.request.Request(
-            f"{self.openai_base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.openai_api_key}",
-            },
-            method="POST",
-        )
-
-        with urllib.request.urlopen(req, timeout=self.request_timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            content = (
-                (data.get("choices") or [{}])[0]
-                .get("message", {})
-                .get("content", "")
+    def _build_general_reply(self, subject: Optional[Subject], classroom: Optional[Classroom]) -> Dict[str, Any]:
+        subject_name = subject.name if subject else (classroom.subject if classroom else "")
+        if classroom:
+            summary = self._class_score_summary(classroom, subject)
+            reply = (
+                f"Tôi đã tổng hợp dữ liệu lớp {classroom.name}: {summary['student_count']} sinh viên, điểm TB {summary['avg_score']:.1f}, "
+                f"tỷ lệ đỗ {summary['pass_rate']:.1f}%. Bạn có thể hỏi về lớp này, môn này, tài liệu, hoặc xuất đề trắc nghiệm."
             )
-            clean = re.sub(r"```json|```", "", str(content)).strip()
-            if not clean:
-                raise RuntimeError("OpenAI trả về nội dung rỗng")
-            return json.loads(clean)
+        elif subject_name:
+            classes = self.db.query(Classroom).filter(Classroom.subject_id == subject.id).count() if subject else 0
+            reply = (
+                f"Môn {subject_name} đang có {classes} lớp trong hệ thống. Bạn có thể hỏi tiếp về lớp, tài liệu, sinh viên hoặc đề thi."
+            )
+        else:
+            reply = "Tôi chỉ xử lý các nhóm: môn học, lớp học, phân tích lớp, sinh viên, tài liệu và đề thi trắc nghiệm."
+        actions = [
+            "Hỏi về môn học",
+            "Hỏi về lớp học",
+            "Hỏi về tài liệu hoặc đề thi",
+        ]
+        return {"reply": reply, "suggested_actions": actions}
 
-    def _chat_json_ollama(self, system_prompt: str, prompt: str, temperature: float = 0.2, max_tokens: int = 900):
-        model_names = self._get_ollama_models()
-        if not model_names:
-            raise RuntimeError("Ollama chưa sẵn sàng hoặc chưa có model")
+    def _build_context_updates(self, intent_type: str, entities: Dict[str, Any], subject: Optional[Subject], classroom: Optional[Classroom], student: Optional[User]) -> Dict[str, Any]:
+        updates = {
+            "last_intent": intent_type,
+            "last_action_type": intent_type,
+            "last_entities": entities,
+        }
+        if subject:
+            updates["last_subject"] = subject.name
+            updates["last_subject_name"] = subject.name
+            updates["last_subject_id"] = subject.id
+        elif entities.get("subject_name"):
+            updates["last_subject_name"] = entities.get("subject_name")
 
-        # Ưu tiên model được cấu hình; nếu không có thì thử fallback; cuối cùng lấy model đầu tiên sẵn có.
-        candidates = [self.ollama_model, self.model, self.fallback_model]
-        for common in ["qwen2.5:14b", "qwen2.5:7b", "llama3.1:8b", "llama3:8b", "mistral:7b"]:
-            candidates.append(common)
-        for available in model_names:
-            candidates.append(available)
+        if classroom:
+            updates["last_class"] = classroom.name
+            updates["last_class_name"] = classroom.name
+            updates["last_class_id"] = classroom.id
 
-        ordered = []
-        seen = set()
-        for c in candidates:
-            k = self._clean_text(str(c))
-            if not k or k in seen:
-                continue
-            seen.add(k)
-            ordered.append(k)
-
-        def call_ollama(model_name: str):
-            payload = {
-                "model": model_name,
-                "stream": False,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                "options": {
-                    "temperature": temperature,
-                    "num_predict": max_tokens,
-                },
+        if student:
+            updates["last_student_asked"] = {
+                "id": student.id,
+                "name": self._clean_text(student.full_name or student.username or f"SV {student.id}"),
+                "student_id": student.student_id,
             }
+            updates["last_student_id"] = student.id
+            updates["last_student_name"] = self._clean_text(student.full_name or student.username or f"SV {student.id}")
 
-            req = urllib.request.Request(
-                f"{self.ollama_host}/api/chat",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
+        return updates
 
-            with urllib.request.urlopen(req, timeout=self.request_timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                content = data.get("message", {}).get("content", "")
-                clean = re.sub(r"```json|```", "", content).strip()
-                return json.loads(clean)
-
-        last_exc = None
-        for model_name in ordered:
-            try:
-                return call_ollama(model_name)
-            except Exception as exc:
-                last_exc = exc
-                continue
-        raise last_exc or RuntimeError("Không gọi được model Ollama")
-
-    def _chat_json(self, system_prompt: str, prompt: str, temperature: float = 0.2, max_tokens: int = 900):
-        if self.provider == "openai":
-            try:
-                return self._chat_json_openai(system_prompt, prompt, temperature=temperature, max_tokens=max_tokens)
-            except Exception:
-                if not self.openai_fallback_to_ollama:
-                    raise
-                return self._chat_json_ollama(system_prompt, prompt, temperature=temperature, max_tokens=max_tokens)
-
-        return self._chat_json_ollama(system_prompt, prompt, temperature=temperature, max_tokens=max_tokens)
+    def _merge_pending_entities(self, pending_request: Dict[str, Any], current_entities: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(pending_request.get("entities", {}) or {})
+        merged.update({key: value for key, value in current_entities.items() if value not in [None, ""]})
+        return merged
 
     def respond(self, teacher_id: int, class_id: int, message: str):
-        classroom = self._resolve_classroom(class_id, teacher_id)
-        stats = self._build_class_stats(classroom)
-        documents = self.db.query(Document).filter(Document.class_id == classroom.id).all()
-        allowed_files = [doc.filename for doc in documents if doc.filename]
-        intent = self._detect_intent(message)
+        memory = get_conversation_memory()
+        context = memory.get_context(teacher_id, class_id)
+        analysis = self.classifier.classify_request(message, context)
+        pending_request = memory.get_pending_request(teacher_id, class_id)
 
-        # Các truy vấn tóm tắt lớp/học sinh cần phản hồi nhanh và bám số liệu thật,
-        # không phụ thuộc vector search hay LLM để tránh trả lời lệch trọng tâm.
-        if intent in {"class_overview", "student_overview"}:
-            fallback_reply, fallback_actions = self._rule_based_reply(
-                classroom=classroom,
-                message=message,
-                stats=stats,
-                allowed_files=allowed_files,
-                context="",
+        intent_type = analysis["intent_type"]
+        entities = analysis["entities"]
+        if pending_request and (analysis["needs_follow_up"] or analysis["confidence"] < 0.4 or intent_type == self.classifier.GENERAL_QUESTION):
+            intent_type = pending_request.get("intent_type", intent_type)
+            entities = self._merge_pending_entities(pending_request, entities)
+
+        subject = self._resolve_subject(entities, context)
+        classroom = self._resolve_classroom(entities, context, subject)
+        student = self._resolve_student(entities, context, classroom)
+
+        # If the user just provided a follow-up, try to reuse the previous subject/class/student.
+        if not subject and classroom:
+            subject = self._resolve_subject({"subject_name": classroom.subject or getattr(classroom.subject_obj, "name", "")}, context, classroom)
+
+        # Compute missing information based on the final resolved entities.
+        missing_fields: List[str] = []
+        if intent_type == IntentClassifier.COURSE_INFO and subject is None:
+            missing_fields.append("subject_name")
+        elif intent_type == IntentClassifier.CLASS_OVERVIEW and classroom is None:
+            missing_fields.append("class_name")
+        elif intent_type == IntentClassifier.CLASS_ANALYTICS and classroom is None and subject is None:
+            missing_fields.append("class_or_subject")
+        elif intent_type == IntentClassifier.STUDENT_INFO and student is None:
+            missing_fields.append("student_name")
+        elif intent_type == IntentClassifier.MATERIAL and subject is None and "thiếu tài liệu" not in self._normalize(message):
+            missing_fields.append("subject_name")
+        elif intent_type == IntentClassifier.EXAM_GENERATION:
+            if subject is None:
+                missing_fields.append("subject_name")
+            if not entities.get("exam_type"):
+                missing_fields.append("exam_type")
+            if not entities.get("num_questions"):
+                missing_fields.append("num_questions")
+            if not entities.get("num_versions"):
+                missing_fields.append("num_versions")
+
+        if missing_fields:
+            follow_up = self.classifier.get_missing_info_message(intent_type, missing_fields)
+            memory.set_pending_request(
+                teacher_id,
+                class_id,
+                {
+                    "intent_type": intent_type,
+                    "entities": entities,
+                    "missing_fields": missing_fields,
+                    "follow_up_question": follow_up,
+                    "created_at": datetime.utcnow().isoformat(),
+                },
+            )
+            memory.add_message(
+                teacher_id,
+                class_id,
+                "user",
+                message,
+                {"intent": intent_type, "confidence": analysis["confidence"]},
+            )
+            memory.add_message(
+                teacher_id,
+                class_id,
+                "agent",
+                follow_up,
+                {"needs_more_info": True, "missing_fields": missing_fields},
             )
             return {
-                "reply": fallback_reply,
-                "suggested_actions": fallback_actions,
-                "class_name": classroom.name,
-                "subject": classroom.subject,
+                "reply": follow_up,
+                "suggested_actions": ["Bổ sung thông tin còn thiếu", "Ví dụ: Môn Cơ sở Hệ điều hành", "Ví dụ: Lớp IT1"],
+                "class_name": classroom.name if classroom else "",
+                "subject": subject.name if subject else "",
+                "intent_type": intent_type,
+                "confidence": analysis["confidence"],
+                "needs_more_info": True,
+                "missing_fields": missing_fields,
+                "action_metadata": self.router.route_action(intent_type, context=context, class_id=class_id, student_name=getattr(student, "full_name", None), subject_name=getattr(subject, "name", None)),
             }
 
-        context = self._build_relevant_context(classroom, message, allowed_files)
+        memory.clear_pending_request(teacher_id, class_id)
 
-        if not context:
-            context = "Chưa có đủ ngữ cảnh từ tài liệu lớp. Hãy hỏi về cách tổ chức buổi học, kiểm tra, hoặc tải thêm tài liệu lên lớp."
+        # Build the final response.
+        if intent_type == IntentClassifier.COURSE_INFO and subject is not None:
+            result = self._course_info_reply(subject)
+        elif intent_type == IntentClassifier.CLASS_OVERVIEW:
+            classroom = classroom or self.db.query(Classroom).filter(Classroom.id == class_id).first()
+            if classroom is None:
+                result = {"reply": "Không tìm thấy lớp học.", "suggested_actions": ["Chọn lại lớp học", "Kiểm tra mã lớp" ]}
+            else:
+                subject = subject or self._resolve_subject({"subject_name": classroom.subject or getattr(classroom.subject_obj, "name", "")}, context, classroom)
+                result = self._class_overview_reply(classroom, subject, context)
+        elif intent_type == IntentClassifier.CLASS_ANALYTICS:
+            if classroom is not None:
+                subject = subject or self._resolve_subject({"subject_name": classroom.subject or getattr(classroom.subject_obj, "name", "")}, context, classroom)
+                result = self._class_analytics_reply(classroom, subject)
+            else:
+                result = self._class_analytics_reply(None, subject)
+        elif intent_type == IntentClassifier.STUDENT_INFO and student is not None:
+            result = self._student_overview_reply(student)
+        elif intent_type == IntentClassifier.MATERIAL:
+            result = self._material_reply(subject, classroom, message)
+        elif intent_type == IntentClassifier.EXAM_GENERATION and subject is not None:
+            exam_type = entities.get("exam_type") or "multiple_choice"
+            num_questions = int(entities.get("num_questions") or 0)
+            num_versions = int(entities.get("num_versions") or 0)
+            difficulty = entities.get("difficulty")
+            result = self._generate_exam_versions(subject, exam_type, num_questions, num_versions, difficulty=difficulty)
+        else:
+            result = self._build_general_reply(subject, classroom)
 
-        document_names = ", ".join(allowed_files[:10]) if allowed_files else "Chưa có tài liệu"
+        response_intent = intent_type
+        if not result.get("reply"):
+            result["reply"] = "Tôi chưa xử lý được yêu cầu này."
 
-        system_prompt = (
-            "Bạn là trợ lý AI cho giảng viên đại học. "
-            "Nhiệm vụ là hỗ trợ giảng viên ra quyết định dạy học dựa trên dữ liệu lớp, tài liệu và tình hình học tập. "
-            "Trả lời ngắn gọn, thực dụng, có hành động rõ ràng. "
-            "Không bịa dữ liệu ngoài thông tin được cung cấp. "
-            "Luôn trả về JSON hợp lệ với 2 khóa: reply và suggested_actions."
+        result["class_name"] = classroom.name if classroom else result.get("class_name", "")
+        result["subject"] = subject.name if subject else result.get("subject", "")
+        result["intent_type"] = response_intent
+        result["confidence"] = analysis["confidence"]
+        result["action_metadata"] = self.router.route_action(
+            response_intent,
+            context=context,
+            class_id=classroom.id if classroom else class_id,
+            student_name=self._clean_text(student.full_name or student.username) if student else None,
+            subject_name=subject.name if subject else None,
         )
 
-        prompt = f"""
-Thông tin lớp học:
-- Tên lớp: {classroom.name}
-- Môn học: {classroom.subject}
-- Số sinh viên: {stats['student_count']}
-- Số tài liệu: {stats['document_count']}
-- Số bản ghi đánh giá: {stats['history_count']}
-- Điểm trung bình gần nhất: {stats['avg_score']}
-- Gợi ý chuyên môn: {stats['weak_area_hint']}
+        memory.add_message(
+            teacher_id,
+            class_id,
+            "user",
+            message,
+            {"intent": response_intent, "confidence": analysis["confidence"]},
+        )
+        memory.add_message(
+            teacher_id,
+            class_id,
+            "agent",
+            result["reply"],
+            {
+                "intent": response_intent,
+                "subject_id": getattr(subject, "id", None),
+                "class_id": getattr(classroom, "id", class_id),
+                "student_id": getattr(student, "id", None),
+            },
+        )
+        memory.update_context(teacher_id, class_id, self._build_context_updates(response_intent, entities, subject, classroom, student))
 
-Danh sách tài liệu:
-{document_names}
+        # Persist pending exam info if the user is in the middle of a generator flow.
+        if response_intent == IntentClassifier.EXAM_GENERATION and isinstance(result.get("generated_exam"), dict):
+            memory.update_context(teacher_id, class_id, {
+                "pending_exam_info": {
+                    "subject": subject.name,
+                    "exam_type": entities.get("exam_type"),
+                    "num_questions": entities.get("num_questions"),
+                    "num_versions": entities.get("num_versions"),
+                    "difficulty": entities.get("difficulty"),
+                }
+            })
 
-Ngữ cảnh tài liệu liên quan:
-{context[:10000]}
-
-Câu hỏi của giảng viên:
-{message}
-
-Quy tắc ưu tiên:
-- Nếu câu hỏi yêu cầu tóm tắt tình hình lớp: bắt buộc nêu rõ số sinh viên, điểm trung bình, số tài liệu và nhận xét ngắn về nhóm cần hỗ trợ.
-- Nếu câu hỏi yêu cầu tóm tắt học sinh cụ thể: bắt buộc nêu số lớp đã tham gia, kết quả học tập (điểm TB/xu hướng), môn mạnh và môn cần cải thiện.
-- Tuyệt đối không trả lời lệch sang tạo quiz nếu người dùng đang yêu cầu tóm tắt tình hình.
-
-Yêu cầu đầu ra:
-1) reply: trả lời trực tiếp, tối đa 180 từ, ưu tiên hướng dẫn thực thi.
-2) suggested_actions: mảng 3 phần tử, mỗi phần tử là một hành động ngắn giảng viên có thể làm ngay.
-
-Trả về đúng schema:
-{{
-  "reply": "...",
-  "suggested_actions": ["...", "...", "..."]
-}}
-""".strip()
-
-        try:
-            data = self._chat_json(system_prompt, prompt)
-            reply = self._clean_text(str(data.get("reply", "")))
-            suggested_actions = data.get("suggested_actions", [])
-            if not isinstance(suggested_actions, list):
-                suggested_actions = []
-            suggested_actions = [self._clean_text(str(item)) for item in suggested_actions if self._clean_text(str(item))][:3]
-
-            if not reply:
-                reply = f"Tôi đã tổng hợp dữ liệu lớp {classroom.name}. Bạn có thể yêu cầu cụ thể hơn để tôi đề xuất bài kiểm tra, roadmap, hoặc phân tích tài liệu."
-
-            if not suggested_actions:
-                suggested_actions = [
-                    "Yêu cầu agent tóm tắt tài liệu lớp",
-                    "Đề xuất 5 câu hỏi kiểm tra theo môn học",
-                    "Phân tích điểm yếu của lớp dựa trên lịch sử học tập",
-                ]
-
-            return {
-                "reply": reply,
-                "suggested_actions": suggested_actions,
-                "class_name": classroom.name,
-                "subject": classroom.subject,
-            }
-        except Exception as exc:
-            fallback_reply, fallback_actions = self._rule_based_reply(
-                classroom=classroom,
-                message=message,
-                stats=stats,
-                allowed_files=allowed_files,
-                context=context,
-            )
-            return {
-                "reply": fallback_reply,
-                "suggested_actions": fallback_actions,
-                "class_name": classroom.name,
-                "subject": classroom.subject,
-                "error": str(exc),
-            }
+        return result

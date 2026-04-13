@@ -30,14 +30,26 @@ class ConversationMemory:
                 "conversation_history": [],
                 "context": {
                     "last_subject": None,
-                    "last_student_asked": None,  # {id, name, student_id}
+                    "last_subject_id": None,
+                    "last_subject_name": None,
+                    "last_class": None,
                     "last_class_id": class_id,
-                    "last_action_type": None,  # "class_overview", "student_check", "subject_mgmt", "exam_creation"
+                    "last_class_name": None,
+                    "last_student_asked": None,  # {id, name, student_id}
+                    "last_student_id": None,
+                    "last_student_name": None,
+                    "last_action_type": None,
+                    "last_intent": None,
+                    "last_entities": {},
+                    "pending_request": None,
+                    "pending_fields": [],
                     "pending_exam_info": {  # Để hỏi lại nếu user chưa cung cấp đủ thông tin
                         "subject": None,
-                        "type": None,  # "multiple_choice", "essay", "mixed"
+                        "type": None,
+                        "exam_type": None,  # "multiple_choice", "essay", "mixed"
                         "num_questions": None,
                         "num_versions": None,
+                        "difficulty": None,
                     },
                 },
             }
@@ -72,6 +84,27 @@ class ConversationMemory:
         
         memory["context"].update(context_updates)
         self.sessions[session_key] = memory
+
+    def set_pending_request(self, teacher_id: int, class_id: int, pending_request: Dict):
+        """Lưu yêu cầu đang thiếu dữ liệu để tiếp tục ở lượt sau"""
+        memory = self.get_or_create_memory(teacher_id, class_id)
+        session_key = self.get_session_key(teacher_id, class_id)
+        memory["context"]["pending_request"] = pending_request
+        memory["context"]["pending_fields"] = pending_request.get("missing_fields", [])
+        self.sessions[session_key] = memory
+
+    def clear_pending_request(self, teacher_id: int, class_id: int):
+        """Xóa yêu cầu đang chờ bổ sung thông tin"""
+        memory = self.get_or_create_memory(teacher_id, class_id)
+        session_key = self.get_session_key(teacher_id, class_id)
+        memory["context"]["pending_request"] = None
+        memory["context"]["pending_fields"] = []
+        self.sessions[session_key] = memory
+
+    def get_pending_request(self, teacher_id: int, class_id: int) -> Optional[Dict]:
+        """Lấy yêu cầu đang chờ bổ sung thông tin"""
+        memory = self.get_or_create_memory(teacher_id, class_id)
+        return memory.get("context", {}).get("pending_request")
     
     def get_context(self, teacher_id: int, class_id: int) -> Dict:
         """Lấy ngữ cảnh hiện tại"""

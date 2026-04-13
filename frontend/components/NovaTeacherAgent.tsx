@@ -36,6 +36,7 @@ export default function NovaTeacherAgent() {
   const [inputValue, setInputValue] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string>("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -97,6 +98,45 @@ export default function NovaTeacherAgent() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Initialize and persist sessionId
+  useEffect(() => {
+    let sid = localStorage.getItem("nova_session_id");
+    if (!sid) {
+      sid = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      localStorage.setItem("nova_session_id", sid);
+    }
+    setSessionId(sid);
+  }, []);
+
+  // Load messages from localStorage on mount
+  useEffect(() => {
+    if (sessionId) {
+      const key = `nova_messages_${sessionId}`;
+      const stored = localStorage.getItem(key);
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored) as Message[];
+          // Convert timestamp strings back to Date objects
+          const messagesWithDates = parsed.map(msg => ({
+            ...msg,
+            timestamp: new Date(msg.timestamp)
+          }));
+          setMessages(messagesWithDates);
+        } catch (e) {
+          console.error("Failed to parse stored messages:", e);
+        }
+      }
+    }
+  }, [sessionId]);
+
+  // Persist messages to localStorage whenever they change
+  useEffect(() => {
+    if (sessionId && messages.length > 0) {
+      const key = `nova_messages_${sessionId}`;
+      localStorage.setItem(key, JSON.stringify(messages));
+    }
+  }, [messages, sessionId]);
 
   // Handle navigation based on action_metadata
   const handleNavigation = (action: ActionMetadata) => {
@@ -170,6 +210,7 @@ export default function NovaTeacherAgent() {
           teacher_id: teacherId,
           class_id: classId,
           message: userMessage,
+          session_id: sessionId,
         }),
       });
 

@@ -1,0 +1,77 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Kill dev servers on 8000 3000 3001",
+			"type": "shell",
+			"command": "$ports = @(8000,3000,3001); $pids = Get-NetTCPConnection -State Listen | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($pid in $pids) { try { Stop-Process -Id $pid -Force -ErrorAction Stop } catch {} }; Write-Output ('Killed PIDs: ' + ($pids -join ', '))",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Start backend dev server",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/backend\"; & \"${workspaceFolder}/.venv/Scripts/Activate.ps1\"; python -m uvicorn main:app --reload --port 8000",
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Start frontend dev server",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/frontend\"; npm run dev",
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Kill dev servers v2",
+			"type": "shell",
+			"command": "$ports = @(8000,3000,3001); $pids = Get-NetTCPConnection -State Listen | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($pid in $pids) { try { Stop-Process -Id $pid -Force -ErrorAction Stop } catch {} }; Write-Output ('Killed PIDs: ' + ($pids -join ', '))",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Start backend clean",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/backend\"; & \"${workspaceFolder}/.venv/Scripts/Activate.ps1\"; python -m uvicorn main:app --reload --port 8000",
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Start frontend clean",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/frontend\"; npm run dev",
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Force kill dev ports clean",
+			"type": "shell",
+			"command": "$ports = @(8000,3000,3001); $processIds = Get-NetTCPConnection -State Listen | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($processId in $processIds) { try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {} }; Write-Output ('Killed PIDs: ' + ($processIds -join ', '))",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Restart backend after clean kill",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/backend\"; & \"${workspaceFolder}/.venv/Scripts/Activate.ps1\"; python -m uvicorn main:app --reload --port 8000",
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Restart frontend after clean kill",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/frontend\"; npm run dev",
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}
