@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Manrope, Space_Grotesk } from "next/font/google";
 import "./globals.css";
 import Navbar from "@/components/Navbar";
+import NovaTeacherAgent from "@/components/NovaTeacherAgent";
 import { Toaster } from "react-hot-toast"; 
 
 const manrope = Manrope({ subsets: ["latin"], variable: "--font-manrope" });
@@ -23,6 +24,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <main className="flex-1 w-full flex flex-col">
           {children}
         </main>
+
+        <NovaTeacherAgent />
 
         {/* Thông báo Global */}
         <Toaster 

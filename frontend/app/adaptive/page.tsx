@@ -928,7 +928,7 @@ export default function AdaptiveLearningPage() {
                 <p className="text-lg font-black text-slate-800">Kết quả: {Math.round(Number(quizResult.score || 0))}% ({quizResult.correct_count}/{quizResult.total_questions})</p>
                 <p className="text-sm text-slate-700">{quizResult.message}</p>
 
-                {quizResult?.chapter_feedback?.weak_topics?.length > 0 && (
+                {quizResult?.chapter_feedback?.weak_topics && Array.isArray(quizResult.chapter_feedback.weak_topics) && quizResult.chapter_feedback.weak_topics.length > 0 && (
                   <div className="bg-red-50 border border-red-100 rounded-xl p-3">
                     <p className="text-[10px] uppercase font-black text-red-600 mb-2">Các phần cần học lại</p>
                     {quizResult.chapter_feedback.weak_topics.map((w: string, i: number) => (

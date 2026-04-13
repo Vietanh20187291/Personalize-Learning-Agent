@@ -59,6 +59,13 @@ export default function ClassMembersPage() {
   const [statsLoading, setStatsLoading] = useState(false);
   const [classSubject, setClassSubject] = useState<string>("");
 
+  // Save selectedClassId to localStorage when it changes
+  useEffect(() => {
+    if (selectedClassId) {
+      localStorage.setItem("currentClassId", selectedClassId.toString());
+    }
+  }, [selectedClassId]);
+
   const [viewingStudent, setViewingStudent] = useState<{id: number, name: string} | null>(null);
   const [studentSubject, setStudentSubject] = useState<string>("");
   const [studentStats, setStudentStats] = useState({ avg: 0, total: 0, best: 0 });
