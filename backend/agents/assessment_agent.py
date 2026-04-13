@@ -20,9 +20,16 @@ class AssessmentAgent:
         self.provider = os.getenv("ASSESSMENT_LLM_PROVIDER", "ollama").strip().lower()
         self.model = os.getenv(
             "ASSESSMENT_LLM_MODEL",
-            "gemini-1.5-flash" if self.provider == "gemini" else "mixtral-8x7b-instruct",
+            "gpt-4o-mini"
+            if self.provider == "openai"
+            else ("gemini-1.5-flash" if self.provider == "gemini" else "mixtral-8x7b-instruct"),
         )
         self.ollama_fallback_model = os.getenv("ASSESSMENT_OLLAMA_FALLBACK_MODEL", "qwen2.5:14b")
+        self.openai_api_key = os.getenv("ASSESSMENT_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        self.openai_base_url = os.getenv("ASSESSMENT_OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        self.openai_fallback_to_ollama = os.getenv("ASSESSMENT_OPENAI_FALLBACK_TO_OLLAMA", "true").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
 
         self.client = None
         self.api_key = os.getenv("GROQ_KEY_ASSESSMENT")
@@ -34,6 +41,9 @@ class AssessmentAgent:
             if not self.api_key:
                 raise ValueError("Thiếu GROQ_KEY_ASSESSMENT cho provider=groq")
             self.client = Groq(api_key=self.api_key)
+        elif self.provider == "openai":
+            if not self.openai_api_key:
+                raise ValueError("Thiếu OPENAI_API_KEY/ASSESSMENT_OPENAI_API_KEY cho provider=openai")
         elif self.provider == "gemini":
             if not self.gemini_api_key:
                 print("⚠️ Thiếu GEMINI_API_KEY, fallback sang Ollama.")
@@ -65,6 +75,39 @@ class AssessmentAgent:
             raw = res.choices[0].message.content
             clean = re.sub(r'```json|```', '', raw).strip()
             return json.loads(clean)
+
+        if self.provider == "openai":
+            payload = {
+                "model": self.model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+
+            req = urllib.request.Request(
+                f"{self.openai_base_url}/chat/completions",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.openai_api_key}",
+                },
+                method="POST",
+            )
+
+            try:
+                with urllib.request.urlopen(req, timeout=45) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    raw = ((data.get("choices") or [{}])[0].get("message", {}) or {}).get("content", "")
+                    clean = re.sub(r'```json|```', '', str(raw)).strip()
+                    return json.loads(clean)
+            except Exception as e:
+                if not self.openai_fallback_to_ollama:
+                    raise
+                print(f"⚠️ OpenAI lỗi ({e}), fallback sang Ollama.")
 
         ollama_model = self.model
         if self.provider == "gemini":

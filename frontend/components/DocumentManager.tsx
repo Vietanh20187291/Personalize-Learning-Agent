@@ -116,16 +116,16 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
 
   if (loading) return (
     <div className="flex flex-col items-center justify-center p-20 gap-4">
-      <Loader2 className="w-10 h-10 animate-spin text-indigo-600" />
+      <Loader2 className="w-10 h-10 animate-spin text-teal-700" />
       <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Đang truy xuất kho học liệu...</p>
     </div>
   );
 
   return (
-    <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden animate-in fade-in duration-500">
-      <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+    <div className="hero-panel overflow-hidden animate-in fade-in duration-500">
+      <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70 backdrop-blur flex justify-between items-center">
         <h3 className="text-sm font-black text-slate-800 uppercase tracking-tight flex items-center gap-2">
-          <BookOpen className="w-4 h-4 text-indigo-600" /> 
+          <BookOpen className="w-4 h-4 text-teal-700" /> 
           Tri thức lớp ID: <span className="text-indigo-600">{classId || "Toàn bộ"}</span>
         </h3>
         <span className="text-[10px] font-bold text-slate-400 uppercase">
@@ -150,14 +150,14 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
                 <tr key={doc.id} className="hover:bg-slate-50/50 transition-colors group">
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
-                      <div className="p-2 bg-indigo-50 rounded-lg text-indigo-600 group-hover:scale-110 transition-transform">
+                      <div className="p-2 bg-teal-50 rounded-lg text-teal-700 group-hover:scale-110 transition-transform">
                         <FileText className="w-4 h-4" />
                       </div>
                       {editingId === doc.id ? (
                         <input
                           value={editingTitle}
                           onChange={(e) => setEditingTitle(e.target.value)}
-                          className="w-full max-w-[320px] px-3 py-2 rounded-lg border border-slate-300 text-slate-900 font-semibold outline-none focus:border-indigo-500"
+                          className="w-full max-w-[320px] px-3 py-2 rounded-lg border border-slate-300 text-slate-900 font-semibold outline-none focus:border-teal-500"
                         />
                       ) : (
                         <span className="font-bold text-slate-700 truncate max-w-[300px]">{doc.title || doc.filename}</span>
@@ -165,7 +165,7 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
                     </div>
                   </td>
                   <td className="px-6 py-4">
-                    <span className="px-2 py-1 bg-white text-indigo-600 rounded text-[10px] font-black uppercase tracking-wider border border-indigo-100">
+                    <span className="px-2 py-1 bg-white text-teal-700 rounded text-[10px] font-black uppercase tracking-wider border border-teal-100">
                       {doc.subject}
                     </span>
                   </td>
@@ -211,7 +211,7 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
                         <>
                           <button
                             onClick={() => startEdit(doc)}
-                            className="p-2 text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
+                            className="p-2 text-slate-300 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition-all"
                             title="Sửa tiêu đề tài liệu"
                           >
                             <Pencil className="w-4 h-4" />

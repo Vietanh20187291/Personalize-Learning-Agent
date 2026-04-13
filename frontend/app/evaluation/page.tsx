@@ -191,8 +191,8 @@ export default function EvaluationPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] py-8 font-sans text-slate-800">
-      <div className="max-w-6xl mx-auto px-6 space-y-8">
+    <div className="page-shell text-slate-800">
+      <div className="max-w-6xl mx-auto px-2 sm:px-4 space-y-8">
         
         {/* HEADER */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
@@ -278,7 +278,7 @@ export default function EvaluationPage() {
               </div>
 
               {/* MAIN TABLE */}
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="hero-panel overflow-hidden">
                 <div className="p-6 border-b border-slate-100 flex justify-between items-center">
                   <h3 className="font-bold text-slate-800 flex items-center gap-2">
                     <Calendar className="w-4 h-4 text-slate-400" />

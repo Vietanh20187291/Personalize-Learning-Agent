@@ -5,16 +5,16 @@ import AssessmentForm from '@/components/AssessmentForm';
 
 export default function AssessmentPage() {
   return (
-    <div className="min-h-screen bg-gray-50 py-10">
+    <div className="page-shell">
       
 
-      <div className="container mx-auto px-4">
+      <div className="page-container">
         {/* 2. Phần tiêu đề trang */}
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-extrabold text-blue-900 mb-2">
+        <div className="hero-panel soft-grid text-center mb-8 py-8 px-6">
+          <h1 className="display-font text-3xl font-extrabold text-slate-900 mb-2">
             AI Personalized Learning
           </h1>
-          <div className="h-1 w-20 bg-blue-600 mx-auto rounded-full"></div>
+          <div className="h-1 w-20 bg-teal-600 mx-auto rounded-full"></div>
         </div>
 
         {/* 3. Component chứa toàn bộ logic làm bài */}

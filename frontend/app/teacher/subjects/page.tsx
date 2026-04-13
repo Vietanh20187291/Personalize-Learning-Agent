@@ -340,7 +340,7 @@ export default function TeacherSubjectsPage() {
   };
 
   return (
-    <div className="min-h-[calc(100vh-4rem)] bg-slate-50 p-6 md:p-10">
+    <div className="min-h-[calc(100vh-4rem)] app-bg p-4 md:p-8">
       <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6">
         <section className="lg:col-span-4 space-y-6">
           <div className="bg-white rounded-3xl border border-slate-200 p-6 flex items-center gap-4">

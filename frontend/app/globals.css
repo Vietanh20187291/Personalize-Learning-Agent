@@ -1,26 +1,82 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f6f8fc;
+  --foreground: #0f172a;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --surface-border: #dbe3f0;
+  --brand: #0f766e;
+  --brand-strong: #115e59;
+  --accent: #0ea5e9;
+  --danger: #dc2626;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-manrope);
+  --font-mono: var(--font-space-grotesk);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+.app-bg {
+  background:
+    radial-gradient(1200px 500px at 10% -10%, rgba(14, 165, 233, 0.16), transparent 60%),
+    radial-gradient(900px 420px at 90% 0%, rgba(20, 184, 166, 0.12), transparent 55%),
+    linear-gradient(180deg, #f8fbff 0%, #f5f7fb 45%, #f7fbfa 100%);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-manrope), sans-serif;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.display-font {
+  font-family: var(--font-space-grotesk), sans-serif;
+  letter-spacing: -0.02em;
+}
+
+@layer components {
+  .page-shell {
+    @apply min-h-screen py-8 px-4 sm:px-6;
+  }
+
+  .page-container {
+    @apply max-w-7xl mx-auto;
+  }
+
+  .hero-panel {
+    @apply bg-white/90 backdrop-blur-md border border-[var(--surface-border)] rounded-[1.75rem] shadow-[0_20px_45px_-25px_rgba(15,23,42,0.28)];
+  }
+
+  .section-panel {
+    @apply bg-[var(--surface)] border border-[var(--surface-border)] rounded-3xl shadow-sm;
+  }
+
+  .soft-grid {
+    background-image:
+      linear-gradient(rgba(148, 163, 184, 0.12) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(148, 163, 184, 0.12) 1px, transparent 1px);
+    background-size: 26px 26px;
+    background-position: -1px -1px;
+  }
+
+  .app-input {
+    @apply w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-slate-900 outline-none focus:ring-2 focus:ring-teal-500/30 focus:border-teal-500 transition-all;
+  }
+
+  .app-btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-extrabold tracking-wide text-white bg-teal-700 hover:bg-teal-800 transition-colors disabled:opacity-50;
+  }
+
+  .app-btn-dark {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-extrabold tracking-wide text-white bg-slate-900 hover:bg-slate-800 transition-colors disabled:opacity-50;
+  }
 }

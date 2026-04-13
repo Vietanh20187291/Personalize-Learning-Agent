@@ -155,7 +155,7 @@ export default function AdaptiveLearningPage() {
     }
   };
 
-  const loadMaterialSummary = async (subject: string, sourceFile: string, topic: string) => {
+  const loadMaterialSummary = async (subject: string, sourceFile: string, topic: string, documentId?: number | null) => {
     if (!userIdRef.current || !subject) return;
     setLoadingSummary(true);
     try {
@@ -164,12 +164,28 @@ export default function AdaptiveLearningPage() {
         subject,
         source_file: sourceFile,
         session_topic: topic,
+        document_id: documentId || null,
       });
 
-      const aiSummary = String(res.data?.summary || '').trim();
+      const aiTitle = String(res.data?.rewritten_title || '').trim();
+      const aiSummary = String(res.data?.rewritten_material || res.data?.summary || '').trim();
+      const aiKeyPoints = Array.isArray(res.data?.key_points) ? res.data.key_points : [];
+      const aiNotes = Array.isArray(res.data?.important_notes) ? res.data.important_notes : [];
       const aiPrompts = Array.isArray(res.data?.suggested_prompts) ? res.data.suggested_prompts : [];
-      if (aiSummary) {
-        setChapterSummary(aiSummary);
+
+      const summaryParts: string[] = [];
+      if (aiTitle) summaryParts.push(`Tài liệu đã biên tập: ${aiTitle}`);
+      if (aiSummary) summaryParts.push(aiSummary);
+      if (aiKeyPoints.length > 0) {
+        summaryParts.push(`Ý chính:\n- ${aiKeyPoints.slice(0, 5).join('\n- ')}`);
+      }
+      if (aiNotes.length > 0) {
+        summaryParts.push(`Lưu ý quan trọng:\n- ${aiNotes.slice(0, 5).join('\n- ')}`);
+      }
+
+      const renderedSummary = summaryParts.join('\n\n').trim();
+      if (renderedSummary) {
+        setChapterSummary(renderedSummary);
       }
       if (aiPrompts.length > 0) {
         setSuggestedPrompts(aiPrompts.slice(0, 4));
@@ -201,10 +217,12 @@ export default function AdaptiveLearningPage() {
     setMessages([{ role: 'assistant', content: `**Tóm tắt kiến thức bài đang học**\n${baseSummary}` }]);
 
     void loadDocumentPreview(doc.id);
-    void loadMaterialSummary(selectedSubject, doc.filename, topic);
+    const summaryPromise = loadMaterialSummary(selectedSubject, doc.filename, topic, doc.id);
 
     if (autoAsk) {
-      setTriggerInitialMessage(true);
+      void summaryPromise.finally(() => {
+        setTriggerInitialMessage(true);
+      });
     }
   };
 
@@ -531,6 +549,7 @@ export default function AdaptiveLearningPage() {
         session_topic: activeLessonTopic,
         session_number: activeLessonNumber,
         source_file: getActiveDocument()?.filename || '',
+        document_id: getActiveDocument()?.id || null,
         history: chatHistory,
       });
       setMessages((prev) => [...prev, { role: 'assistant', content: res.data.reply }]);
@@ -554,9 +573,9 @@ export default function AdaptiveLearningPage() {
   const activeDocExt = activeDoc ? getFileExt(activeDoc.filename) : '';
 
   return (
-    <div className="fixed inset-0 bg-[#F8FAFC] font-sans text-slate-800 flex flex-col pt-[80px] pb-4 px-6 overflow-hidden">
+    <div className="fixed inset-0 text-slate-800 flex flex-col pt-[80px] pb-4 px-4 sm:px-6 overflow-hidden app-bg">
       <div className="max-w-[1600px] w-full mx-auto mb-4 shrink-0">
-        <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
+        <div className="hero-panel p-3 flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3 w-full md:w-auto overflow-x-auto custom-scrollbar pb-1 md:pb-0">
             {enrolledClasses.length === 0 ? (
               <div className="flex items-center gap-2 text-amber-600 bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-100 font-black text-[10px] uppercase shrink-0">
@@ -761,7 +780,7 @@ export default function AdaptiveLearningPage() {
             {activeLessonContext && (
               <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-3 space-y-2">
                 <p className="text-[10px] font-black uppercase tracking-wider text-indigo-700">Tóm tắt kiến thức tài liệu</p>
-                <p className="text-xs text-slate-700 font-medium leading-relaxed">
+                <p className="text-xs text-slate-700 font-medium leading-relaxed whitespace-pre-line">
                   {loadingSummary ? 'AI đang tóm tắt toàn bộ tài liệu, vui lòng chờ...' : chapterSummary}
                 </p>
                 {suggestedPrompts.length > 0 && (

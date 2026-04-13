@@ -372,7 +372,7 @@ const AssessmentForm = () => {
   const isRealSessionTopic = sessionTopic && sessionTopic !== "null" && sessionTopic !== "undefined" && sessionTopic.trim() !== "";
 
   return (
-    <div key={getUserId()} className="min-h-screen bg-gray-50 py-10 px-4 font-sans text-slate-800">
+    <div key={getUserId()} className="min-h-screen app-bg py-10 px-4 font-sans text-slate-800">
 
       {step === 'select_subject' && (
         <div className="max-w-5xl mx-auto p-4 text-center">
@@ -384,7 +384,7 @@ const AssessmentForm = () => {
               <p className="text-blue-600 font-bold animate-pulse">Đang tải dữ liệu lớp học...</p>
             </div>
           ) : enrolledSubjects.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-20 bg-white rounded-3xl border border-dashed border-gray-300 shadow-sm max-w-2xl mx-auto">
+            <div className="hero-panel flex flex-col items-center justify-center py-20 border border-dashed border-slate-300 max-w-2xl mx-auto">
               <LockKeyhole className="w-16 h-16 text-gray-300 mb-4" />
               <h3 className="text-lg font-black text-gray-600 uppercase mb-2">Chưa có môn học nào được mở khóa</h3>
               <p className="text-sm text-gray-500 mb-6 max-w-md">Bạn cần tham gia một lớp học từ Giáo viên để kích hoạt ngân hàng câu hỏi và thực hiện bài đánh giá năng lực.</p>
@@ -564,8 +564,8 @@ const AssessmentForm = () => {
 
       {((step === 'quiz') || (step === 'result' && reviewMode)) && currentQ && (
         <div className="flex items-center justify-center min-h-[60vh] py-8">
-          <div className="w-full max-w-3xl bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden flex flex-col transition-all duration-300">
-             <div className="px-6 py-4 border-b border-gray-50 flex justify-between items-center bg-white">
+          <div className="w-full max-w-3xl hero-panel overflow-hidden flex flex-col transition-all duration-300">
+            <div className="px-6 py-4 border-b border-gray-50 flex justify-between items-center hero-panel">
                 <div>
                    <span className="text-[10px] font-black text-indigo-600 uppercase tracking-widest block mb-1">
                      {reviewMode ? 'CHẾ ĐỘ XEM LẠI' : isRealSessionTopic ? `KIỂM TRA QUA BÀI: ${sessionTopic}` : `BÀI ĐÁNH GIÁ ĐẦU VÀO: ${subject}`}

@@ -80,7 +80,7 @@ export default function CreateTeacherPage() {
   };
 
   return (
-    <div className="min-h-[calc(100vh-4rem)] bg-slate-50/50 flex flex-col items-center py-12 px-4 relative overflow-hidden font-sans">
+    <div className="min-h-[calc(100vh-4rem)] app-bg flex flex-col items-center py-10 px-4 relative overflow-hidden font-sans">
       
       {/* Hiệu ứng nền */}
       <div className="absolute top-0 right-0 -mr-20 -mt-20 w-[400px] h-[400px] bg-rose-100 rounded-full blur-[100px] opacity-60" />
@@ -100,7 +100,7 @@ export default function CreateTeacherPage() {
         </div>
 
         {/* Bảng Form nhập liệu */}
-        <div className="bg-white rounded-[2rem] shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-slate-100 p-8 sm:p-10">
+        <div className="hero-panel p-8 sm:p-10">
           <form onSubmit={handleCreateTeacher} className="space-y-6">
             
             {error && (

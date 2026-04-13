@@ -93,8 +93,8 @@ export default function ExamGeneratorPage() {
   };
 
   return (
-    <div className="min-h-[85vh] flex flex-col items-center justify-center p-4 sm:p-8 bg-[#F8FAFC]">
-      <div className="w-full max-w-4xl bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-700">
+    <div className="min-h-[85vh] flex flex-col items-center justify-center p-4 sm:p-8 app-bg">
+      <div className="w-full max-w-4xl hero-panel overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-700">
         
         {/* HEADER SECTION */}
         <div className="px-8 py-6 border-b border-slate-100 flex flex-col sm:flex-row items-start sm:items-center gap-5 bg-white">

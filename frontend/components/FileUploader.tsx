@@ -158,13 +158,13 @@ export default function FileUploader({ onUploadSuccess, teacherId, classId, exte
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
-          className={`flex flex-col items-center justify-center w-full h-44 border border-dashed rounded-lg cursor-pointer transition-all bg-white group
-            ${isDragActive ? 'border-indigo-500 bg-indigo-50 scale-[1.02]' : 'border-slate-300 hover:bg-slate-50 hover:border-indigo-500'}
+          className={`flex flex-col items-center justify-center w-full h-48 border border-dashed rounded-[1.5rem] cursor-pointer transition-all bg-white/90 backdrop-blur group shadow-sm
+            ${isDragActive ? 'border-teal-500 bg-teal-50 scale-[1.02]' : 'border-slate-300 hover:bg-slate-50 hover:border-teal-500'}
             ${!classId ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''}`}
         >
           <div className="flex flex-col items-center justify-center pt-5 pb-6 pointer-events-none">
-            <div className={`p-3 border rounded-full mb-3 shadow-sm transition-transform ${isDragActive ? 'bg-white border-indigo-200 scale-110' : 'bg-white border-slate-100 group-hover:scale-110'}`}>
-                <UploadCloud className={`w-5 h-5 ${!classId ? 'text-slate-400' : 'text-indigo-600'}`} />
+            <div className={`p-3 border rounded-full mb-3 shadow-sm transition-transform ${isDragActive ? 'bg-white border-teal-200 scale-110' : 'bg-white border-slate-100 group-hover:scale-110'}`}>
+                <UploadCloud className={`w-5 h-5 ${!classId ? 'text-slate-400' : 'text-teal-700'}`} />
             </div>
             
             {!classId ? (
@@ -174,7 +174,7 @@ export default function FileUploader({ onUploadSuccess, teacherId, classId, exte
                 </div>
             ) : (
                 <>
-                    <p className="text-sm text-slate-600 font-medium"><span className="font-bold text-indigo-600">Click</span> hoặc kéo thả tài liệu</p>
+                    <p className="text-sm text-slate-600 font-medium"><span className="font-bold text-teal-700">Click</span> hoặc kéo thả tài liệu</p>
                     <p className="text-[10px] text-slate-400 mt-1 uppercase tracking-wider">Hỗ trợ PDF, DOCX, PPTX</p>
                 </>
             )}
@@ -182,11 +182,11 @@ export default function FileUploader({ onUploadSuccess, teacherId, classId, exte
           <input type="file" className="hidden" onChange={handleFileChange} accept=".pdf,.docx,.txt,.pptx" disabled={!classId} />
         </label>
       ) : (
-        <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+        <div className="hero-panel overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/70 backdrop-blur">
                 <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 bg-white border border-slate-200 rounded flex items-center justify-center shrink-0">
-                        <FileText className="w-4 h-4 text-indigo-600" />
+              <div className="w-8 h-8 bg-white border border-slate-200 rounded-lg flex items-center justify-center shrink-0">
+                <FileText className="w-4 h-4 text-teal-700" />
                     </div>
                     <div className="min-w-0">
                         <p className="text-sm font-bold text-slate-800 truncate max-w-[200px]">{file.name}</p>
@@ -202,7 +202,7 @@ export default function FileUploader({ onUploadSuccess, teacherId, classId, exte
 
             <div className="p-4 space-y-4">
                 {isAnalyzing ? (
-                    <div className="py-2 flex items-center gap-2 text-indigo-600">
+                    <div className="py-2 flex items-center gap-2 text-teal-700">
                         <Loader2 className="w-4 h-4 animate-spin" />
                         <span className="text-xs font-bold">AI đang phân tích nội dung...</span>
                     </div>
@@ -212,12 +212,12 @@ export default function FileUploader({ onUploadSuccess, teacherId, classId, exte
                       <span>MÔN HỌC CỦA LỚP</span>
                         </label>
                         
-                    <div className="w-full p-2.5 pl-3 pr-3 bg-slate-50 border border-slate-200 rounded-md text-sm font-semibold text-slate-800">
+                    <div className="w-full p-2.5 pl-3 pr-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-semibold text-slate-800">
                       {currentClassSubject || 'Chưa xác định môn học của lớp'}
                     </div>
                     </div>
                 ) : (
-                    <div className="flex items-center gap-2 p-3 bg-emerald-50/50 border border-emerald-100 rounded-lg">
+                    <div className="flex items-center gap-2 p-3 bg-emerald-50/60 border border-emerald-100 rounded-xl">
                         <CheckCircle2 className="w-5 h-5 text-emerald-500" />
                         <div>
                             <p className="text-xs font-bold text-emerald-700 uppercase">Lưu trữ thành công</p>
@@ -234,7 +234,7 @@ export default function FileUploader({ onUploadSuccess, teacherId, classId, exte
                         </div>
                         <div className="h-1 w-full bg-slate-100 rounded-full overflow-hidden relative">
                             <div 
-                                className="h-full bg-indigo-600 rounded-full transition-all duration-200" 
+                              className="h-full bg-teal-700 rounded-full transition-all duration-200" 
                                 style={{ width: `${uploadProgress}%` }}
                             ></div>
                         </div>
@@ -245,7 +245,7 @@ export default function FileUploader({ onUploadSuccess, teacherId, classId, exte
                     <button 
                         onClick={handleConfirmUpload}
                         disabled={isAnalyzing || !selectedSubject}
-                        className="w-full py-2.5 bg-slate-900 text-white rounded-md text-xs font-bold uppercase tracking-widest hover:bg-black transition-all shadow-sm active:scale-95 disabled:opacity-50 mt-2"
+                        className="w-full py-2.5 bg-slate-900 text-white rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-teal-700 transition-all shadow-sm active:scale-95 disabled:opacity-50 mt-2"
                     >
                         Xác nhận nạp tài liệu
                     </button>
@@ -254,7 +254,7 @@ export default function FileUploader({ onUploadSuccess, teacherId, classId, exte
                 {processingStage === 'done' && (
                     <button 
                         onClick={removeFile}
-                        className="w-full py-2.5 bg-white border border-slate-300 text-slate-600 rounded-md text-xs font-bold uppercase tracking-widest hover:bg-slate-50 transition-all mt-2"
+                        className="w-full py-2.5 bg-white border border-slate-300 text-slate-600 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-slate-50 transition-all mt-2"
                     >
                         Nạp thêm tài liệu khác
                     </button>

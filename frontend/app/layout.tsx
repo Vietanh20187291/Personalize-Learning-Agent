@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { Manrope, Space_Grotesk } from "next/font/google";
 import "./globals.css";
 import Navbar from "@/components/Navbar";
 import { Toaster } from "react-hot-toast"; 
 
-const inter = Inter({ subsets: ["latin"] });
+const manrope = Manrope({ subsets: ["latin"], variable: "--font-manrope" });
+const spaceGrotesk = Space_Grotesk({ subsets: ["latin"], variable: "--font-space-grotesk" });
 
 export const metadata: Metadata = {
   title: "AI Agent Learning System",
@@ -14,7 +15,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="vi">
-      <body className={`${inter.className} bg-slate-50 min-h-screen text-slate-900 flex flex-col`}>
+      <body className={`${manrope.variable} ${spaceGrotesk.variable} min-h-screen text-slate-900 flex flex-col app-bg`}>
         {/* Thanh điều hướng thông minh */}
         <Navbar />
         
@@ -30,11 +31,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           toastOptions={{
             duration: 3000,
             style: {
-              background: '#333',
-              color: '#fff',
+              background: '#0f172a',
+              color: '#f8fafc',
               fontSize: '14px',
               fontWeight: 'bold',
-              borderRadius: '10px'
+              borderRadius: '14px',
+              border: '1px solid #334155'
             }
           }}
         />

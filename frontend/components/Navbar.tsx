@@ -91,9 +91,9 @@ export default function Navbar() {
     name: 'Học sinh',
     idPrefix: 'MSSV:', 
     showId: true,
-    textColor: 'text-emerald-500',
-    logoColor: 'bg-emerald-500 shadow-emerald-100',
-    activeNav: 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100'
+    textColor: 'text-teal-700',
+    logoColor: 'bg-teal-700 shadow-teal-100',
+    activeNav: 'bg-teal-50 text-teal-700 ring-1 ring-teal-200'
   };
 
   if (user.role === 'admin') {
@@ -101,18 +101,18 @@ export default function Navbar() {
       name: 'Quản trị viên',
       idPrefix: 'ID:', 
       showId: true,
-      textColor: 'text-rose-600',
-      logoColor: 'bg-rose-600 shadow-rose-100',
-      activeNav: 'bg-rose-50 text-rose-600 ring-1 ring-rose-100'
+      textColor: 'text-orange-700',
+      logoColor: 'bg-orange-700 shadow-orange-100',
+      activeNav: 'bg-orange-50 text-orange-700 ring-1 ring-orange-200'
     };
   } else if (user.role === 'teacher') {
     roleConfig = {
       name: 'Giáo viên',
       idPrefix: '', 
       showId: false,
-      textColor: 'text-indigo-600',
-      logoColor: 'bg-indigo-600 shadow-indigo-100',
-      activeNav: 'bg-indigo-50 text-indigo-600 ring-1 ring-indigo-100'
+      textColor: 'text-sky-700',
+      logoColor: 'bg-sky-700 shadow-sky-100',
+      activeNav: 'bg-sky-50 text-sky-700 ring-1 ring-sky-200'
     };
   }
 
@@ -123,7 +123,7 @@ export default function Navbar() {
 
   return (
     // Đảm bảo Navbar luôn nằm trên cùng mọi trang
-    <nav className="border-b border-slate-100 bg-white/80 backdrop-blur-md sticky top-0 z-[9999]">
+    <nav className="border-b border-slate-200/80 bg-white/75 backdrop-blur-xl sticky top-0 z-[9999]">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between h-16 items-center">
           
@@ -133,7 +133,7 @@ export default function Navbar() {
               {user.role === 'admin' ? <ShieldCheck className="h-6 w-6 text-white" /> : <BrainCircuit className="h-6 w-6 text-white" />}
             </div>
             <span className="font-black text-xl text-slate-800 tracking-tighter hidden sm:block">
-              AI LEARNING
+              AI CAMPUS
             </span>
           </Link>
           
@@ -148,7 +148,7 @@ export default function Navbar() {
                   href={item.href}
                   className={clsx(
                     "flex items-center gap-2 px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition-all duration-200",
-                    isActive ? roleConfig.activeNav : "text-slate-400 hover:bg-slate-50 hover:text-slate-900"
+                    isActive ? roleConfig.activeNav : "text-slate-500 hover:bg-white hover:text-slate-900 ring-1 ring-transparent hover:ring-slate-200"
                   )}
                 >
                   <item.icon size={14} />
@@ -181,7 +181,7 @@ export default function Navbar() {
                 
                 <Link 
                   href="/change-password"
-                  className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all cursor-pointer"
+                  className="p-2 text-slate-500 hover:text-sky-700 hover:bg-sky-50 rounded-lg transition-all cursor-pointer"
                   title="Đổi mật khẩu bảo mật"
                 >
                   <KeyRound size={18} />

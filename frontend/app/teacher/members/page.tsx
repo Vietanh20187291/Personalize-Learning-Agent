@@ -272,10 +272,10 @@ export default function ClassMembersPage() {
   };
 
   return (
-    <div className="min-h-[80vh] flex flex-col gap-6 relative max-w-7xl mx-auto px-4 sm:px-6 py-8">
+    <div className="page-shell flex flex-col gap-6 relative max-w-7xl mx-auto">
       
       {/* HEADER SECTION */}
-      <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6">
+      <div className="hero-panel p-6 sm:p-8 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6">
         <div>
           <div className="flex items-center gap-4 mb-2">
             <div className="p-3 bg-indigo-50 text-indigo-600 rounded-2xl">

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 from db.database import get_db
 from db import models 
 from agents.adaptive_agent import AdaptiveAgent
@@ -18,6 +18,7 @@ class TutorChatRequest(BaseModel):
     session_topic: str = ""
     session_number: int = 0
     source_file: str = ""
+    document_id: Optional[int] = None
     history: List[Dict[str, str]] = []
 
 # NHẬN DỮ LIỆU THỜI GIAN HỌC TỪ FRONTEND
@@ -32,6 +33,7 @@ class MaterialSummaryRequest(BaseModel):
     subject: str
     source_file: str
     session_topic: str = ""
+    document_id: Optional[int] = None
 
 # ==========================================
 # 1. API: LƯU THỜI GIAN HỌC TẬP (HỖ TRỢ TÍNH EFFORT SCORE)
@@ -142,6 +144,7 @@ def chat_with_adaptive_tutor(req: TutorChatRequest, db: Session = Depends(get_db
             allowed_filenames=allowed_filenames,
             session_topic=req.session_topic,
             source_file=requested_file,
+            document_id=req.document_id,
             history=req.history
         )
 
@@ -188,5 +191,6 @@ def summarize_material(req: MaterialSummaryRequest, db: Session = Depends(get_db
         source_file=req.source_file,
         session_topic=req.session_topic,
         allowed_filenames=allowed_filenames,
+        document_id=req.document_id,
     )
     return summary_data

@@ -81,28 +81,28 @@ export default function ChangePasswordPage() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6 font-sans relative overflow-hidden">
+    <div className="min-h-screen app-bg flex items-center justify-center p-6 font-sans relative overflow-hidden">
       
       {/* Nút quay lại */}
       <button 
         onClick={() => router.back()} 
-        className="absolute top-8 left-8 flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 hover:text-indigo-600 transition-all group z-20"
+        className="absolute top-8 left-8 flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 hover:text-teal-700 transition-all group z-20"
       >
         <ChevronLeft size={16} className="group-hover:-translate-x-1 transition-transform" /> 
         Quay lại
       </button>
 
       {/* Hiệu ứng nền */}
-      <div className="absolute top-0 right-0 -mr-20 -mt-20 w-[400px] h-[400px] bg-blue-100 rounded-full blur-[100px] opacity-60" />
-      <div className="absolute bottom-0 left-0 -ml-20 -mb-20 w-[400px] h-[400px] bg-indigo-100 rounded-full blur-[100px] opacity-60" />
+      <div className="absolute top-0 right-0 -mr-20 -mt-20 w-[400px] h-[400px] bg-teal-100 rounded-full blur-[100px] opacity-50" />
+      <div className="absolute bottom-0 left-0 -ml-20 -mb-20 w-[400px] h-[400px] bg-sky-100 rounded-full blur-[100px] opacity-50" />
       
-      <div className="max-w-[480px] w-full bg-white backdrop-blur-xl rounded-[2.5rem] shadow-xl border border-slate-100 p-10 space-y-8 relative z-10">
+      <div className="max-w-[520px] w-full hero-panel p-8 sm:p-10 space-y-8 relative z-10">
         
         <div className="text-center">
-          <div className="inline-flex p-4 rounded-2xl bg-indigo-50 text-indigo-600 mb-6">
+          <div className="inline-flex p-4 rounded-3xl bg-teal-50 text-teal-700 mb-6 border border-teal-100">
             <KeyRound size={32} />
           </div>
-          <h2 className="text-3xl font-black text-slate-900 uppercase tracking-tighter mb-2">
+          <h2 className="display-font text-3xl font-black text-slate-900 uppercase tracking-tighter mb-2">
             Đổi mật khẩu
           </h2>
           <p className="text-slate-500 text-sm font-medium">
@@ -134,11 +134,11 @@ export default function ChangePasswordPage() {
                   type={showOld ? "text" : "password"}
                   required
                   placeholder="Nhập mật khẩu cũ (hoặc mật khẩu cấp phát)"
-                  className="w-full pl-12 pr-12 py-4 bg-slate-50/50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all text-sm font-medium text-slate-900 placeholder:text-slate-400"
+                  className="app-input pl-12 pr-12 py-4 rounded-2xl"
                   value={oldPassword}
                   onChange={(e) => setOldPassword(e.target.value)}
                 />
-                <button type="button" onClick={() => setShowOld(!showOld)} className="absolute right-4 text-slate-400 hover:text-indigo-600">
+                <button type="button" onClick={() => setShowOld(!showOld)} className="absolute right-4 text-slate-400 hover:text-teal-700">
                   {showOld ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
               </div>
@@ -153,11 +153,11 @@ export default function ChangePasswordPage() {
                   type={showNew ? "text" : "password"}
                   required
                   placeholder="Ít nhất 6 ký tự"
-                  className="w-full pl-12 pr-12 py-4 bg-slate-50/50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all text-sm font-medium text-slate-900 placeholder:text-slate-400"
+                  className="app-input pl-12 pr-12 py-4 rounded-2xl"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                 />
-                <button type="button" onClick={() => setShowNew(!showNew)} className="absolute right-4 text-slate-400 hover:text-indigo-600">
+                <button type="button" onClick={() => setShowNew(!showNew)} className="absolute right-4 text-slate-400 hover:text-teal-700">
                   {showNew ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
               </div>
@@ -172,11 +172,11 @@ export default function ChangePasswordPage() {
                   type={showConfirm ? "text" : "password"}
                   required
                   placeholder="Nhập lại mật khẩu mới"
-                  className="w-full pl-12 pr-12 py-4 bg-slate-50/50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all text-sm font-medium text-slate-900 placeholder:text-slate-400"
+                  className="app-input pl-12 pr-12 py-4 rounded-2xl"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                 />
-                <button type="button" onClick={() => setShowConfirm(!showConfirm)} className="absolute right-4 text-slate-400 hover:text-indigo-600">
+                <button type="button" onClick={() => setShowConfirm(!showConfirm)} className="absolute right-4 text-slate-400 hover:text-teal-700">
                   {showConfirm ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
               </div>
@@ -185,7 +185,7 @@ export default function ChangePasswordPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 transition-all active:scale-[0.98] shadow-lg shadow-indigo-200 disabled:opacity-70 mt-4 flex justify-center"
+              className="w-full bg-teal-700 text-white py-4 rounded-2xl font-bold hover:bg-teal-800 transition-all active:scale-[0.98] shadow-lg shadow-teal-200 disabled:opacity-70 mt-4 flex justify-center"
             >
               {loading ? <Loader2 className="animate-spin" size={24} /> : "Xác nhận đổi mật khẩu"}
             </button>

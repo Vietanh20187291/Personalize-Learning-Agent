@@ -80,7 +80,7 @@ export default function ManageUsersPage() {
   );
 
   return (
-    <div className="min-h-screen bg-slate-50/50 p-8 font-sans relative overflow-hidden">
+    <div className="min-h-screen app-bg p-6 sm:p-8 font-sans relative overflow-hidden">
       {/* Background Decor */}
       <div className="absolute top-0 right-0 -mr-20 -mt-20 w-[500px] h-[500px] bg-rose-50 rounded-full blur-[120px] opacity-60" />
 
@@ -110,7 +110,7 @@ export default function ManageUsersPage() {
         </div>
 
         {/* Bảng danh sách */}
-        <div className="bg-white rounded-[2.5rem] shadow-[0_32px_64px_-12px_rgba(0,0,0,0.03)] border border-slate-100 overflow-hidden">
+        <div className="hero-panel overflow-hidden">
           {loading ? (
             <div className="p-20 flex flex-col items-center justify-center gap-4">
               <Loader2 className="animate-spin text-rose-600" size={40} />

@@ -88,11 +88,11 @@ export default function StudentLibraryPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] py-8 font-sans text-slate-800">
-      <div className="max-w-6xl mx-auto px-4 sm:px-6">
+    <div className="page-shell text-slate-800">
+      <div className="max-w-6xl mx-auto px-2 sm:px-4">
         
         {/* HEADER */}
-        <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-8">
+        <div className="hero-panel p-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-8">
           <div className="flex items-center gap-4">
             <div className="p-3 bg-indigo-50 text-indigo-600 rounded-2xl">
               <BookOpen className="w-8 h-8" />

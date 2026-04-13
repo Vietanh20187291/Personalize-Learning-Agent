@@ -25,8 +25,8 @@ const LearningDashboard = () => {
 
   if (loading) return (
     <div className="flex flex-col items-center justify-center min-h-[60vh]">
-      <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-4"></div>
-      <p className="font-black text-indigo-600 uppercase tracking-widest text-xs animate-pulse">Agent đang tổng hợp dữ liệu...</p>
+      <div className="w-12 h-12 border-4 border-teal-700 border-t-transparent rounded-full animate-spin mb-4"></div>
+      <p className="font-black text-teal-700 uppercase tracking-widest text-xs animate-pulse">Agent đang tổng hợp dữ liệu...</p>
     </div>
   );
   
@@ -70,7 +70,7 @@ const LearningDashboard = () => {
       {/* --- PHẦN 2: BIỂU ĐỒ TRỰC QUAN --- */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         {/* Biểu đồ vùng: Xu hướng điểm số & nỗ lực */}
-        <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-xl shadow-slate-200/50">
+        <div className="hero-panel p-8 rounded-[2.5rem]">
           <h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em] mb-8">📉 Phân tích tiến độ học tập</h3>
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
@@ -92,7 +92,7 @@ const LearningDashboard = () => {
         </div>
 
         {/* Biểu đồ cột: Trình độ thực tế từng môn */}
-        <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-xl shadow-slate-200/50">
+        <div className="hero-panel p-8 rounded-[2.5rem]">
           <h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em] mb-8">📊 Năng lực theo chuyên môn</h3>
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
@@ -114,11 +114,11 @@ const LearningDashboard = () => {
       {/* --- PHẦN 3: NHẬT KÝ CHI TIẾT --- */}
       <div className="space-y-6">
         <div className="flex items-center gap-3">
-          <div className="p-3 bg-white rounded-2xl shadow-sm border border-slate-100"><History className="w-5 h-5 text-indigo-600" /></div>
+          <div className="p-3 bg-white rounded-2xl shadow-sm border border-slate-100"><History className="w-5 h-5 text-teal-700" /></div>
           <h2 className="text-xl font-black text-slate-800 tracking-tight">Nhật ký Agent đánh giá</h2>
         </div>
         
-        <div className="bg-white rounded-[2.5rem] shadow-xl shadow-slate-200/50 border border-slate-100 overflow-hidden">
+        <div className="hero-panel rounded-[2.5rem] overflow-hidden">
           <table className="w-full text-left">
             <thead className="bg-slate-50/50 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">
               <tr>
