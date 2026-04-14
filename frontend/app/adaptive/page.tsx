@@ -791,13 +791,15 @@ export default function AdaptiveLearningPage() {
         </div>
 
         <div className="fixed right-4 top-[96px] z-30 w-[430px] max-w-[92vw] h-[calc(100vh-120px)] flex flex-col bg-white rounded-2xl border border-red-200 shadow-2xl overflow-hidden">
-          <div className="h-14 border-b border-red-100 flex items-center justify-between px-4 bg-red-50 shrink-0">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-red-600 rounded-lg flex items-center justify-center text-white shadow-md shadow-red-200">
-                <Flame className="w-5 h-5" />
-              </div>
+          <div className="border-b border-red-100 flex items-end justify-between px-3 py-2 bg-gradient-to-r from-red-50 to-red-100 shrink-0">
+            <div className="flex items-end gap-2">
+              <img 
+                src="/Teacher Orbit.png" 
+                alt="Orbit Teacher" 
+                className="h-12 w-auto object-contain"
+              />
               <div>
-                <h3 className="text-xs font-black text-red-800 uppercase tracking-tight">Orbit Agent - Thầy nghiêm khắc</h3>
+                <h3 className="text-xs font-black text-red-800 uppercase tracking-tight">Orbit Agent</h3>
                 <p className="text-[9px] font-bold text-red-600 uppercase tracking-widest flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span> Đang giám sát học tập
                 </p>
