@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from db.database import get_db, engine, Base
-from db.models import LearnerProfile, QuestionBank, AssessmentHistory, User, Document, LearningRoadmap, Classroom, Subject
+from db.models import LearnerProfile, QuestionBank, AssessmentHistory, StudentLearningProgress, User, Document, LearningRoadmap, Classroom, Subject
 from pydantic import BaseModel
 from datetime import datetime
 from typing import List, Optional
@@ -511,7 +511,23 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
         profile.total_tests = (profile.total_tests or 0) + 1
         # 🔥 Lưu điểm Test Score ĐÃ LỌC (Không có bài đầu vào) làm Trung bình thật sự
         profile.avg_score = performance_data["actual_test_score"]
-        db.commit()
+    
+    progress = db.query(StudentLearningProgress).filter(StudentLearningProgress.user_id == req.user_id).first()
+    if not progress:
+        progress = StudentLearningProgress(user_id=req.user_id)
+        db.add(progress)
+
+    total_tests_count = db.query(AssessmentHistory).filter(AssessmentHistory.user_id == req.user_id).count()
+    lessons_completed_count = db.query(AssessmentHistory).filter(
+        AssessmentHistory.user_id == req.user_id,
+        AssessmentHistory.test_type.in_(["chapter", "session"]),
+        AssessmentHistory.score >= 60,
+    ).count()
+    progress.tests_completed_total = int(total_tests_count)
+    progress.lessons_completed_total = int(lessons_completed_count)
+    progress.last_active_at = datetime.utcnow()
+
+    db.commit()
     
     return {
         "level": new_level, 

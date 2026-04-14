@@ -1,6 +1,6 @@
 import os
 from langchain_chroma import Chroma
-from rag.embedder import embeddings 
+from rag.embedder import get_embeddings
 from config import settings
 
 # Đường dẫn lưu Database
@@ -16,9 +16,13 @@ def get_vector_store():
     if not os.path.exists(DB_DIR):
         os.makedirs(DB_DIR)
         
+    embedding_fn = get_embeddings()
+    if embedding_fn is None:
+        raise RuntimeError("Embedding model chưa sẵn sàng. Vui lòng thử lại sau.")
+
     vector_store = Chroma(
         persist_directory=DB_DIR,
-        embedding_function=embeddings,
+        embedding_function=embedding_fn,
         collection_name=COLLECTION_NAME # Thêm tên collection cố định ở đây
     )
     return vector_store

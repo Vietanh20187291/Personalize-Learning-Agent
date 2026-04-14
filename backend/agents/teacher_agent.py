@@ -3,13 +3,13 @@ import os
 import random
 import re
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
-from db.models import AssessmentHistory, Classroom, Document, QuestionBank, Subject, User
+from db.models import AssessmentHistory, Classroom, Document, OrbitCoachDirective, QuestionBank, Subject, User
 from memory import ActionRouter, IntentClassifier, get_conversation_memory
 
 
@@ -33,6 +33,224 @@ class TeacherAgent:
 
     def _student_candidates(self) -> List[User]:
         return self.db.query(User).filter(User.role == "student").order_by(User.full_name.asc()).all()
+
+    def _strip_target_suffix(self, text: str) -> str:
+        cleaned = self._clean_text(text)
+        cleaned = re.sub(r"^(?:học|hoc)\s+", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.split(r"\b(?:cho|thuộc|thuoc|của|cua|trong)\s+môn\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
+        cleaned = re.split(r"\b(?:cho|thuộc|thuoc|của|cua|trong)\s+lớp\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
+        cleaned = re.split(r"\b(?:cho|thuộc|thuoc|của|cua|trong)\s+class\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
+        cleaned = re.split(r"\b(?:thuộc|thuoc)\s+đề tài\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
+        cleaned = re.split(r"\b(?:cho|thuộc|thuoc|của|cua|trong)\s+ngành\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
+        return self._clean_text(cleaned).strip(" .,:;-\"")
+
+    def _has_crud_signal(self, message: str) -> bool:
+        normalized = self._normalize(message)
+        return any(token in normalized for token in [
+            "thêm", "them", "tạo", "tao", "xóa", "xoá", "xoa", "sửa", "sua", "cập nhật", "cap nhat", "update", "delete", "create", "add", "upload", "nạp", "nap"
+        ])
+
+    def _crud_clarification_response(self) -> Dict[str, Any]:
+        reply = (
+            "Mình chưa đủ thông tin để xử lý CRUD chính xác. Bạn muốn thao tác với môn học, lớp học hay tài liệu? "
+            "Bạn có thể nói theo mẫu: 'Thêm môn học <tên môn>', 'Sửa lớp <tên lớp>', hoặc 'Xóa tài liệu <tên tài liệu> của lớp <tên lớp>'."
+        )
+        return {
+            "reply": reply,
+            "suggested_actions": [
+                "Thêm môn học <tên môn>",
+                "Sửa lớp <tên lớp>",
+                "Xóa tài liệu <tên tài liệu> của lớp <tên lớp>",
+            ],
+            "intent_type": "crud_clarification",
+            "confidence": 0.9,
+            "needs_more_info": True,
+            "missing_fields": ["entity_type_or_target_name"],
+            "action_metadata": {
+                "action_type": "none",
+                "target": "teacher",
+                "tab_name": "subjects",
+                "should_auto_execute": False,
+            },
+        }
+
+    def _extract_management_target(self, message: str, entity_type: str) -> str:
+        patterns = {
+            "subject": [
+                r"(?:thêm|tạo|sửa|chỉnh sửa|cập nhật|xóa|xoá|delete|create|update|add)\s+(?:môn học|môn|subject|course)\s+(.+)",
+                r"(?:môn học|môn|subject|course)\s+(.+)",
+            ],
+            "class": [
+                r"(?:thêm|tạo|sửa|chỉnh sửa|cập nhật|xóa|xoá|delete|create|update|add)\s+(?:lớp học|lớp|class)\s+(.+)",
+                r"(?:lớp học|lớp|class)\s+(.+)",
+            ],
+            "document": [
+                r"(?:thêm|tạo|sửa|chỉnh sửa|cập nhật|xóa|xoá|upload|nạp|delete|create|update|add)\s+(?:tài liệu|học liệu|document|file)\s+(.+)",
+                r"(?:tài liệu|học liệu|document|file)\s+(.+)",
+            ],
+        }
+
+        for pattern in patterns.get(entity_type, []):
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if match:
+                candidate = self._strip_target_suffix(match.group(1))
+                if candidate:
+                    return candidate
+
+        if entity_type == "subject":
+            subject = self._find_subject_in_message(message)
+            if subject:
+                return subject.name
+        if entity_type == "class":
+            classroom = self._find_classroom_in_message(message)
+            if classroom:
+                return classroom.name
+        return ""
+
+    def _detect_management_action(self, message: str, entities: Dict[str, Any], context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        normalized = self._normalize(message)
+        if not normalized:
+            return None
+
+        if "thiếu tài liệu" in normalized or "thieu tai lieu" in normalized:
+            return None
+
+        operation = None
+        if any(token in normalized for token in ["xóa", "xoá", "xoa", "delete", "remove", "hủy", "huy"]):
+            operation = "delete"
+        elif any(token in normalized for token in ["cập nhật", "cap nhat", "chỉnh sửa", "chinh sua", "sửa", "sua", "update", "đổi tên", "doi ten", "rename"]):
+            operation = "update"
+        elif any(token in normalized for token in ["thêm", "them", "tạo", "tao", "mới", "moi", "add", "create", "upload", "nạp", "nap"]):
+            operation = "create"
+
+        if not operation:
+            return None
+
+        entity_type = None
+        if any(token in normalized for token in ["tài liệu", "tai lieu", "học liệu", "hoc lieu", "document", "file"]):
+            entity_type = "document"
+        elif any(token in normalized for token in ["lớp", "lop", "class"]):
+            entity_type = "class"
+        elif any(token in normalized for token in ["môn học", "mon hoc", "môn", "mon", "subject", "course"]):
+            entity_type = "subject"
+
+        if entity_type is None:
+            return None
+
+        subject_name = entities.get("subject_name") or ""
+        class_name = entities.get("class_name") or ""
+        document_name = entities.get("document_name") or ""
+        subject_obj = self._find_subject_in_message(message)
+        classroom_obj = self._find_classroom_in_message(message, subject_obj)
+
+        extracted_subject = self._extract_management_target(message, "subject")
+        extracted_class = self._extract_management_target(message, "class")
+        extracted_document = self._extract_management_target(message, "document")
+
+        if extracted_subject:
+            subject_name = extracted_subject
+        if extracted_class:
+            class_name = extracted_class
+        if extracted_document:
+            document_name = extracted_document
+
+        if class_name and not classroom_obj:
+            classroom_obj = self._resolve_classroom({"class_name": class_name}, context, subject_obj)
+
+        if classroom_obj:
+            class_name = class_name or classroom_obj.name
+            if not subject_obj and getattr(classroom_obj, "subject_obj", None):
+                subject_obj = classroom_obj.subject_obj
+            if subject_obj:
+                subject_name = subject_obj.name
+
+        if entity_type == "subject":
+            if not subject_name:
+                return None
+            if not subject_obj:
+                subject_obj = self._find_subject_in_message(subject_name)
+        elif entity_type == "class":
+            if not class_name:
+                return None
+            if not subject_name:
+                if subject_obj:
+                    subject_name = subject_obj.name
+        elif entity_type == "document":
+            if not document_name and operation == "create":
+                document_name = self._clean_text(message)
+            if not subject_name:
+                if subject_obj:
+                    subject_name = subject_obj.name
+            if not class_name:
+                if classroom_obj:
+                    class_name = classroom_obj.name
+
+        if entity_type == "document" and not (class_name or subject_name):
+            return None
+
+        action_mode = f"{operation}_{entity_type}"
+        params = {
+            "mode": action_mode,
+            "operation": operation,
+            "entity_type": entity_type,
+        }
+
+        if subject_name:
+            params["subject_name"] = subject_name
+        if subject_obj:
+            params["subject_id"] = subject_obj.id
+        if class_name:
+            params["class_name"] = class_name
+        if classroom_obj:
+            params["classroom_id"] = classroom_obj.id
+        if document_name:
+            params["document_name"] = document_name
+
+        if entity_type == "subject":
+            verb = "thêm" if operation == "create" else "cập nhật" if operation == "update" else "xóa"
+            reply = f"Tôi đã mở Quản lý môn học và điền sẵn tên môn {subject_name}. Bạn có thể bấm Lưu để {verb} môn này."
+            actions = [
+                "Xác nhận lại tên môn học",
+                "Lưu thay đổi trong form Quản lý môn học",
+                "Nếu muốn, tôi có thể mở sang phần lớp của môn này",
+            ]
+        elif entity_type == "class":
+            reply = (
+                f"Tôi đã mở Quản lý môn học và chọn sẵn lớp {class_name}. "
+                f"Nếu là tạo mới, bạn có thể nhập lại tên lớp rồi bấm Lưu; nếu là chỉnh sửa/xóa, hãy kiểm tra lớp đã chọn."
+            )
+            actions = [
+                "Kiểm tra môn đang chọn",
+                "Lưu thay đổi của lớp trong form Quản lý môn học",
+                "Xem danh sách sinh viên của lớp sau khi cập nhật",
+            ]
+        else:
+            reply = (
+                f"Tôi đã mở khu quản lý học liệu và giữ sẵn ngữ cảnh cho {class_name or subject_name}. "
+                f"Bạn có thể upload hoặc chỉnh sửa tài liệu ngay trong màn hình quản lý môn học."
+            )
+            actions = [
+                "Nạp tài liệu mới cho lớp đã chọn",
+                "Kiểm tra tài liệu đang hiển thị cho sinh viên",
+                "Quay lại danh sách tài liệu của lớp",
+            ]
+
+        return {
+            "reply": reply,
+            "suggested_actions": actions,
+            "intent_type": f"crud_{entity_type}",
+            "confidence": 1.0,
+            "class_name": class_name,
+            "subject": subject_name,
+            "action_metadata": {
+                "action_type": "open_tab",
+                "target": "teacher",
+                "tab_name": "subjects",
+                "params": params,
+                "message": reply,
+                "should_auto_execute": True,
+            },
+        }
 
     def _find_subject_in_message(self, message: str) -> Optional[Subject]:
         normalized_message = self._normalize(message)
@@ -584,6 +802,131 @@ class TeacherAgent:
         merged.update({key: value for key, value in current_entities.items() if value not in [None, ""]})
         return merged
 
+    def _extract_orbit_targets(self, message: str) -> Dict[str, int]:
+        normalized = self._normalize(message)
+        tests = 0
+        chapters = 0
+
+        test_match = re.search(r"(\d+)\s*(?:bài|bai)\s*(?:kiểm tra|kiem tra|test)", normalized)
+        if test_match:
+            tests = int(test_match.group(1))
+
+        chapter_match = re.search(r"(\d+)\s*(?:chương|chuong|bài|bai)\s*(?:học|hoc)?", normalized)
+        if chapter_match:
+            chapters = int(chapter_match.group(1))
+
+        return {"target_tests": tests, "target_chapters": chapters}
+
+    def _is_orbit_directive_request(self, message: str) -> bool:
+        normalized = self._normalize(message)
+        must_have = any(token in normalized for token in ["orbit", "thúc", "thuc", "yêu cầu", "yeu cau", "chỉ tiêu", "chi tieu", "tuần", "tuan"])
+        has_action = any(token in normalized for token in ["làm thêm", "lam them", "học thêm", "hoc them", "phải", "can", "cần", "giao"])
+        return must_have and has_action
+
+    def _create_orbit_directive_action(self, teacher_id: int, message: str, student: Optional[User], classroom: Optional[Classroom], subject: Optional[Subject]) -> Dict[str, Any]:
+        targets = self._extract_orbit_targets(message)
+        target_tests = targets["target_tests"]
+        target_chapters = targets["target_chapters"]
+
+        now = datetime.utcnow()
+        week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        week_end = week_start + timedelta(days=7)
+
+        if not student:
+            reply = "Bạn cần nêu rõ sinh viên để tôi giao chỉ tiêu cho Orbit. Ví dụ: 'Giao cho bạn An tuần này làm thêm 2 bài kiểm tra, học thêm 2 chương'."
+            return {
+                "reply": reply,
+                "suggested_actions": [
+                    "Giao chỉ tiêu cho sinh viên Nguyễn Văn A",
+                    "Thêm số bài kiểm tra cần làm trong tuần",
+                    "Thêm số chương cần hoàn thành trong tuần",
+                ],
+                "intent_type": "orbit_directive_missing_student",
+                "confidence": 0.9,
+                "needs_more_info": True,
+                "missing_fields": ["student_name"],
+                "action_metadata": {
+                    "action_type": "none",
+                    "target": "teacher",
+                    "tab_name": "members",
+                    "should_auto_execute": False,
+                },
+            }
+
+        if target_tests <= 0 and target_chapters <= 0:
+            reply = "Tôi đã nhận yêu cầu giao chỉ tiêu Orbit nhưng chưa thấy số lượng cụ thể. Bạn hãy nói rõ: thêm bao nhiêu bài kiểm tra hoặc bao nhiêu chương."
+            return {
+                "reply": reply,
+                "suggested_actions": [
+                    "Tuần này làm thêm 2 bài kiểm tra",
+                    "Tuần này học thêm 2 chương",
+                    "Tuần này làm thêm 2 bài kiểm tra và 2 chương",
+                ],
+                "intent_type": "orbit_directive_missing_target",
+                "confidence": 0.9,
+                "needs_more_info": True,
+                "missing_fields": ["target_tests_or_target_chapters"],
+                "action_metadata": {
+                    "action_type": "none",
+                    "target": "teacher",
+                    "tab_name": "members",
+                    "should_auto_execute": False,
+                },
+            }
+
+        directive = OrbitCoachDirective(
+            teacher_id=teacher_id,
+            student_id=student.id,
+            class_id=classroom.id if classroom else None,
+            subject_id=subject.id if subject else None,
+            target_tests=target_tests,
+            target_chapters=target_chapters,
+            note=self._clean_text(message),
+            week_start=week_start,
+            week_end=week_end,
+            is_active=True,
+        )
+        self.db.add(directive)
+        self.db.commit()
+
+        student_name = self._clean_text(student.full_name or student.username or f"SV {student.id}")
+        parts = []
+        if target_tests > 0:
+            parts.append(f"{target_tests} bài kiểm tra")
+        if target_chapters > 0:
+            parts.append(f"{target_chapters} chương")
+        target_text = " và ".join(parts)
+
+        reply = (
+            f"Đã giao chỉ tiêu tuần này cho Orbit của sinh viên {student_name}: {target_text}. "
+            f"Orbit sẽ đốc thúc sát tiến độ, nhắc học nếu chậm, và ghi nhận khen ngợi khi sinh viên cải thiện."
+        )
+
+        return {
+            "reply": reply,
+            "suggested_actions": [
+                "Xem lại tiến độ sinh viên sau 2-3 ngày",
+                "Giao thêm chỉ tiêu cho nhóm học yếu",
+                "Yêu cầu Orbit báo cáo các sinh viên chưa đạt KPI tuần",
+            ],
+            "intent_type": "orbit_directive_created",
+            "confidence": 1.0,
+            "class_name": classroom.name if classroom else "",
+            "subject": subject.name if subject else "",
+            "action_metadata": {
+                "action_type": "open_tab",
+                "target": "teacher",
+                "tab_name": "members",
+                "params": {
+                    "student_id": student.id,
+                    "classroom_id": classroom.id if classroom else None,
+                    "directive_id": directive.id,
+                },
+                "message": reply,
+                "should_auto_execute": False,
+            },
+        }
+
     def respond(self, teacher_id: int, class_id: int, message: str):
         memory = get_conversation_memory()
         context = memory.get_context(teacher_id, class_id)
@@ -601,7 +944,101 @@ class TeacherAgent:
 
         explicit_classroom = self._find_classroom_in_message(message, subject)
         classroom = explicit_classroom or self._resolve_classroom(entities, context, subject)
+
+        management_action = self._detect_management_action(message, entities, context)
+        if management_action:
+            memory.clear_pending_request(teacher_id, class_id)
+            memory.add_message(
+                teacher_id,
+                class_id,
+                "user",
+                message,
+                {"intent": management_action["intent_type"], "confidence": 1.0},
+            )
+            memory.add_message(
+                teacher_id,
+                class_id,
+                "agent",
+                management_action["reply"],
+                {
+                    "intent": management_action["intent_type"],
+                    "subject": management_action.get("subject") or None,
+                    "class_name": management_action.get("class_name") or None,
+                },
+            )
+            memory.update_context(
+                teacher_id,
+                class_id,
+                self._build_context_updates(
+                    management_action["intent_type"],
+                    entities,
+                    subject,
+                    classroom,
+                    None,
+                ),
+            )
+            return management_action
+
+        if self._has_crud_signal(message):
+            clarification = self._crud_clarification_response()
+            memory.set_pending_request(
+                teacher_id,
+                class_id,
+                {
+                    "intent_type": clarification["intent_type"],
+                    "entities": entities,
+                    "missing_fields": clarification["missing_fields"],
+                    "follow_up_question": clarification["reply"],
+                    "created_at": datetime.utcnow().isoformat(),
+                },
+            )
+            memory.add_message(
+                teacher_id,
+                class_id,
+                "user",
+                message,
+                {"intent": clarification["intent_type"], "confidence": clarification["confidence"]},
+            )
+            memory.add_message(
+                teacher_id,
+                class_id,
+                "agent",
+                clarification["reply"],
+                {"needs_more_info": True, "missing_fields": clarification["missing_fields"]},
+            )
+            return clarification
+
         student = self._resolve_student(entities, context, classroom)
+
+        if self._is_orbit_directive_request(message):
+            orbit_action = self._create_orbit_directive_action(teacher_id, message, student, classroom, subject)
+            memory.clear_pending_request(teacher_id, class_id)
+            memory.add_message(
+                teacher_id,
+                class_id,
+                "user",
+                message,
+                {"intent": orbit_action["intent_type"], "confidence": orbit_action.get("confidence", 1.0)},
+            )
+            memory.add_message(
+                teacher_id,
+                class_id,
+                "agent",
+                orbit_action["reply"],
+                {
+                    "intent": orbit_action["intent_type"],
+                    "subject": orbit_action.get("subject") or None,
+                    "class_name": orbit_action.get("class_name") or None,
+                },
+            )
+            memory.update_context(teacher_id, class_id, self._build_context_updates(
+                orbit_action["intent_type"],
+                entities,
+                subject,
+                classroom,
+                student,
+            ))
+            return orbit_action
 
         # If the user just provided a follow-up, try to reuse the previous subject/class/student.
         if not subject and classroom:

@@ -96,6 +96,13 @@ export default function TeacherSubjectsPage() {
 
   const normalizeName = (value: string) => value.trim().toLowerCase();
 
+  const managementMode = searchParams.get('mode') || '';
+  const targetSubjectName = (searchParams.get('subject') || (typeof window !== 'undefined' ? localStorage.getItem('novaTargetSubject') : '') || '').trim();
+  const targetSubjectIdParam = (searchParams.get('subject_id') || (typeof window !== 'undefined' ? localStorage.getItem('novaTargetSubjectId') : '') || '').trim();
+  const targetClassName = (searchParams.get('class_name') || (typeof window !== 'undefined' ? localStorage.getItem('novaTargetClass') : '') || '').trim();
+  const targetDocumentName = (searchParams.get('document_name') || (typeof window !== 'undefined' ? localStorage.getItem('novaTargetDocument') : '') || '').trim();
+  const targetClassIdParam = (searchParams.get('class_id') || (typeof window !== 'undefined' ? localStorage.getItem('novaTargetClassId') : '') || '').trim();
+
   const mappedUploaderClasses = useMemo(
     () =>
       classes.map((c) => ({
@@ -121,7 +128,10 @@ export default function TeacherSubjectsPage() {
       const res = await axios.get('http://localhost:8000/api/subjects');
       const list = res.data || [];
       setSubjects(list);
-      if (!selectedSubjectId && list.length > 0) {
+      if (managementMode === 'create_subject') {
+        setSelectedSubjectId(null);
+        setSelectedClassId(null);
+      } else if (!selectedSubjectId && list.length > 0) {
         setSelectedSubjectId(list[0].id);
       }
       if (selectedSubjectId && !list.some((s: SubjectItem) => s.id === selectedSubjectId)) {
@@ -182,9 +192,32 @@ export default function TeacherSubjectsPage() {
   useEffect(() => {
     if (subjects.length === 0) return;
 
-    const fromQuery = searchParams.get('subject');
-    const fromStorage = typeof window !== 'undefined' ? localStorage.getItem('novaTargetSubject') : null;
-    const rawTarget = (fromQuery || fromStorage || '').trim();
+    if (managementMode === 'create_subject') {
+      if (targetSubjectName) {
+        setName(targetSubjectName);
+        setEditingSubjectId(null);
+      }
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('novaTargetSubject');
+        localStorage.removeItem('novaTargetClass');
+        localStorage.removeItem('novaTargetDocument');
+      }
+      return;
+    }
+
+    const subjectIdCandidate = targetSubjectIdParam && !Number.isNaN(Number(targetSubjectIdParam))
+      ? subjects.find((item) => item.id === Number(targetSubjectIdParam))
+      : null;
+
+    if (subjectIdCandidate) {
+      setSelectedSubjectId(subjectIdCandidate.id);
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('novaTargetSubjectId');
+      }
+      return;
+    }
+
+    const rawTarget = targetSubjectName;
     if (!rawTarget) return;
 
     const targetName = normalizeName(rawTarget);
@@ -198,11 +231,41 @@ export default function TeacherSubjectsPage() {
       return;
     }
 
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && managementMode !== 'create_class') {
       localStorage.removeItem('novaTargetSubject');
     }
-    toast.error(`Không tìm thấy môn học "${rawTarget}" trong danh sách.`);
+    if (managementMode !== 'create_class') {
+      toast.error(`Không tìm thấy môn học "${rawTarget}" trong danh sách.`);
+    }
   }, [subjects, searchParams]);
+
+  useEffect(() => {
+    if (subjects.length === 0) return;
+    if (!targetClassName && !targetClassIdParam) return;
+
+    const matchedByName = targetClassName
+      ? classes.find((item) => normalizeName(item.name || '') === normalizeName(targetClassName))
+      : null;
+    const matchedById = targetClassIdParam && !Number.isNaN(Number(targetClassIdParam))
+      ? classes.find((item) => item.id === Number(targetClassIdParam))
+      : null;
+
+    const matchedClass = matchedById || matchedByName;
+    if (matchedClass) {
+      setSelectedClassId(matchedClass.id);
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('novaTargetClass');
+      }
+    }
+
+    if (managementMode === 'create_class' && targetClassName) {
+      setNewClassName(targetClassName);
+    }
+
+    if (managementMode === 'upload_document' && targetClassName && !matchedClass) {
+      toast.error(`Không tìm thấy lớp học "${targetClassName}" trong danh sách.`);
+    }
+  }, [classes, subjects.length, targetClassName, targetClassIdParam, managementMode]);
 
   const handleSaveSubject = async (e: React.FormEvent) => {
     e.preventDefault();

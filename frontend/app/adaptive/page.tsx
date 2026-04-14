@@ -5,7 +5,7 @@ import { toast } from 'react-hot-toast';
 import ReactMarkdown from 'react-markdown';
 import {
   Send,
-  Bot,
+  Flame,
   MessageSquare,
   UserPlus,
   Loader2,
@@ -231,7 +231,8 @@ export default function AdaptiveLearningPage() {
     subj: string,
     autoStart = false,
     isManualClick = false,
-    classesSnapshot?: EnrolledClass[]
+    classesSnapshot?: EnrolledClass[],
+    targetDocumentId?: number | null
   ) => {
     if (!subj) {
       if (isManualClick) toast.error('Vui lòng chọn môn học!');
@@ -295,7 +296,10 @@ export default function AdaptiveLearningPage() {
       setDocuments(docs);
 
       if (docs.length > 0) {
-        const targetIdx = Math.max(0, Math.min((currentSess || 1) - 1, docs.length - 1));
+        const preferredIdx = targetDocumentId ? docs.findIndex((item) => item.id === targetDocumentId) : -1;
+        const targetIdx = preferredIdx >= 0
+          ? preferredIdx
+          : Math.max(0, Math.min((currentSess || 1) - 1, docs.length - 1));
         const targetDoc = docs[targetIdx];
         const lesson = loadedRoadmap.find((l) => l.session === currentSess) || getLessonByIndex(targetIdx);
         activateDocumentContext(targetDoc, lesson, autoStart);
@@ -388,7 +392,7 @@ export default function AdaptiveLearningPage() {
 
   useEffect(() => {
     if (!triggerInitialMessage || !activeLessonContext) return;
-    sendChatMessage('Chào AI, hãy bắt đầu bài học hôm nay nhé.', activeLessonContext, []);
+    sendChatMessage('Chào AI, hãy bắt đầu bài học hôm nay nhé.');
     setTriggerInitialMessage(false);
   }, [triggerInitialMessage, activeLessonContext]);
 
@@ -525,34 +529,59 @@ export default function AdaptiveLearningPage() {
     if (!input.trim() || !userId || !activeLessonContext) return;
     const userMsg = input.trim();
     setInput('');
-    const updatedHistory = [...messages, { role: 'user', content: userMsg }];
-    setMessages(updatedHistory);
-    await sendChatMessage(userMsg, activeLessonContext, updatedHistory);
+    setMessages((prev) => [...prev, { role: 'user', content: userMsg }]);
+    await sendChatMessage(userMsg);
   };
 
   const handleSuggestedPromptClick = async (prompt: string) => {
     if (!userId || !activeLessonContext || loadingChat) return;
-    const updatedHistory = [...messages, { role: 'user', content: prompt }];
-    setMessages(updatedHistory);
-    await sendChatMessage(prompt, activeLessonContext, updatedHistory);
+    setMessages((prev) => [...prev, { role: 'user', content: prompt }]);
+    await sendChatMessage(prompt);
   };
 
-  const sendChatMessage = async (message: string, context: string, chatHistory: { role: string; content: string }[]) => {
+  const handleOrbitAction = async (actionMetadata: any) => {
+    if (!actionMetadata || actionMetadata.action_type !== 'open_document') return;
+    const params = actionMetadata.params || {};
+    const targetSubject = String(params.subject || '').trim();
+    const targetDocId = Number(params.document_id || 0);
+    const currentId = Number(localStorage.getItem('userId') || localStorage.getItem('user_id') || userId || 0);
+
+    if (!currentId || !targetSubject || !targetDocId) return;
+    setSelectedSubject(targetSubject);
+    await autoLoadLearningContext(currentId, targetSubject, false, false, enrolledClasses, targetDocId);
+
+    const summary = params.summary;
+    if (summary && typeof summary === 'object') {
+      const title = String(summary.title || '').trim();
+      const body = String(summary.summary || '').trim();
+      const keyPoints: string[] = Array.isArray(summary.key_points) ? summary.key_points : [];
+      const nextSummary = [
+        title ? `Tài liệu đề xuất: ${title}` : '',
+        body,
+        keyPoints.length > 0 ? `Ý chính:\n- ${keyPoints.slice(0, 4).join('\n- ')}` : '',
+      ].filter(Boolean).join('\n\n');
+      if (nextSummary) {
+        setChapterSummary(nextSummary);
+      }
+    }
+  };
+
+  const sendChatMessage = async (message: string) => {
     setLoadingChat(true);
     try {
       const currentId = localStorage.getItem('userId') || localStorage.getItem('user_id');
-      const res = await axios.post('http://localhost:8000/api/adaptive/chat', {
+      const res = await axios.post('http://localhost:8000/api/orbit/chat', {
         subject: selectedSubject,
         message,
-        roadmap_context: context,
         user_id: Number(currentId),
-        session_topic: activeLessonTopic,
-        session_number: activeLessonNumber,
-        source_file: getActiveDocument()?.filename || '',
+        class_id: enrolledClasses.find((c) => c.subject === selectedSubject)?.id || null,
         document_id: getActiveDocument()?.id || null,
-        history: chatHistory,
+        source_file: getActiveDocument()?.filename || '',
       });
       setMessages((prev) => [...prev, { role: 'assistant', content: res.data.reply }]);
+      if (res.data?.action_metadata?.should_auto_execute) {
+        await handleOrbitAction(res.data.action_metadata);
+      }
     } catch (e: unknown) {
       const realError = axios.isAxiosError(e)
         ? (e.response?.data?.detail as string) || e.message || 'Lỗi đường truyền API'
@@ -617,7 +646,7 @@ export default function AdaptiveLearningPage() {
       </div>
 
       <div className="flex-1 grid grid-cols-1 xl:grid-cols-12 gap-6 min-h-0 w-full max-w-[1600px] mx-auto">
-        <div className="xl:col-span-7 flex flex-col gap-4 h-full min-h-0">
+        <div className="xl:col-span-12 flex flex-col gap-4 h-full min-h-0">
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm shrink-0 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg border border-indigo-100 shadow-sm">
@@ -761,25 +790,25 @@ export default function AdaptiveLearningPage() {
           </div>
         </div>
 
-        <div className="xl:col-span-5 flex flex-col bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden h-full min-h-0">
-          <div className="h-14 border-b border-slate-100 flex items-center justify-between px-4 bg-indigo-50/50 shrink-0">
+        <div className="fixed right-4 top-[96px] z-30 w-[430px] max-w-[92vw] h-[calc(100vh-120px)] flex flex-col bg-white rounded-2xl border border-red-200 shadow-2xl overflow-hidden">
+          <div className="h-14 border-b border-red-100 flex items-center justify-between px-4 bg-red-50 shrink-0">
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white shadow-md shadow-indigo-200">
-                <Bot className="w-5 h-5" />
+              <div className="w-8 h-8 bg-red-600 rounded-lg flex items-center justify-center text-white shadow-md shadow-red-200">
+                <Flame className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="text-xs font-black text-slate-800 uppercase tracking-tight">Gia sư AI</h3>
-                <p className="text-[9px] font-bold text-emerald-600 uppercase tracking-widest flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Đang trực tuyến
+                <h3 className="text-xs font-black text-red-800 uppercase tracking-tight">Orbit Agent - Thầy nghiêm khắc</h3>
+                <p className="text-[9px] font-bold text-red-600 uppercase tracking-widest flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span> Đang giám sát học tập
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/50 custom-scrollbar">
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-red-50/40 custom-scrollbar">
             {activeLessonContext && (
-              <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-3 space-y-2">
-                <p className="text-[10px] font-black uppercase tracking-wider text-indigo-700">Tóm tắt kiến thức tài liệu</p>
+              <div className="bg-red-50 border border-red-100 rounded-xl p-3 space-y-2">
+                <p className="text-[10px] font-black uppercase tracking-wider text-red-700">Tóm tắt kiến thức tài liệu</p>
                 <p className="text-xs text-slate-700 font-medium leading-relaxed whitespace-pre-line">
                   {loadingSummary ? 'AI đang tóm tắt toàn bộ tài liệu, vui lòng chờ...' : chapterSummary}
                 </p>
@@ -790,7 +819,7 @@ export default function AdaptiveLearningPage() {
                         key={`${idx}-${prompt}`}
                         onClick={() => handleSuggestedPromptClick(prompt)}
                         disabled={loadingChat}
-                        className="px-2.5 py-1.5 rounded-lg bg-white border border-indigo-200 text-[10px] font-bold text-indigo-700 hover:bg-indigo-100 transition-all disabled:opacity-50"
+                        className="px-2.5 py-1.5 rounded-lg bg-white border border-red-200 text-[10px] font-bold text-red-700 hover:bg-red-100 transition-all disabled:opacity-50"
                       >
                         {prompt}
                       </button>
@@ -810,13 +839,13 @@ export default function AdaptiveLearningPage() {
               messages.map((msg, idx) => (
                 <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   {msg.role === 'assistant' && (
-                    <div className="w-7 h-7 bg-indigo-100 border border-indigo-200 rounded-lg flex items-center justify-center shrink-0 shadow-sm">
-                      <Bot size={16} className="text-indigo-600" />
+                    <div className="w-7 h-7 bg-red-100 border border-red-200 rounded-lg flex items-center justify-center shrink-0 shadow-sm">
+                      <Flame size={16} className="text-red-600" />
                     </div>
                   )}
-                  <div className={`max-w-[85%] p-4 rounded-2xl text-[13px] leading-relaxed shadow-sm ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-slate-200 rounded-tl-none'}`}>
+                  <div className={`max-w-[85%] p-4 rounded-2xl text-[13px] leading-relaxed shadow-sm ${msg.role === 'user' ? 'bg-red-600 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-red-100 rounded-tl-none'}`}>
                     {msg.role === 'assistant' ? (
-                      <ReactMarkdown components={{ strong: ({ ...props }) => <span className="font-bold text-indigo-700" {...props} />, ul: ({ ...props }) => <ul className="list-disc pl-4 space-y-1.5 my-2" {...props} />, p: ({ ...props }) => <p className="mb-2 last:mb-0" {...props} /> }}>
+                      <ReactMarkdown components={{ strong: ({ ...props }) => <span className="font-bold text-red-700" {...props} />, ul: ({ ...props }) => <ul className="list-disc pl-4 space-y-1.5 my-2" {...props} />, p: ({ ...props }) => <p className="mb-2 last:mb-0" {...props} /> }}>
                         {msg.content}
                       </ReactMarkdown>
                     ) : (
@@ -828,28 +857,28 @@ export default function AdaptiveLearningPage() {
             )}
             {loadingChat && (
               <div className="flex justify-start">
-                <div className="bg-white border border-slate-200 rounded-2xl rounded-tl-none p-3 shadow-sm flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce"></span>
-                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce delay-75"></span>
-                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce delay-150"></span>
+                <div className="bg-white border border-red-100 rounded-2xl rounded-tl-none p-3 shadow-sm flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-bounce"></span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-bounce delay-75"></span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-bounce delay-150"></span>
                 </div>
               </div>
             )}
             <div ref={messagesEndRef} />
           </div>
 
-          <div className="p-4 bg-white border-t border-slate-100 shrink-0">
-            <div className="flex gap-2 items-center bg-slate-50 p-1.5 rounded-2xl border border-slate-200 focus-within:border-indigo-500 focus-within:ring-2 ring-indigo-50 transition-all">
+          <div className="p-4 bg-white border-t border-red-100 shrink-0">
+            <div className="flex gap-2 items-center bg-red-50 p-1.5 rounded-2xl border border-red-200 focus-within:border-red-500 focus-within:ring-2 ring-red-50 transition-all">
               <input
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                placeholder={!activeLessonContext ? 'Vui lòng chọn bài học trước...' : 'Trả lời Gia sư AI...'}
+                placeholder={!activeLessonContext ? 'Vui lòng chọn bài học trước...' : 'Nhắn cho Orbit Agent...'}
                 disabled={!activeLessonContext || loadingChat}
                 className="flex-1 bg-transparent border-none outline-none text-[13px] font-medium px-3 h-10 disabled:opacity-50 text-slate-900 placeholder:text-slate-400"
               />
-              <button onClick={handleSendMessage} disabled={loadingChat || !activeLessonContext || !input.trim()} className="w-10 h-10 bg-indigo-600 text-white rounded-xl flex items-center justify-center shadow-lg shadow-indigo-100 active:scale-90 transition-all disabled:opacity-30 disabled:active:scale-100 shrink-0">
+              <button onClick={handleSendMessage} disabled={loadingChat || !activeLessonContext || !input.trim()} className="w-10 h-10 bg-red-600 text-white rounded-xl flex items-center justify-center shadow-lg shadow-red-100 active:scale-90 transition-all disabled:opacity-30 disabled:active:scale-100 shrink-0">
                 <Send size={16} />
               </button>
             </div>

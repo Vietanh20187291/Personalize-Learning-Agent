@@ -145,11 +145,13 @@ class IntentClassifier:
 
         # Generic subject/class/student extraction from phrases after keywords.
         subject_patterns = [
-            r"(?:môn|subject|course)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\-_. ]{1,60})",
-            r"(?:của môn|cua mon)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\-_. ]{1,60})",
+            r"(?:môn học|mon hoc)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\-_. ]{1,80})",
+            r"(?:môn|subject|course)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\-_. ]{1,80})",
+            r"(?:của môn|cua mon)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\-_. ]{1,80})",
         ]
         class_patterns = [
-            r"(?:lớp|class)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\-_. ]{1,40})",
+            r"(?:lớp học|lop hoc)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\-_. ]{1,60})",
+            r"(?:lớp|class)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\-_. ]{1,60})",
         ]
         student_patterns = [
             r"(?:sinh viên|học sinh|student)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\-_. ]{1,60})",
@@ -160,6 +162,8 @@ class IntentClassifier:
             match = re.search(pattern, message, flags=re.IGNORECASE)
             if match:
                 candidate = match.group(1).strip(" .,!?:;-")
+                candidate = re.sub(r"^(?:học|hoc)\s+", "", candidate, flags=re.IGNORECASE)
+                candidate = re.split(r"\b(?:cho|thuộc|thuoc|của|cua|trong)\s+(?:môn|mon|lớp|lop|class)\b", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip(" .,!?:;-")
                 if candidate:
                     entities["subject_name"] = candidate
                     break
@@ -168,6 +172,7 @@ class IntentClassifier:
             match = re.search(pattern, message, flags=re.IGNORECASE)
             if match:
                 candidate = match.group(1).strip(" .,!?:;-")
+                candidate = re.split(r"\b(?:cho|thuộc|thuoc|của|cua|trong)\s+(?:môn|mon|subject|course)\b", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip(" .,!?:;-")
                 if candidate:
                     entities["class_name"] = candidate
                     break

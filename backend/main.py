@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager # Thư viện quản lý vòng đời (lifespan)
-from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, exam_generator, subject, teacher_agent
+from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, exam_generator, subject, teacher_agent, orbit
 # --- IMPORT DATABASE VÀ MODELS ---
 from db import models
 from db.database import engine, SessionLocal 
@@ -11,7 +11,7 @@ from db.models import User, Subject
 from api.auth import hash_password 
 
 # --- IMPORT CÁC ROUTER API ---
-from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent 
+from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent, orbit 
 
 from fastapi.staticfiles import StaticFiles
 import os
@@ -138,6 +138,9 @@ app.include_router(exam_generator.router, prefix="/api/exam", tags=["Exam"])
 
 # 9. Teacher Agent (Hỗ trợ giảng viên)
 app.include_router(teacher_agent.router, prefix="/api/teacher", tags=["Teacher AI"])
+
+# 10. Orbit Agent (Hỗ trợ sinh viên)
+app.include_router(orbit.router, prefix="/api/orbit", tags=["Orbit AI"])
 
 @app.get("/")
 def read_root():

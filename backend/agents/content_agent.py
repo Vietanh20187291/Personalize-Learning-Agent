@@ -34,13 +34,12 @@ class CustomPPTXLoader:
 class ContentAgent:
     def __init__(self):
         self.api_key = os.getenv("GROQ_KEY_CONTENT")
+        self.client = Groq(api_key=self.api_key) if self.api_key else None
         if not self.api_key:
-            raise ValueError("Cần cấu hình GROQ_KEY_CONTENT trong file .env")
-            
-        self.client = Groq(api_key=self.api_key)
+            print("⚠️ GROQ_KEY_CONTENT chưa được cấu hình, ContentAgent sẽ dùng heuristic fallback.")
         self.model = "llama-3.3-70b-versatile"
         
-        self.vector_store = get_vector_store()
+        self.vector_store = None
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
@@ -61,6 +60,24 @@ class ContentAgent:
         """
         Nhận diện môn học thông minh : Kết hợp Tên File + Nội Dung + Mapping từ khóa.
         """
+        # Fallback không cần LLM nếu thiếu API key.
+        if not self.client:
+            combined = f"{file_name} {text_sample}".lower()
+            heuristic_map = {
+                "Cơ sở Hệ điều hành": ["hệ điều hành", "operating system", "process", "deadlock", "semaphore", "kernel"],
+                "Vi xử lý": ["vi xử lý", "processor", "cpu", "assembly", "mạch", "microprocessor"],
+                "Cơ sở dữ liệu": ["cơ sở dữ liệu", "database", "sql", "mysql", "postgres", "table", "schema"],
+                "Mạng máy tính": ["mạng", "network", "tcp", "udp", "ip", "router", "switch", "osi"],
+            }
+            for subject_name, keywords in heuristic_map.items():
+                if subject_name.lower() in combined or any(keyword in combined for keyword in keywords):
+                    return subject_name
+
+            for subject_name in self.subjects:
+                if subject_name.lower() in combined:
+                    return subject_name
+            return "Khác"
+
         # Tạo danh sách môn học dưới dạng chuỗi để đưa vào prompt
         subjects_str = "\n".join([f"- {s}" for s in self.subjects])
 
@@ -159,6 +176,8 @@ class ContentAgent:
             chunks = self.text_splitter.split_documents(raw_documents)
             
             if chunks:
+                if self.vector_store is None:
+                    self.vector_store = get_vector_store()
                 self.vector_store.add_documents(chunks)
                 print(f"✅ Content Agent: Đã nạp {len(chunks)} đoạn vào môn {detected_subject}")
                 return {"success": True, "subject": detected_subject}

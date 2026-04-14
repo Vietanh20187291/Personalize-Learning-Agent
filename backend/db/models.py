@@ -57,6 +57,8 @@ class User(Base):
     
     # QUAN HỆ ĐỂ TÍNH EFFORT SCORE (THỜI GIAN HỌC)
     study_sessions = relationship("StudySession", back_populates="user")
+    orbit_sessions = relationship("OrbitChatSession", back_populates="user")
+    orbit_messages = relationship("OrbitChatMessage", back_populates="user")
 
 # --- BẢNG LỚP HỌC ---
 class Classroom(Base):
@@ -78,6 +80,8 @@ class Classroom(Base):
     # QUAN HỆ N-N: LỚP HỌC VÀ SINH VIÊN
     students = relationship("User", secondary=enrollment_table, back_populates="enrolled_classes")
     documents = relationship("Document", back_populates="classroom")
+    orbit_sessions = relationship("OrbitChatSession", back_populates="classroom")
+    orbit_directives = relationship("OrbitCoachDirective", back_populates="classroom")
 
 # --- BẢNG QUẢN LÝ TÀI LIỆU ---
 class Document(Base):
@@ -218,3 +222,67 @@ class AssessmentResult(Base):
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
     
     subject_obj = relationship("Subject", back_populates="assessment_results")
+
+
+class StudentLearningProgress(Base):
+    __tablename__ = "student_learning_progress"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
+    lessons_completed_total = Column(Integer, default=0)
+    tests_completed_total = Column(Integer, default=0)
+    total_study_minutes = Column(Integer, default=0)
+    total_agent_messages = Column(Integer, default=0)
+    total_agent_chat_seconds = Column(Integer, default=0)
+    last_active_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class OrbitChatSession(Base):
+    __tablename__ = "orbit_chat_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    class_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True, index=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True, index=True)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    last_message_at = Column(DateTime, default=datetime.utcnow)
+    ended_at = Column(DateTime, default=datetime.utcnow)
+    message_count = Column(Integer, default=0)
+
+    user = relationship("User", back_populates="orbit_sessions")
+    classroom = relationship("Classroom", back_populates="orbit_sessions")
+
+
+class OrbitChatMessage(Base):
+    __tablename__ = "orbit_chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("orbit_chat_sessions.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    role = Column(String, nullable=False)  # user | assistant
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="orbit_messages")
+
+
+class OrbitCoachDirective(Base):
+    __tablename__ = "orbit_coach_directives"
+
+    id = Column(Integer, primary_key=True, index=True)
+    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    student_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    class_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True, index=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True, index=True)
+    target_tests = Column(Integer, default=0)
+    target_chapters = Column(Integer, default=0)
+    note = Column(Text, nullable=True)
+    week_start = Column(DateTime, nullable=False)
+    week_end = Column(DateTime, nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    classroom = relationship("Classroom", back_populates="orbit_directives")

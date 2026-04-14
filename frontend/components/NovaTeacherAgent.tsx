@@ -169,12 +169,40 @@ export default function NovaTeacherAgent() {
       case "teacher":
         if (action.tab_name === "subjects") {
           const subjectName = String(action.params?.subject_name || "").trim();
+          const className = String(action.params?.class_name || "").trim();
+          const documentName = String(action.params?.document_name || "").trim();
+          const mode = String(action.params?.mode || "").trim();
+          const subjectId = Number(action.params?.subject_id);
+          const classroomId = Number(action.params?.classroom_id);
+
           if (subjectName) {
             localStorage.setItem("novaTargetSubject", subjectName);
-            router.push(`/teacher/subjects?subject=${encodeURIComponent(subjectName)}`);
-          } else {
-            router.push("/teacher/subjects");
           }
+          if (className) {
+            localStorage.setItem("novaTargetClass", className);
+          }
+          if (documentName) {
+            localStorage.setItem("novaTargetDocument", documentName);
+          }
+          if (Number.isFinite(subjectId) && subjectId > 0) {
+            localStorage.setItem("novaTargetSubjectId", subjectId.toString());
+          }
+          if (Number.isFinite(classroomId) && classroomId > 0) {
+            localStorage.setItem("novaTargetClassId", classroomId.toString());
+          }
+          if (mode) {
+            localStorage.setItem("novaManagementMode", mode);
+          }
+
+          const query = new URLSearchParams();
+          if (subjectName) query.set("subject", subjectName);
+          if (className) query.set("class_name", className);
+          if (documentName) query.set("document_name", documentName);
+          if (Number.isFinite(subjectId) && subjectId > 0) query.set("subject_id", subjectId.toString());
+          if (Number.isFinite(classroomId) && classroomId > 0) query.set("class_id", classroomId.toString());
+          if (mode) query.set("mode", mode);
+
+          router.push(query.toString() ? `/teacher/subjects?${query.toString()}` : "/teacher/subjects");
         } else
         if (action.tab_name === "exam") {
           router.push(`/teacher/exam`);

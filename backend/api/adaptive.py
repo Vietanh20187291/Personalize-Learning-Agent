@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Dict, Optional
+from datetime import datetime
 from db.database import get_db
 from db import models 
 from agents.adaptive_agent import AdaptiveAgent
@@ -60,6 +61,14 @@ def log_study_session(data: StudySessionLog, db: Session = Depends(get_db)):
                 duration_minutes=data.duration_minutes
             )
             db.add(new_session)
+
+            progress = db.query(models.StudentLearningProgress).filter(models.StudentLearningProgress.user_id == data.user_id).first()
+            if not progress:
+                progress = models.StudentLearningProgress(user_id=data.user_id)
+                db.add(progress)
+            progress.total_study_minutes = int(progress.total_study_minutes or 0) + int(data.duration_minutes)
+            progress.last_active_at = datetime.utcnow()
+
             db.commit()
             return {"message": "Đã lưu thời gian học thành công"}
         return {"message": "Thời gian học quá ngắn, không ghi nhận"}
