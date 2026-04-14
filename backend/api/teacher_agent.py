@@ -60,7 +60,6 @@ def nova_interactive(req: NovaInteractiveRequest, db: Session = Depends(get_db))
             class_id=req.class_id,
             message=req.message.strip(),
         )
-        
         return {
             **agent_response,
         }

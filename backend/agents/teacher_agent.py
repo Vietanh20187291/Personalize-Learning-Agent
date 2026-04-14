@@ -34,6 +34,38 @@ class TeacherAgent:
     def _student_candidates(self) -> List[User]:
         return self.db.query(User).filter(User.role == "student").order_by(User.full_name.asc()).all()
 
+    def _find_subject_in_message(self, message: str) -> Optional[Subject]:
+        normalized_message = self._normalize(message)
+        subjects = sorted(self._subject_candidates(), key=lambda item: len(self._normalize(item.name or "")), reverse=True)
+        for subject in subjects:
+            candidate = self._normalize(subject.name or "")
+            if candidate and candidate in normalized_message:
+                return subject
+        return None
+
+    def _find_classroom_in_message(self, message: str, subject: Optional[Subject] = None) -> Optional[Classroom]:
+        normalized_message = self._normalize(message)
+        classrooms = self._classroom_candidates()
+        if subject is not None:
+            classrooms = [
+                item
+                for item in classrooms
+                if item.subject_id == subject.id or self._normalize(item.subject or "") == self._normalize(subject.name)
+            ]
+
+        # Prefer longer/more specific class names first.
+        classrooms = sorted(classrooms, key=lambda item: len(self._normalize(item.name or "")), reverse=True)
+
+        for classroom in classrooms:
+            for raw_candidate in [classroom.name, classroom.class_code or ""]:
+                candidate = self._normalize(raw_candidate)
+                if not candidate:
+                    continue
+                # Boundary-aware match to avoid IT1 matching IT10.
+                if re.search(rf"(^|[^a-z0-9]){re.escape(candidate)}([^a-z0-9]|$)", normalized_message):
+                    return classroom
+        return None
+
     def _subject_display(self, subject: Optional[Subject], context: Dict[str, Any]) -> str:
         if subject:
             return subject.name
@@ -150,16 +182,24 @@ class TeacherAgent:
             "Giỏi (>=80)": len([score for score in scores if score >= 80]),
         }
         weak_students = []
+        low_score_students = []
+        strong_students = []
         for student in sorted(classroom.students, key=lambda item: item.id):
             if getattr(student, "role", "student") != "student":
                 continue
             score = latest_scores.get(student.id)
-            if score is not None and score < 60:
-                weak_students.append({
+            if score is not None:
+                student_info = {
                     "id": student.id,
                     "name": self._clean_text(getattr(student, "full_name", "") or getattr(student, "username", "") or f"SV {student.id}"),
                     "score": round(score, 1),
-                })
+                }
+                if score < 40:
+                    low_score_students.append(student_info)
+                elif 40 <= score < 60:
+                    weak_students.append(student_info)
+                elif score >= 80:
+                    strong_students.append(student_info)
 
         return {
             "student_count": student_count,
@@ -169,19 +209,55 @@ class TeacherAgent:
             "fail_count": fail_count,
             "distribution": distribution,
             "weak_students": weak_students[:5],
+            "low_score_students": low_score_students[:5],
+            "strong_students": strong_students[:5],
             "histories_count": len(histories),
             "scores": scores,
         }
 
     def _class_overview_reply(self, classroom: Classroom, subject: Optional[Subject], context: Dict[str, Any]) -> Dict[str, Any]:
         summary = self._class_score_summary(classroom, subject)
-        weak_text = ", ".join([f"{item['name']} ({item['score']})" for item in summary["weak_students"][:3]]) or "chưa đủ dữ liệu để xác định"
-        reply = (
-            f"Tình hình học tập lớp {classroom.name}: có {summary['student_count']} sinh viên, điểm trung bình {summary['avg_score']:.1f}, "
-            f"tỷ lệ đỗ {summary['pass_rate']:.1f}%. Phân bố điểm: {summary['distribution']['Yếu (<40)']} yếu, "
-            f"{summary['distribution']['Trung bình (40-60)']} trung bình, {summary['distribution']['Khá (60-80)']} khá, "
-            f"{summary['distribution']['Giỏi (>=80)']} giỏi. Nhóm cần hỗ trợ ngay: {weak_text}."
+        
+        # Format thông tin thống kê lớp thành bullet points
+        student_count_text = f"Số sinh viên: {summary['student_count']}"
+        avg_score_text = f"Điểm trung bình: {summary['avg_score']:.1f}"
+        pass_rate_text = f"Tỷ lệ đỗ (>=50): {summary['pass_rate']:.1f}% ({summary['pass_count']}/{summary['student_count']} sinh viên)"
+        distribution_text = (
+            f"Phân bố điểm: {summary['distribution']['Giỏi (>=80)']} giỏi, "
+            f"{summary['distribution']['Khá (60-80)']} khá, {summary['distribution']['Trung bình (40-60)']} trung bình, "
+            f"{summary['distribution']['Yếu (<40)']} yếu"
         )
+        
+        # Thêm thông tin sinh viên điểm cao
+        strong_text = "Chưa có sinh viên đạt điểm cao"
+        if summary["strong_students"]:
+            strong_text = ", ".join([f"{item['name']} ({item['score']})" for item in summary["strong_students"]])
+        strong_students_text = f"Sinh viên xuất sắc (>=80): {strong_text}"
+        
+        # Thêm thông tin sinh viên cần cải thiện (40-60)
+        weak_text = "Không có"
+        if summary["weak_students"]:
+            weak_text = ", ".join([f"{item['name']} ({item['score']})" for item in summary["weak_students"]])
+        weak_students_text = f"Sinh viên cần cải thiện (40-60): {weak_text}"
+        
+        # Thêm thông tin sinh viên điểm thấp (<40)
+        low_text = "Không có"
+        if summary["low_score_students"]:
+            low_text = ", ".join([f"{item['name']} ({item['score']})" for item in summary["low_score_students"]])
+        low_students_text = f"Sinh viên không đạt (<40): {low_text}"
+        
+        # Ghép thành bullet points
+        reply = (
+            f"📊 **Tình hình học tập lớp {classroom.name}**\n"
+            f"• {student_count_text}\n"
+            f"• {avg_score_text}\n"
+            f"• {pass_rate_text}\n"
+            f"• {distribution_text}\n"
+            f"• {strong_students_text}\n"
+            f"• {weak_students_text}\n"
+            f"• {low_students_text}"
+        )
+        
         actions = [
             "Xem chi tiết phân bố điểm của lớp",
             "Lọc danh sách sinh viên dưới 60 điểm",
@@ -212,11 +288,43 @@ class TeacherAgent:
     def _class_analytics_reply(self, classroom: Optional[Classroom], subject: Optional[Subject]) -> Dict[str, Any]:
         if classroom is not None:
             summary = self._class_score_summary(classroom, subject)
-            weak_text = ", ".join([f"{item['name']} ({item['score']})" for item in summary["weak_students"][:3]]) or "chưa đủ dữ liệu"
+            
+            # Format thông tin phân tích thành bullet points
+            avg_score_text = f"Điểm trung bình: {summary['avg_score']:.1f}"
+            pass_rate_text = f"Tỷ lệ đỗ (>=50): {summary['pass_rate']:.1f}%"
+            distribution_text = (
+                f"Phân bố điểm: {summary['distribution']['Giỏi (>=80)']} giỏi, "
+                f"{summary['distribution']['Khá (60-80)']} khá, {summary['distribution']['Trung bình (40-60)']} trung bình, "
+                f"{summary['distribution']['Yếu (<40)']} yếu"
+            )
+            
+            # Thêm thông tin sinh viên điểm cao
+            strong_text = "Chưa có"
+            if summary["strong_students"]:
+                strong_text = ", ".join([f"{item['name']} ({item['score']})" for item in summary["strong_students"]])
+            strong_students_text = f"Sinh viên xuất sắc (>=80): {strong_text}"
+            
+            # Thêm thông tin sinh viên cần cải thiện (40-60)
+            weak_text = "Không có"
+            if summary["weak_students"]:
+                weak_text = ", ".join([f"{item['name']} ({item['score']})" for item in summary["weak_students"]])
+            weak_students_text = f"Sinh viên cần cải thiện (40-60): {weak_text}"
+            
+            # Thêm thông tin sinh viên điểm thấp (<40)
+            low_text = "Không có"
+            if summary["low_score_students"]:
+                low_text = ", ".join([f"{item['name']} ({item['score']})" for item in summary["low_score_students"]])
+            low_students_text = f"Sinh viên không đạt (<40): {low_text}"
+            
+            # Ghép thành bullet points
             reply = (
-                f"Phân tích lớp {classroom.name}: điểm trung bình {summary['avg_score']:.1f}, tỷ lệ đỗ {summary['pass_rate']:.1f}%. "
-                f"Phổ điểm hiện tại cho thấy {summary['distribution']['Yếu (<40)']} sinh viên yếu, {summary['distribution']['Giỏi (>=80)']} sinh viên giỏi. "
-                f"Sinh viên cần ưu tiên hỗ trợ: {weak_text}."
+                f"📈 **Phân tích chi tiết lớp {classroom.name}**\n"
+                f"• {avg_score_text}\n"
+                f"• {pass_rate_text}\n"
+                f"• {distribution_text}\n"
+                f"• {strong_students_text}\n"
+                f"• {weak_students_text}\n"
+                f"• {low_students_text}"
             )
             actions = [
                 "Xem biểu đồ phân bố điểm của lớp này",
@@ -488,8 +596,11 @@ class TeacherAgent:
             intent_type = pending_request.get("intent_type", intent_type)
             entities = self._merge_pending_entities(pending_request, entities)
 
-        subject = self._resolve_subject(entities, context)
-        classroom = self._resolve_classroom(entities, context, subject)
+        explicit_subject = self._find_subject_in_message(message)
+        subject = explicit_subject or self._resolve_subject(entities, context)
+
+        explicit_classroom = self._find_classroom_in_message(message, subject)
+        classroom = explicit_classroom or self._resolve_classroom(entities, context, subject)
         student = self._resolve_student(entities, context, classroom)
 
         # If the user just provided a follow-up, try to reuse the previous subject/class/student.

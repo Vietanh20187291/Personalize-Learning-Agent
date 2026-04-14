@@ -16,7 +16,7 @@ import {
   Copy,
   Check,
 } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import FileUploader from '@/components/FileUploader';
 import DocumentManager from '@/components/DocumentManager';
 
@@ -62,6 +62,7 @@ const SUBJECT_ICON_OPTIONS = [
 
 export default function TeacherSubjectsPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [subjects, setSubjects] = useState<SubjectItem[]>([]);
   const [classes, setClasses] = useState<ClassroomItem[]>([]);
   const [loadingSubjects, setLoadingSubjects] = useState(true);
@@ -92,6 +93,8 @@ export default function TeacherSubjectsPage() {
     () => subjects.find((s) => s.id === selectedSubjectId) || null,
     [subjects, selectedSubjectId]
   );
+
+  const normalizeName = (value: string) => value.trim().toLowerCase();
 
   const mappedUploaderClasses = useMemo(
     () =>
@@ -175,6 +178,31 @@ export default function TeacherSubjectsPage() {
       setSelectedClassId(null);
     }
   }, [selectedSubjectId]);
+
+  useEffect(() => {
+    if (subjects.length === 0) return;
+
+    const fromQuery = searchParams.get('subject');
+    const fromStorage = typeof window !== 'undefined' ? localStorage.getItem('novaTargetSubject') : null;
+    const rawTarget = (fromQuery || fromStorage || '').trim();
+    if (!rawTarget) return;
+
+    const targetName = normalizeName(rawTarget);
+    const matched = subjects.find((s) => normalizeName(s.name || '') === targetName);
+
+    if (matched) {
+      setSelectedSubjectId(matched.id);
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('novaTargetSubject');
+      }
+      return;
+    }
+
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('novaTargetSubject');
+    }
+    toast.error(`Không tìm thấy môn học "${rawTarget}" trong danh sách.`);
+  }, [subjects, searchParams]);
 
   const handleSaveSubject = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -42,9 +42,9 @@ export default function NovaTeacherAgent() {
 
   const suggestedQuestions = [
     "Tóm tắt tình hình lớp IT1",
-    "Tình hình học tập sinh viên A thế nào?",
-    "Những sinh viên nào cần hỗ trợ ngay?",
-    "Đề xuất kế hoạch ôn tập cho buổi tới",
+    "Tình hình học tập sinh viên ABX thế nào",
+    "Môn học Giải tích có những lớp nào",
+    "Xuất đề thi trắc nghiệm cơ sở hệ điều hành 20 câu 2 mã đề",
   ];
 
   // Extract class_id and teacher_id from localStorage or URL
@@ -140,14 +140,23 @@ export default function NovaTeacherAgent() {
 
   // Handle navigation based on action_metadata
   const handleNavigation = (action: ActionMetadata) => {
-    if (!action.should_auto_execute) return;
+    if (action.action_type !== "open_tab") return;
+
+    const actionClassId = Number(action.params?.classroom_id);
+    const resolvedClassId = Number.isFinite(actionClassId) && actionClassId > 0 ? actionClassId : classId;
 
     switch (action.target) {
       case "learning_results":
         if (action.tab_name === "class_analytics") {
-          router.push(`/teacher/classrooms/${classId}`);
+          if (resolvedClassId) {
+            localStorage.setItem("currentClassId", resolvedClassId.toString());
+          }
+          router.push("/teacher/members");
         } else if (action.tab_name === "student_detailed") {
-          router.push(`/teacher/members`);
+          if (resolvedClassId) {
+            localStorage.setItem("currentClassId", resolvedClassId.toString());
+          }
+          router.push("/teacher/members");
         }
         break;
 
@@ -158,6 +167,15 @@ export default function NovaTeacherAgent() {
         break;
 
       case "teacher":
+        if (action.tab_name === "subjects") {
+          const subjectName = String(action.params?.subject_name || "").trim();
+          if (subjectName) {
+            localStorage.setItem("novaTargetSubject", subjectName);
+            router.push(`/teacher/subjects?subject=${encodeURIComponent(subjectName)}`);
+          } else {
+            router.push("/teacher/subjects");
+          }
+        } else
         if (action.tab_name === "exam") {
           router.push(`/teacher/exam`);
         } else if (action.tab_name === "documents") {
