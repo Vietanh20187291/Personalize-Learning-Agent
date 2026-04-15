@@ -6,6 +6,7 @@ import ReactMarkdown from 'react-markdown';
 import {
   Send,
   Flame,
+  Smile,
   MessageSquare,
   UserPlus,
   Loader2,
@@ -95,6 +96,8 @@ export default function AdaptiveLearningPage() {
 
   const [triggerInitialMessage, setTriggerInitialMessage] = useState(false);
   const [pendingOrbitAction, setPendingOrbitAction] = useState<any | null>(null);
+  const [orbitMode, setOrbitMode] = useState<'angry' | 'happy'>('happy');
+  const [orbitStatusText, setOrbitStatusText] = useState('Đang vui vẻ');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const userIdRef = useRef<number | null>(null);
 
@@ -203,19 +206,17 @@ export default function AdaptiveLearningPage() {
     const topic = lesson?.topic || doc.filename.replace(/\.[^/.]+$/, '');
     const desc = lesson?.description || `Nội dung tài liệu ${doc.filename}`;
     const context = `BUỔI ${lessonNo || '?'}: ${topic} - Mô tả: ${desc}`;
-    const baseSummary = `Bạn đang học từ tài liệu: ${doc.filename}. Chủ đề hiện tại: ${topic}. Trọng tâm: ${desc}`;
 
     setActiveDocumentId(doc.id);
     setActiveLessonNumber(lessonNo);
     setActiveLessonTopic(topic);
     setActiveLessonContext(context);
-    setChapterSummary(baseSummary);
+    setChapterSummary('');
     setSuggestedPrompts([
       `Tóm tắt ngắn nội dung chính của tài liệu ${doc.filename}`,
       `Nêu 3 ý quan trọng nhất trong phần ${topic}`,
       `Đặt 3 câu hỏi tự kiểm tra theo nội dung ${topic}`,
     ]);
-    setMessages([{ role: 'assistant', content: `**Tóm tắt kiến thức bài đang học**\n${baseSummary}` }]);
 
     void loadDocumentPreview(doc.id);
     const summaryPromise = loadMaterialSummary(selectedSubject, doc.filename, topic, doc.id);
@@ -580,6 +581,12 @@ export default function AdaptiveLearningPage() {
         source_file: getActiveDocument()?.filename || '',
       });
       setMessages((prev) => [...prev, { role: 'assistant', content: res.data.reply }]);
+      if (res.data?.orbit_mode === 'angry' || res.data?.orbit_mode === 'happy') {
+        setOrbitMode(res.data.orbit_mode);
+      }
+      if (res.data?.orbit_status_text) {
+        setOrbitStatusText(String(res.data.orbit_status_text));
+      }
       if (res.data?.action_metadata?.should_auto_execute) {
         await handleOrbitAction(res.data.action_metadata);
         setPendingOrbitAction(null);
@@ -606,6 +613,19 @@ export default function AdaptiveLearningPage() {
 
   const activeDoc = getActiveDocument();
   const activeDocExt = activeDoc ? getFileExt(activeDoc.filename) : '';
+  const isOrbitAngry = orbitMode === 'angry';
+  const orbitMascot = isOrbitAngry ? '/Orbit Angry.png' : '/Orbit Happy.png';
+  const orbitPanelClass = isOrbitAngry ? 'border-red-200' : 'border-emerald-200';
+  const orbitHeaderBg = isOrbitAngry ? 'from-red-50 to-red-100 border-red-100' : 'from-emerald-50 to-emerald-100 border-emerald-100';
+  const orbitHeaderTitle = isOrbitAngry ? 'text-red-800' : 'text-emerald-800';
+  const orbitStatusDot = isOrbitAngry ? 'bg-red-500' : 'bg-emerald-500';
+  const orbitStatusTextClass = isOrbitAngry ? 'text-red-600' : 'text-emerald-600';
+  const orbitBodyBg = isOrbitAngry ? 'bg-red-50/40' : 'bg-emerald-50/40';
+  const orbitAssistantAvatar = isOrbitAngry ? 'bg-red-100 border-red-200 text-red-600' : 'bg-emerald-100 border-emerald-200 text-emerald-600';
+  const orbitAssistantBubble = isOrbitAngry ? 'bg-white text-slate-700 border border-red-100 rounded-tl-none' : 'bg-white text-slate-700 border border-emerald-100 rounded-tl-none';
+  const orbitUserBubble = isOrbitAngry ? 'bg-red-600 text-white rounded-tr-none' : 'bg-emerald-600 text-white rounded-tr-none';
+  const orbitInputWrap = isOrbitAngry ? 'bg-red-50 border-red-200 focus-within:border-red-500 ring-red-50' : 'bg-emerald-50 border-emerald-200 focus-within:border-emerald-500 ring-emerald-50';
+  const orbitSendBtn = isOrbitAngry ? 'bg-red-600 shadow-red-100' : 'bg-emerald-600 shadow-emerald-100';
 
   return (
     <div className="fixed inset-0 text-slate-800 flex flex-col pt-[80px] pb-4 px-4 sm:px-6 overflow-hidden app-bg">
@@ -796,27 +816,27 @@ export default function AdaptiveLearningPage() {
           </div>
         </div>
 
-        <div className="fixed right-4 top-[96px] z-30 w-[430px] max-w-[92vw] h-[calc(100vh-120px)] flex flex-col bg-white rounded-2xl border border-red-200 shadow-2xl overflow-hidden">
-          <div className="border-b border-red-100 flex items-end justify-between px-3 py-2 bg-gradient-to-r from-red-50 to-red-100 shrink-0">
+        <div className={`fixed right-4 top-[96px] z-30 w-[430px] max-w-[92vw] h-[calc(100vh-120px)] flex flex-col bg-white rounded-2xl border shadow-2xl overflow-hidden ${orbitPanelClass}`}>
+          <div className={`border-b flex items-end justify-between px-3 py-2 bg-gradient-to-r shrink-0 ${orbitHeaderBg}`}>
             <div className="flex items-end gap-2">
-              <img 
-                src="/Teacher Orbit.png" 
+              <img
+                src={orbitMascot}
                 alt="Orbit Teacher" 
                 className="h-12 w-auto object-contain"
               />
               <div>
-                <h3 className="text-xs font-black text-red-800 uppercase tracking-tight">Orbit Agent</h3>
-                <p className="text-[9px] font-bold text-red-600 uppercase tracking-widest flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span> Đang giám sát học tập
+                <h3 className={`text-xs font-black uppercase tracking-tight ${orbitHeaderTitle}`}>Orbit Agent</h3>
+                <p className={`text-[9px] font-bold uppercase tracking-widest flex items-center gap-1 ${orbitStatusTextClass}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${orbitStatusDot}`}></span> {orbitStatusText}
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-red-50/40 custom-scrollbar">
-            {activeLessonContext && (
-              <div className="bg-red-50 border border-red-100 rounded-xl p-3 space-y-2">
-                <p className="text-[10px] font-black uppercase tracking-wider text-red-700">Tóm tắt kiến thức tài liệu</p>
+          <div className={`flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar ${orbitBodyBg}`}>
+            {activeLessonContext && (loadingSummary || !!chapterSummary) && (
+              <div className={`rounded-xl p-3 space-y-2 ${isOrbitAngry ? 'bg-red-50 border border-red-100' : 'bg-emerald-50 border border-emerald-100'}`}>
+                <p className={`text-[10px] font-black uppercase tracking-wider ${isOrbitAngry ? 'text-red-700' : 'text-emerald-700'}`}>Tóm tắt kiến thức tài liệu</p>
                 <p className="text-xs text-slate-700 font-medium leading-relaxed whitespace-pre-line">
                   {loadingSummary ? 'AI đang tóm tắt toàn bộ tài liệu, vui lòng chờ...' : chapterSummary}
                 </p>
@@ -827,7 +847,7 @@ export default function AdaptiveLearningPage() {
                         key={`${idx}-${prompt}`}
                         onClick={() => handleSuggestedPromptClick(prompt)}
                         disabled={loadingChat}
-                        className="px-2.5 py-1.5 rounded-lg bg-white border border-red-200 text-[10px] font-bold text-red-700 hover:bg-red-100 transition-all disabled:opacity-50"
+                        className={`px-2.5 py-1.5 rounded-lg bg-white text-[10px] font-bold transition-all disabled:opacity-50 ${isOrbitAngry ? 'border border-red-200 text-red-700 hover:bg-red-100' : 'border border-emerald-200 text-emerald-700 hover:bg-emerald-100'}`}
                       >
                         {prompt}
                       </button>
@@ -847,13 +867,13 @@ export default function AdaptiveLearningPage() {
               messages.map((msg, idx) => (
                 <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   {msg.role === 'assistant' && (
-                    <div className="w-7 h-7 bg-red-100 border border-red-200 rounded-lg flex items-center justify-center shrink-0 shadow-sm">
-                      <Flame size={16} className="text-red-600" />
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 shadow-sm border ${orbitAssistantAvatar}`}>
+                      {isOrbitAngry ? <Flame size={16} /> : <Smile size={16} />}
                     </div>
                   )}
-                  <div className={`max-w-[85%] p-4 rounded-2xl text-[13px] leading-relaxed shadow-sm ${msg.role === 'user' ? 'bg-red-600 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-red-100 rounded-tl-none'}`}>
+                  <div className={`max-w-[85%] p-4 rounded-2xl text-[13px] leading-relaxed shadow-sm ${msg.role === 'user' ? orbitUserBubble : orbitAssistantBubble}`}>
                     {msg.role === 'assistant' ? (
-                      <ReactMarkdown components={{ strong: ({ ...props }) => <span className="font-bold text-red-700" {...props} />, ul: ({ ...props }) => <ul className="list-disc pl-4 space-y-1.5 my-2" {...props} />, p: ({ ...props }) => <p className="mb-2 last:mb-0" {...props} /> }}>
+                      <ReactMarkdown components={{ strong: ({ ...props }) => <span className={`font-bold ${isOrbitAngry ? 'text-red-700' : 'text-emerald-700'}`} {...props} />, ul: ({ ...props }) => <ul className="list-disc pl-4 space-y-1.5 my-2" {...props} />, p: ({ ...props }) => <p className="mb-2 last:mb-0" {...props} /> }}>
                         {msg.content}
                       </ReactMarkdown>
                     ) : (
@@ -865,18 +885,18 @@ export default function AdaptiveLearningPage() {
             )}
             {loadingChat && (
               <div className="flex justify-start">
-                <div className="bg-white border border-red-100 rounded-2xl rounded-tl-none p-3 shadow-sm flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-bounce"></span>
-                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-bounce delay-75"></span>
-                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-bounce delay-150"></span>
+                <div className={`bg-white rounded-2xl rounded-tl-none p-3 shadow-sm flex items-center gap-1.5 border ${isOrbitAngry ? 'border-red-100' : 'border-emerald-100'}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full animate-bounce ${isOrbitAngry ? 'bg-red-400' : 'bg-emerald-400'}`}></span>
+                  <span className={`w-1.5 h-1.5 rounded-full animate-bounce delay-75 ${isOrbitAngry ? 'bg-red-400' : 'bg-emerald-400'}`}></span>
+                  <span className={`w-1.5 h-1.5 rounded-full animate-bounce delay-150 ${isOrbitAngry ? 'bg-red-400' : 'bg-emerald-400'}`}></span>
                 </div>
               </div>
             )}
             <div ref={messagesEndRef} />
           </div>
 
-          <div className="p-4 bg-white border-t border-red-100 shrink-0">
-            <div className="flex gap-2 items-center bg-red-50 p-1.5 rounded-2xl border border-red-200 focus-within:border-red-500 focus-within:ring-2 ring-red-50 transition-all">
+          <div className={`p-4 bg-white border-t shrink-0 ${isOrbitAngry ? 'border-red-100' : 'border-emerald-100'}`}>
+            <div className={`flex gap-2 items-center p-1.5 rounded-2xl border focus-within:ring-2 transition-all ${orbitInputWrap}`}>
               <input
                 type="text"
                 value={input}
@@ -886,13 +906,13 @@ export default function AdaptiveLearningPage() {
                 disabled={!activeLessonContext || loadingChat}
                 className="flex-1 bg-transparent border-none outline-none text-[13px] font-medium px-3 h-10 disabled:opacity-50 text-slate-900 placeholder:text-slate-400"
               />
-              <button onClick={handleSendMessage} disabled={loadingChat || !activeLessonContext || !input.trim()} className="w-10 h-10 bg-red-600 text-white rounded-xl flex items-center justify-center shadow-lg shadow-red-100 active:scale-90 transition-all disabled:opacity-30 disabled:active:scale-100 shrink-0">
+              <button onClick={handleSendMessage} disabled={loadingChat || !activeLessonContext || !input.trim()} className={`w-10 h-10 text-white rounded-xl flex items-center justify-center shadow-lg active:scale-90 transition-all disabled:opacity-30 disabled:active:scale-100 shrink-0 ${orbitSendBtn}`}>
                 <Send size={16} />
               </button>
             </div>
             {pendingOrbitAction?.action_type === 'open_document' && (
-              <div className="mt-2 rounded-xl border border-red-200 bg-red-50 p-2.5">
-                <p className="text-[10px] font-black uppercase tracking-wider text-red-700 mb-2">Orbit đề xuất tài liệu học</p>
+              <div className={`mt-2 rounded-xl border p-2.5 ${isOrbitAngry ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
+                <p className={`text-[10px] font-black uppercase tracking-wider mb-2 ${isOrbitAngry ? 'text-red-700' : 'text-emerald-700'}`}>Orbit đề xuất tài liệu học</p>
                 <button
                   onClick={async () => {
                     await handleOrbitAction(pendingOrbitAction);
@@ -903,7 +923,7 @@ export default function AdaptiveLearningPage() {
                     ]);
                   }}
                   disabled={loadingChat}
-                  className="w-full px-3 py-2 rounded-lg bg-red-600 text-white text-[11px] font-black uppercase tracking-wide hover:bg-red-700 disabled:opacity-50"
+                  className={`w-full px-3 py-2 rounded-lg text-white text-[11px] font-black uppercase tracking-wide disabled:opacity-50 ${isOrbitAngry ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}
                 >
                   {String(pendingOrbitAction?.confirm_button_text || 'OK, mở tài liệu đề xuất')}
                 </button>

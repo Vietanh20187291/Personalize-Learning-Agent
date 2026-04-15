@@ -72,7 +72,7 @@ def _subject_name_of_classroom(classroom: models.Classroom) -> str:
 
 
 def _collect_subject_learning_map(db: Session, user: models.User) -> Dict[str, Dict[str, int]]:
-    data: Dict[str, Dict[str, int]] = {}
+    data: Dict[str, Dict[str, object]] = {}
 
     for classroom in getattr(user, "enrolled_classes", []):
         subject_name = _subject_name_of_classroom(classroom)
@@ -85,6 +85,7 @@ def _collect_subject_learning_map(db: Session, user: models.User) -> Dict[str, D
                 "study_minutes": 0,
                 "tests": 0,
                 "lessons": 0,
+                "latest_score": None,
             }
 
     sessions = db.query(models.StudySession).filter(models.StudySession.user_id == user.id).all()
@@ -99,10 +100,11 @@ def _collect_subject_learning_map(db: Session, user: models.User) -> Dict[str, D
                 "study_minutes": 0,
                 "tests": 0,
                 "lessons": 0,
+                "latest_score": None,
             }
         data[key]["study_minutes"] += int(item.duration_minutes or 0)
 
-    histories = db.query(models.AssessmentHistory).filter(models.AssessmentHistory.user_id == user.id).all()
+    histories = db.query(models.AssessmentHistory).filter(models.AssessmentHistory.user_id == user.id).order_by(models.AssessmentHistory.timestamp.desc()).all()
     for item in histories:
         subject_name = (getattr(getattr(item, "subject_obj", None), "name", None) or item.subject or "").strip()
         if not subject_name:
@@ -114,12 +116,36 @@ def _collect_subject_learning_map(db: Session, user: models.User) -> Dict[str, D
                 "study_minutes": 0,
                 "tests": 0,
                 "lessons": 0,
+                "latest_score": None,
             }
         data[key]["tests"] += 1
+        if data[key]["latest_score"] is None:
+            data[key]["latest_score"] = float(item.score or 0)
         if float(item.score or 0) >= 60 and (item.test_type in ["chapter", "session"]):
             data[key]["lessons"] += 1
 
     return data
+
+
+def _focus_priority(item: Dict[str, object]) -> Tuple[int, int, int, int]:
+    latest_score = item.get("latest_score")
+    if latest_score is None:
+        score_bucket = 0
+    else:
+        score_value = float(latest_score)
+        if score_value < 50:
+            score_bucket = 1
+        elif score_value < 65:
+            score_bucket = 2
+        else:
+            score_bucket = 3
+
+    return (
+        score_bucket,
+        int(item.get("lessons", 0)),
+        int(item.get("tests", 0)),
+        int(item.get("study_minutes", 0)),
+    )
 
 
 def _pick_focus_subject(db: Session, user: models.User) -> Optional[str]:
@@ -127,14 +153,7 @@ def _pick_focus_subject(db: Session, user: models.User) -> Optional[str]:
     if not subject_map:
         return None
 
-    ranked = sorted(
-        subject_map.values(),
-        key=lambda item: (
-            item.get("lessons", 0) > 0,
-            item.get("tests", 0) > 0,
-            item.get("study_minutes", 0),
-        ),
-    )
+    ranked = sorted(subject_map.values(), key=_focus_priority)
     return ranked[0]["subject_name"] if ranked else None
 
 
@@ -220,6 +239,31 @@ def _is_entry_message(message: str) -> bool:
     return any(token in text for token in [
         "bắt đầu bài học", "bat dau bai hoc", "bắt đầu học", "bat dau hoc", "chào ai", "chao ai", "học hôm nay", "hoc hom nay", "hello orbit"
     ])
+
+
+def _overall_latest_score(db: Session, user_id: int) -> Optional[float]:
+    histories = db.query(models.AssessmentHistory).filter(models.AssessmentHistory.user_id == user_id).order_by(models.AssessmentHistory.timestamp.desc()).limit(8).all()
+    if not histories:
+        return None
+    scores = [float(item.score or 0) for item in histories]
+    return sum(scores) / len(scores) if scores else None
+
+
+def _entry_orbit_mode(db: Session, user_id: int, now: Optional[datetime] = None) -> Tuple[str, str]:
+    current_time = now or datetime.utcnow()
+    progress = db.query(models.StudentLearningProgress).filter(models.StudentLearningProgress.user_id == user_id).first()
+    previous_login = progress.previous_login_at if progress else None
+    login_gap_days = (current_time - previous_login).days if previous_login else 0
+
+    latest_avg_score = _overall_latest_score(db, user_id)
+    low_score_mode = latest_avg_score is not None and latest_avg_score < 60
+    long_gap_mode = login_gap_days >= 7
+
+    if long_gap_mode or low_score_mode:
+        if long_gap_mode:
+            return "angry", "Đang tức giận"
+        return "angry", "Đang tức giận"
+    return "happy", "Đang vui vẻ"
 
 
 def _build_recommendation_payload(db: Session, user: models.User) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
@@ -483,15 +527,13 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
 
     orbit = OrbitAgent(db)
     reply = orbit.respond(user=user, subject_name=subject_name, message=req.message, class_id=classroom.id)
+    orbit_mode, orbit_status_text = _entry_orbit_mode(db, user.id)
     login_notice = _login_gap_notice(db, user.id)
     study_notice = _last_study_notice(db, user.id)
     is_entry = _is_entry_message(req.message)
     if is_entry:
-        header_lines = [
-            "📌 Orbit báo cáo nhanh khi bạn vừa vào hệ thống:",
-            f"- {login_notice}",
-            f"- {study_notice}",
-        ]
+        mood_line = "😠 Orbit Angry đang làm việc." if orbit_mode == "angry" else "😊 Orbit Happy chào bạn quay lại học tập."
+        header_lines = ["📌 Orbit báo cáo nhanh khi bạn vừa vào hệ thống:", mood_line, f"- {login_notice}", f"- {study_notice}"]
         reply = "\n".join(header_lines) + "\n\n" + reply
     elif login_notice:
         reply = f"{login_notice}\n\n{reply}"
@@ -601,6 +643,8 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
         "subject": subject_name,
         "recommendation": recommendation_payload,
         "action_metadata": action_metadata,
+        "orbit_mode": orbit_mode,
+        "orbit_status_text": orbit_status_text,
     }
 
 
