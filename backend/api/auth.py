@@ -105,6 +105,15 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
+
+    progress = db.query(models.StudentLearningProgress).filter(models.StudentLearningProgress.user_id == user.id).first()
+    if not progress:
+        progress = models.StudentLearningProgress(user_id=user.id)
+        db.add(progress)
+    progress.previous_login_at = progress.last_login_at
+    progress.last_login_at = datetime.utcnow()
+    progress.last_active_at = datetime.utcnow()
+    db.commit()
     
     access_token = create_access_token(data={"sub": user.username, "role": user.role, "id": user.id})
     

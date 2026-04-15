@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from agents.orbit_agent import OrbitAgent
 from db import models
 from db.database import get_db
+from services.orbit_reminders import build_weekly_inactivity_report, send_weekly_reminders
 
 router = APIRouter()
 
@@ -45,6 +46,11 @@ class TeacherDirectiveRequest(BaseModel):
     target_tests: int = 0
     target_chapters: int = 0
     note: str = ""
+
+
+class WeeklyInactivityQuery(BaseModel):
+    teacher_id: Optional[int] = None
+    class_id: Optional[int] = None
 
 
 def _week_bounds(now: datetime):
@@ -209,6 +215,13 @@ def _is_summary_request(message: str) -> bool:
     return any(token in text for token in ["tóm tắt", "tom tat", "tóm lược", "tom luoc", "summary"])
 
 
+def _is_entry_message(message: str) -> bool:
+    text = _normalize(message)
+    return any(token in text for token in [
+        "bắt đầu bài học", "bat dau bai hoc", "bắt đầu học", "bat dau hoc", "chào ai", "chao ai", "học hôm nay", "hoc hom nay", "hello orbit"
+    ])
+
+
 def _build_recommendation_payload(db: Session, user: models.User) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
     focus_subject = _pick_focus_subject(db, user)
     if not focus_subject:
@@ -241,6 +254,45 @@ def _build_recommendation_payload(db: Session, user: models.User) -> Tuple[Optio
         f"Tôi đã chọn tài liệu {document.filename} để bạn bắt đầu ngay."
     )
     return payload, text
+
+
+def _login_gap_notice(db: Session, user_id: int, now: Optional[datetime] = None) -> Optional[str]:
+    current_time = now or datetime.utcnow()
+    progress = db.query(models.StudentLearningProgress).filter(models.StudentLearningProgress.user_id == user_id).first()
+    if not progress:
+        return "Orbit chưa có dữ liệu đăng nhập gần nhất của bạn. Hãy đăng nhập thường xuyên hơn để tôi theo dõi sát hơn."
+
+    previous_login = progress.previous_login_at or progress.last_login_at
+    if not previous_login:
+        return "Đây là lần đầu bạn đăng nhập vào hệ thống học. Bắt đầu học đều ngay từ hôm nay nhé."
+
+    gap_days = (current_time - previous_login).days
+    if gap_days <= 0:
+        return "Lần đăng nhập trước của bạn là trong hôm nay. Tiếp tục giữ nhịp đăng nhập thường xuyên để không trễ tiến độ."
+    if gap_days == 1:
+        return "Lần đăng nhập trước là 1 ngày trước. Ổn, nhưng bạn vẫn nên vào hệ thống đều mỗi ngày để giữ đà học tập."
+    if gap_days < 7:
+        return f"Bạn đã {gap_days} ngày chưa đăng nhập. Orbit nhắc bạn cần vào hệ thống thường xuyên hơn để giữ nhịp học."
+    return f"⚠️ Bạn đã {gap_days} ngày chưa đăng nhập. Orbit cảnh báo: khoảng nghỉ này quá dài, cần học lại ngay hôm nay để tránh tụt tiến độ."
+
+
+def _last_study_notice(db: Session, user_id: int, now: Optional[datetime] = None) -> str:
+    current_time = now or datetime.utcnow()
+    last_session = db.query(models.StudySession).filter(
+        models.StudySession.user_id == user_id
+    ).order_by(models.StudySession.start_time.desc()).first()
+
+    if not last_session or not last_session.start_time:
+        return "Orbit chưa ghi nhận buổi học nào trước đó của bạn. Hãy bắt đầu 1 buổi học ngay bây giờ."
+
+    gap_days = (current_time - last_session.start_time).days
+    if gap_days <= 0:
+        return "Lần học bài gần nhất: hôm nay. Nhịp học tốt, tiếp tục duy trì."
+    if gap_days == 1:
+        return "Lần học bài gần nhất: 1 ngày trước. Bạn nên học tiếp trong hôm nay để giữ nhịp."
+    if gap_days < 7:
+        return f"Lần học bài gần nhất: {gap_days} ngày trước. Bạn cần học lại sớm để không quên kiến thức."
+    return f"⚠️ Lần học bài gần nhất: {gap_days} ngày trước. Orbit nhắc nghiêm: đã nghỉ quá lâu, cần quay lại học ngay."
 
 
 def _get_or_create_orbit_session(db: Session, user_id: int, class_id: Optional[int], subject_id: Optional[int]) -> models.OrbitChatSession:
@@ -384,6 +436,24 @@ def _build_progress_payload(db: Session, user_id: int) -> OrbitProgressResponse:
     )
 
 
+@router.get("/weekly-inactivity")
+def get_weekly_inactivity_report(
+    teacher_id: Optional[int] = None,
+    class_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    return build_weekly_inactivity_report(db, teacher_id=teacher_id, class_id=class_id)
+
+
+@router.post("/weekly-reminders/send")
+def trigger_weekly_reminders(
+    teacher_id: Optional[int] = None,
+    class_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    return send_weekly_reminders(db, teacher_id=teacher_id, class_id=class_id)
+
+
 @router.post("/chat")
 def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == req.user_id).first()
@@ -413,6 +483,18 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
 
     orbit = OrbitAgent(db)
     reply = orbit.respond(user=user, subject_name=subject_name, message=req.message, class_id=classroom.id)
+    login_notice = _login_gap_notice(db, user.id)
+    study_notice = _last_study_notice(db, user.id)
+    is_entry = _is_entry_message(req.message)
+    if is_entry:
+        header_lines = [
+            "📌 Orbit báo cáo nhanh khi bạn vừa vào hệ thống:",
+            f"- {login_notice}",
+            f"- {study_notice}",
+        ]
+        reply = "\n".join(header_lines) + "\n\n" + reply
+    elif login_notice:
+        reply = f"{login_notice}\n\n{reply}"
 
     recommendation_payload: Optional[Dict[str, object]] = None
     action_metadata: Optional[Dict[str, object]] = None
@@ -426,7 +508,7 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
             models.Document.filename == req.source_file.strip(),
         ).first()
 
-    if _should_recommend_study(req.message):
+    if _should_recommend_study(req.message) or is_entry:
         recommendation_payload, recommendation_text = _build_recommendation_payload(db, user)
         if recommendation_text:
             reply = f"{reply}\n\n{recommendation_text}"
@@ -445,7 +527,8 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
                     "filename": rec_doc.get("filename"),
                     "summary": rec_doc.get("summary"),
                 },
-                "should_auto_execute": True,
+                "confirm_button_text": "OK, mở tài liệu đề xuất",
+                "should_auto_execute": False if is_entry else True,
             }
 
     if _is_summary_request(req.message):

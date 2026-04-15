@@ -94,6 +94,7 @@ export default function AdaptiveLearningPage() {
   const [joining, setJoining] = useState(false);
 
   const [triggerInitialMessage, setTriggerInitialMessage] = useState(false);
+  const [pendingOrbitAction, setPendingOrbitAction] = useState<any | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const userIdRef = useRef<number | null>(null);
 
@@ -392,7 +393,7 @@ export default function AdaptiveLearningPage() {
 
   useEffect(() => {
     if (!triggerInitialMessage || !activeLessonContext) return;
-    sendChatMessage('Chào AI, hãy bắt đầu bài học hôm nay nhé.');
+    sendChatMessage('Chào Orbit, hãy bắt đầu bài học hôm nay nhé.');
     setTriggerInitialMessage(false);
   }, [triggerInitialMessage, activeLessonContext]);
 
@@ -581,6 +582,11 @@ export default function AdaptiveLearningPage() {
       setMessages((prev) => [...prev, { role: 'assistant', content: res.data.reply }]);
       if (res.data?.action_metadata?.should_auto_execute) {
         await handleOrbitAction(res.data.action_metadata);
+        setPendingOrbitAction(null);
+      } else if (res.data?.action_metadata?.action_type === 'open_document') {
+        setPendingOrbitAction(res.data.action_metadata);
+      } else {
+        setPendingOrbitAction(null);
       }
     } catch (e: unknown) {
       const realError = axios.isAxiosError(e)
@@ -884,6 +890,25 @@ export default function AdaptiveLearningPage() {
                 <Send size={16} />
               </button>
             </div>
+            {pendingOrbitAction?.action_type === 'open_document' && (
+              <div className="mt-2 rounded-xl border border-red-200 bg-red-50 p-2.5">
+                <p className="text-[10px] font-black uppercase tracking-wider text-red-700 mb-2">Orbit đề xuất tài liệu học</p>
+                <button
+                  onClick={async () => {
+                    await handleOrbitAction(pendingOrbitAction);
+                    setPendingOrbitAction(null);
+                    setMessages((prev) => [
+                      ...prev,
+                      { role: 'assistant', content: '✅ Đã mở tài liệu đề xuất. Bắt đầu học thôi.' },
+                    ]);
+                  }}
+                  disabled={loadingChat}
+                  className="w-full px-3 py-2 rounded-lg bg-red-600 text-white text-[11px] font-black uppercase tracking-wide hover:bg-red-700 disabled:opacity-50"
+                >
+                  {String(pendingOrbitAction?.confirm_button_text || 'OK, mở tài liệu đề xuất')}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>

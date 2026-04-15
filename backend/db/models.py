@@ -234,6 +234,8 @@ class StudentLearningProgress(Base):
     total_study_minutes = Column(Integer, default=0)
     total_agent_messages = Column(Integer, default=0)
     total_agent_chat_seconds = Column(Integer, default=0)
+    previous_login_at = Column(DateTime, nullable=True)
+    last_login_at = Column(DateTime, nullable=True)
     last_active_at = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -286,3 +288,17 @@ class OrbitCoachDirective(Base):
     completed_at = Column(DateTime, nullable=True)
 
     classroom = relationship("Classroom", back_populates="orbit_directives")
+
+
+class OrbitWeeklyReminderLog(Base):
+    __tablename__ = "orbit_weekly_reminder_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    week_start = Column(DateTime, nullable=False, index=True)
+    week_end = Column(DateTime, nullable=False)
+    email = Column(String, nullable=False)
+    status = Column(String, default="sent")
+    summary = Column(Text, nullable=True)
+    sent_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)

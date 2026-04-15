@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager # Thư viện quản lý vòng đời (lifespan)
 from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, exam_generator, subject, teacher_agent, orbit
+from services.orbit_reminders import start_weekly_orbit_reminder_loop
 # --- IMPORT DATABASE VÀ MODELS ---
 from db import models
 from db.database import engine, SessionLocal 
@@ -18,6 +19,27 @@ import os
 
 # Tự động tạo bảng nếu chưa có 
 models.Base.metadata.create_all(bind=engine)
+
+
+def ensure_orbit_login_tracking_column():
+    try:
+        from sqlalchemy import inspect, text
+
+        inspector = inspect(engine)
+        columns = [column["name"] for column in inspector.get_columns("student_learning_progress")]
+        if "last_login_at" not in columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE student_learning_progress ADD COLUMN last_login_at DATETIME"))
+                print("✅ Đã bổ sung cột last_login_at cho student_learning_progress")
+        if "previous_login_at" not in columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE student_learning_progress ADD COLUMN previous_login_at DATETIME"))
+                print("✅ Đã bổ sung cột previous_login_at cho student_learning_progress")
+    except Exception as e:
+        print(f"⚠️ Không thể kiểm tra/cập nhật cột last_login_at: {e}")
+
+
+ensure_orbit_login_tracking_column()
 
 # --- HÀM TẠO CÁC MÔN HỌC MẶC ĐỊNH ---
 def create_default_subjects():
@@ -87,6 +109,7 @@ def create_initial_admin():
 async def lifespan(app: FastAPI):
     create_default_subjects()  # Tạo môn học trước
     create_initial_admin()      # Rồi tạo admin
+    start_weekly_orbit_reminder_loop(SessionLocal)
     yield 
 
 # Khởi tạo App với lifespan
