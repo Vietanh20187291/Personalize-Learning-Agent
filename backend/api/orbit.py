@@ -191,6 +191,48 @@ def _pick_recommended_document(db: Session, user: models.User, subject_name: str
     return docs[0]
 
 
+def _pick_document_by_evaluation(db: Session, user: models.User, subject_name: str) -> Tuple[Optional[models.Document], str]:
+    classroom = _resolve_classroom_for_subject(user, subject_name)
+    if classroom is None:
+        return None, "Bạn chưa có lớp tương ứng để gợi ý tài liệu."
+
+    docs = db.query(models.Document).filter(
+        models.Document.class_id == classroom.id,
+        models.Document.subject_id == classroom.subject_id,
+    ).order_by(models.Document.upload_time.asc()).all()
+
+    if not docs:
+        return None, "Môn này chưa có tài liệu trong lớp học của bạn."
+
+    eval_map: Dict[int, models.StudentDocumentEvaluation] = {
+        item.document_id: item
+        for item in db.query(models.StudentDocumentEvaluation).filter(
+            models.StudentDocumentEvaluation.user_id == user.id,
+            models.StudentDocumentEvaluation.class_id == classroom.id,
+            models.StudentDocumentEvaluation.subject_id == classroom.subject_id,
+        ).all()
+    }
+
+    missing_docs = [doc for doc in docs if doc.id not in eval_map or int(getattr(eval_map.get(doc.id), "attempts", 0) or 0) == 0]
+    if missing_docs:
+        return missing_docs[0], "Bạn chưa làm bài kiểm tra cho tài liệu này."
+
+    low_docs = sorted(
+        [doc for doc in docs if float(getattr(eval_map.get(doc.id), "latest_score", 100.0) or 100.0) < 60.0],
+        key=lambda doc: float(getattr(eval_map.get(doc.id), "latest_score", 100.0) or 100.0),
+    )
+    if low_docs:
+        score = float(getattr(eval_map.get(low_docs[0].id), "latest_score", 0.0) or 0.0)
+        return low_docs[0], f"Điểm kiểm tra gần nhất của tài liệu này còn thấp ({score:.1f})."
+
+    weak_docs = sorted(
+        docs,
+        key=lambda doc: float(getattr(eval_map.get(doc.id), "latest_score", 100.0) or 100.0),
+    )
+    score = float(getattr(eval_map.get(weak_docs[0].id), "latest_score", 0.0) or 0.0)
+    return weak_docs[0], f"Tài liệu này có điểm thấp nhất trong các tài liệu đã kiểm tra ({score:.1f})."
+
+
 def _quick_document_summary(db: Session, document: models.Document) -> Dict[str, object]:
     chunks = db.query(models.Chunk).filter(
         models.Chunk.subject_id == document.subject_id,
@@ -271,7 +313,11 @@ def _build_recommendation_payload(db: Session, user: models.User) -> Tuple[Optio
     if not focus_subject:
         return None, None
 
-    document = _pick_recommended_document(db, user, focus_subject)
+    document, doc_reason = _pick_document_by_evaluation(db, user, focus_subject)
+    if document is None:
+        document = _pick_recommended_document(db, user, focus_subject)
+        doc_reason = "Môn này đang học ít/chưa học so với các môn còn lại."
+
     if not document:
         return {
             "subject": focus_subject,
@@ -284,7 +330,7 @@ def _build_recommendation_payload(db: Session, user: models.User) -> Tuple[Optio
     summary = _quick_document_summary(db, document)
     payload: Dict[str, object] = {
         "subject": focus_subject,
-        "reason": "Môn này đang học ít/chưa học so với các môn còn lại.",
+        "reason": f"Môn ưu tiên: {focus_subject}. Lý do tài liệu: {doc_reason}",
         "document": {
             "id": document.id,
             "filename": document.filename,
@@ -294,8 +340,9 @@ def _build_recommendation_payload(db: Session, user: models.User) -> Tuple[Optio
         },
     }
     text = (
-        f"Tôi đề xuất học môn {focus_subject} trước vì đây là môn bạn đang học ít/chưa học. "
-        f"Tôi đã chọn tài liệu {document.filename} để bạn bắt đầu ngay."
+        f"Tôi đề xuất ưu tiên môn {focus_subject}. "
+        f"Tài liệu nên học trước: {document.filename}. "
+        f"Lý do: {doc_reason}"
     )
     return payload, text
 
@@ -526,15 +573,18 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"Bạn chưa tham gia lớp cho môn {subject_name}")
 
     orbit = OrbitAgent(db)
-    reply = orbit.respond(user=user, subject_name=subject_name, message=req.message, class_id=classroom.id)
+    is_entry = _is_entry_message(req.message)
+    if is_entry:
+        reply = ""
+    else:
+        reply = orbit.respond(user=user, subject_name=subject_name, message=req.message, class_id=classroom.id)
     orbit_mode, orbit_status_text = _entry_orbit_mode(db, user.id)
     login_notice = _login_gap_notice(db, user.id)
     study_notice = _last_study_notice(db, user.id)
-    is_entry = _is_entry_message(req.message)
     if is_entry:
         mood_line = "😠 Orbit Angry đang làm việc." if orbit_mode == "angry" else "😊 Orbit Happy chào bạn quay lại học tập."
         header_lines = ["📌 Orbit báo cáo nhanh khi bạn vừa vào hệ thống:", mood_line, f"- {login_notice}", f"- {study_notice}"]
-        reply = "\n".join(header_lines) + "\n\n" + reply
+        reply = "\n".join(header_lines)
     elif login_notice:
         reply = f"{login_notice}\n\n{reply}"
 
@@ -570,7 +620,7 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
                     "summary": rec_doc.get("summary"),
                 },
                 "confirm_button_text": "OK, mở tài liệu đề xuất",
-                "should_auto_execute": False if is_entry else True,
+                "should_auto_execute": False,
             }
 
     if _is_summary_request(req.message):

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from db.database import get_db, engine, Base
-from db.models import LearnerProfile, QuestionBank, AssessmentHistory, StudentLearningProgress, User, Document, LearningRoadmap, Classroom, Subject
+from db.models import LearnerProfile, QuestionBank, AssessmentHistory, StudentLearningProgress, StudentDocumentEvaluation, User, Document, LearningRoadmap, Classroom, Subject
 from pydantic import BaseModel
 from datetime import datetime
 from typing import List, Optional
@@ -526,6 +526,36 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
     progress.tests_completed_total = int(total_tests_count)
     progress.lessons_completed_total = int(lessons_completed_count)
     progress.last_active_at = datetime.utcnow()
+
+    # Lưu đánh giá theo từng tài liệu để Orbit có thể gợi ý tài liệu yếu/chưa học.
+    if req.source_file and target_class:
+        related_doc = db.query(Document).filter(
+            Document.class_id == target_class.id,
+            Document.subject_id == target_class.subject_id,
+            Document.filename == req.source_file.strip(),
+        ).first()
+
+        if related_doc:
+            doc_eval = db.query(StudentDocumentEvaluation).filter(
+                StudentDocumentEvaluation.user_id == req.user_id,
+                StudentDocumentEvaluation.document_id == related_doc.id,
+            ).first()
+            if not doc_eval:
+                doc_eval = StudentDocumentEvaluation(
+                    user_id=req.user_id,
+                    document_id=related_doc.id,
+                    subject_id=related_doc.subject_id,
+                    class_id=related_doc.class_id,
+                    latest_score=0.0,
+                    attempts=0,
+                    is_completed=False,
+                )
+                db.add(doc_eval)
+
+            doc_eval.attempts = int(doc_eval.attempts or 0) + 1
+            doc_eval.latest_score = float(score_percent)
+            doc_eval.is_completed = bool(score_percent >= 60.0)
+            doc_eval.last_test_at = datetime.utcnow()
 
     db.commit()
     

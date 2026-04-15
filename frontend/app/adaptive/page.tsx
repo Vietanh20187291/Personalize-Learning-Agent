@@ -98,6 +98,7 @@ export default function AdaptiveLearningPage() {
   const [pendingOrbitAction, setPendingOrbitAction] = useState<any | null>(null);
   const [orbitMode, setOrbitMode] = useState<'angry' | 'happy'>('happy');
   const [orbitStatusText, setOrbitStatusText] = useState('Đang vui vẻ');
+  const [showDocumentSummary, setShowDocumentSummary] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const userIdRef = useRef<number | null>(null);
 
@@ -212,6 +213,7 @@ export default function AdaptiveLearningPage() {
     setActiveLessonTopic(topic);
     setActiveLessonContext(context);
     setChapterSummary('');
+    setShowDocumentSummary(false);
     setSuggestedPrompts([
       `Tóm tắt ngắn nội dung chính của tài liệu ${doc.filename}`,
       `Nêu 3 ý quan trọng nhất trong phần ${topic}`,
@@ -337,7 +339,7 @@ export default function AdaptiveLearningPage() {
 
         if (targetSubject) {
           setSelectedSubject(targetSubject);
-          autoLoadLearningContext(uid, targetSubject, autoStart, false, classes);
+          autoLoadLearningContext(uid, targetSubject, true, false, classes);
         }
       } catch {
         toast.error('Không thể lấy thông tin học sinh.');
@@ -564,6 +566,7 @@ export default function AdaptiveLearningPage() {
       ].filter(Boolean).join('\n\n');
       if (nextSummary) {
         setChapterSummary(nextSummary);
+        setShowDocumentSummary(true);
       }
     }
   };
@@ -834,7 +837,7 @@ export default function AdaptiveLearningPage() {
           </div>
 
           <div className={`flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar ${orbitBodyBg}`}>
-            {activeLessonContext && (loadingSummary || !!chapterSummary) && (
+            {activeLessonContext && showDocumentSummary && (loadingSummary || !!chapterSummary) && (
               <div className={`rounded-xl p-3 space-y-2 ${isOrbitAngry ? 'bg-red-50 border border-red-100' : 'bg-emerald-50 border border-emerald-100'}`}>
                 <p className={`text-[10px] font-black uppercase tracking-wider ${isOrbitAngry ? 'text-red-700' : 'text-emerald-700'}`}>Tóm tắt kiến thức tài liệu</p>
                 <p className="text-xs text-slate-700 font-medium leading-relaxed whitespace-pre-line">
