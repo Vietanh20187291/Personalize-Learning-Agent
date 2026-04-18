@@ -30,6 +30,7 @@ interface SubjectItem {
 
 export default function TeacherPage() {
   const router = useRouter();
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
   
   const [refreshKey, setRefreshKey] = useState(0);
   const [classes, setClasses] = useState([]);
@@ -64,7 +65,7 @@ export default function TeacherPage() {
 
   const fetchSubjects = async () => {
     try {
-      const res = await axios.get("http://localhost:8000/api/subjects");
+      const res = await axios.get(`${apiBaseUrl}/api/subjects`);
       setSubjects(res.data || []);
     } catch (e) {
       toast.error("Không thể tải danh sách môn học");
@@ -74,7 +75,7 @@ export default function TeacherPage() {
 
   const fetchClasses = async (id: string, selectNewId?: number) => {
     try {
-      const res = await axios.get(`http://localhost:8000/api/classroom/teacher/${id}`);
+      const res = await axios.get(`${apiBaseUrl}/api/classroom/teacher/${id}`);
       const data = res.data;
       setClasses(data);
       
@@ -117,7 +118,7 @@ export default function TeacherPage() {
 
     setCreateLoading(true);
     try {
-      const res = await axios.post("http://localhost:8000/api/classroom/create", {
+      const res = await axios.post(`${apiBaseUrl}/api/classroom/create`, {
         name: newClassName,
         subject_id: newClassSubjectId,
         teacher_id: parseInt(teacherId!)
@@ -151,7 +152,7 @@ export default function TeacherPage() {
     }
 
     try {
-        await axios.delete(`http://localhost:8000/api/classroom/delete/${classIdToDelete}?teacher_id=${teacherId}`);
+      await axios.delete(`${apiBaseUrl}/api/classroom/delete/${classIdToDelete}?teacher_id=${teacherId}`);
         toast.success(`Đã xóa lớp ${className}`);
         
         // Cập nhật lại UI sau khi xóa
@@ -178,6 +179,22 @@ export default function TeacherPage() {
     toast.success(`Đã copy mã lớp: ${code}`);
   };
 
+  const handleTeacherAgentAction = (actionMetadata: any) => {
+    if (!actionMetadata) return;
+
+    // Nếu agent đề xuất mở tài liệu, chuyển sang trang adaptive để mở
+    if (actionMetadata.action_type === 'open_document' && actionMetadata.params?.document_id) {
+      try {
+        localStorage.setItem(`orbit_pending_action_${teacherId}`, JSON.stringify(actionMetadata));
+      } catch {}
+      window.location.href = '/adaptive';
+    }
+    // Nếu agent đề xuất mở tab documents, hỗ trợ sau
+    else if (actionMetadata.action_type === 'open_tab' && actionMetadata.tab_name === 'documents') {
+      window.location.href = '/teacher/documents';
+    }
+  };
+
   const handleAskTeacherAgent = async (presetMessage?: string) => {
     const message = (presetMessage || agentPrompt).trim();
 
@@ -193,7 +210,7 @@ export default function TeacherPage() {
 
     setAgentLoading(true);
     try {
-      const res = await axios.post("http://localhost:8000/api/teacher/assistant", {
+      const res = await axios.post(`${apiBaseUrl}/api/teacher/assistant`, {
         teacher_id: Number(teacherId),
         class_id: selectedClassId,
         message
@@ -205,6 +222,11 @@ export default function TeacherPage() {
         setAgentPrompt("");
       }
       toast.success("Agent đã phản hồi");
+
+      // Xử lý action_metadata nếu có
+      if (res.data?.action_metadata) {
+        handleTeacherAgentAction(res.data.action_metadata);
+      }
     } catch (error: any) {
       const errorMsg = error.response?.data?.detail || "Agent giảng viên đang bận hoặc chưa sẵn sàng";
       toast.error(errorMsg);

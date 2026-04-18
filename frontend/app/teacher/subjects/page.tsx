@@ -63,6 +63,7 @@ const SUBJECT_ICON_OPTIONS = [
 export default function TeacherSubjectsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
   const [subjects, setSubjects] = useState<SubjectItem[]>([]);
   const [classes, setClasses] = useState<ClassroomItem[]>([]);
   const [loadingSubjects, setLoadingSubjects] = useState(true);
@@ -125,7 +126,7 @@ export default function TeacherSubjectsPage() {
   const loadSubjects = async () => {
     setLoadingSubjects(true);
     try {
-      const res = await axios.get('http://localhost:8000/api/subjects');
+      const res = await axios.get(`${apiBaseUrl}/api/subjects`);
       const list = res.data || [];
       setSubjects(list);
       if (managementMode === 'create_subject') {
@@ -149,7 +150,7 @@ export default function TeacherSubjectsPage() {
     if (!teacherId) return;
     setLoadingClasses(true);
     try {
-      const res = await axios.get('http://localhost:8000/api/classroom/list', {
+      const res = await axios.get(`${apiBaseUrl}/api/classroom/list`, {
         params: { teacher_id: Number(teacherId), subject_id: subjectId },
       });
       const list = res.data || [];
@@ -282,14 +283,14 @@ export default function TeacherSubjectsPage() {
     try {
       if (editingSubjectId) {
         await axios.put(
-          `http://localhost:8000/api/subjects/${editingSubjectId}`,
+          `${apiBaseUrl}/api/subjects/${editingSubjectId}`,
           { name: name.trim(), description: description.trim() || null, icon: icon.trim() || null },
           { headers: authHeaders }
         );
         toast.success('Cập nhật môn học thành công');
       } else {
         await axios.post(
-          'http://localhost:8000/api/subjects',
+          `${apiBaseUrl}/api/subjects`,
           { name: name.trim(), description: description.trim() || null, icon: icon.trim() || null },
           { headers: authHeaders }
         );
@@ -319,7 +320,7 @@ export default function TeacherSubjectsPage() {
     if (!window.confirm(`Xóa môn học "${s.name}"?`)) return;
 
     try {
-      await axios.delete(`http://localhost:8000/api/subjects/${s.id}`, { headers: authHeaders });
+      await axios.delete(`${apiBaseUrl}/api/subjects/${s.id}`, { headers: authHeaders });
       toast.success('Xóa môn học thành công');
       if (selectedSubjectId === s.id) {
         setSelectedSubjectId(null);
@@ -342,7 +343,7 @@ export default function TeacherSubjectsPage() {
 
     setSavingClass(true);
     try {
-      const res = await axios.post('http://localhost:8000/api/classroom/create', {
+      const res = await axios.post(`${apiBaseUrl}/api/classroom/create`, {
         name: newClassName.trim(),
         subject_id: selectedSubjectId,
         teacher_id: Number(teacherId),
@@ -386,7 +387,7 @@ export default function TeacherSubjectsPage() {
 
     setSavingClass(true);
     try {
-      await axios.put(`http://localhost:8000/api/classroom/update/${classId}`, {
+      await axios.put(`${apiBaseUrl}/api/classroom/update/${classId}`, {
         name: editingClassName.trim(),
         teacher_id: Number(teacherId),
       });
@@ -412,7 +413,7 @@ export default function TeacherSubjectsPage() {
 
     setSavingClass(true);
     try {
-      await axios.delete(`http://localhost:8000/api/classroom/delete/${item.id}`, {
+      await axios.delete(`${apiBaseUrl}/api/classroom/delete/${item.id}`, {
         params: { teacher_id: Number(teacherId) },
       });
       toast.success('Đã xóa lớp học');

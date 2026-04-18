@@ -6,6 +6,7 @@ import {
   Filter, LockKeyhole, Loader2, File
 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import OrbitPanel from '@/components/OrbitPanel';
 
 export default function StudentLibraryPage() {
   const [documents, setDocuments] = useState<any[]>([]);
@@ -13,6 +14,11 @@ export default function StudentLibraryPage() {
   const [enrolledSubjects, setEnrolledSubjects] = useState<string[]>([]);
   const [selectedSubject, setSelectedSubject] = useState<string>("");
   const [searchTerm, setSearchTerm] = useState("");
+
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
+  const orbitUserId = typeof window !== 'undefined'
+    ? parseInt(localStorage.getItem('userId') || localStorage.getItem('user_id') || '0', 10)
+    : 0;
 
   useEffect(() => {
     fetchEnrolledSubjects();
@@ -35,7 +41,7 @@ export default function StudentLibraryPage() {
     const userId = getUserId();
     if (!userId) return;
     try {
-      const res = await axios.get(`http://localhost:8000/api/auth/me/${userId}`);
+    const res = await axios.get(`${apiBaseUrl}/api/auth/me/${userId}`);
       const classes = res.data.enrolled_classes || [];
       const subjects = Array.from(new Set(classes.map((c: any) => c.subject))) as string[];
       setEnrolledSubjects(subjects);
@@ -55,7 +61,7 @@ export default function StudentLibraryPage() {
     }
     setLoading(true);
     try {
-      const res = await axios.get(`http://localhost:8000/api/documents/student/${userId}`, {
+      const res = await axios.get(`${apiBaseUrl}/api/documents/student/${userId}`, {
           params: { subject: subjectName }
       });
       setDocuments(res.data || []);
@@ -69,7 +75,7 @@ export default function StudentLibraryPage() {
 
   const handleDownload = (docId: number, filename: string) => {
     // Mở URL tải file trong tab mới, trình duyệt sẽ tự động bắt link và tải về
-    window.open(`http://localhost:8000/api/documents/download/${docId}`, '_blank');
+    window.open(`${apiBaseUrl}/api/documents/download/${docId}`, '_blank');
     toast.success(`Đang tải xuống: ${filename}`);
   };
 
@@ -88,6 +94,7 @@ export default function StudentLibraryPage() {
   };
 
   return (
+    <>
     <div className="page-shell text-slate-800">
       <div className="max-w-6xl mx-auto px-2 sm:px-4">
         
@@ -203,5 +210,12 @@ export default function StudentLibraryPage() {
         )}
       </div>
     </div>
+    <OrbitPanel
+      userId={orbitUserId}
+      selectedSubject={selectedSubject}
+      enrolledClasses={enrolledSubjects.map((subject) => ({ subject, id: 0 }))}
+      apiBaseUrl={apiBaseUrl}
+    />
+    </>
   );
 }

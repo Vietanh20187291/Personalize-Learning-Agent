@@ -42,6 +42,7 @@ class User(Base):
     hashed_password = Column(String)
     role = Column(String, default="student") 
     full_name = Column(String)
+    last_login_at = Column(DateTime, nullable=True)
     
     # MSSV ĐỂ GIÁO VIÊN PHÂN BIỆT SINH VIÊN
     student_id = Column(String, unique=True, index=True, nullable=True)
@@ -57,6 +58,7 @@ class User(Base):
     
     # QUAN HỆ ĐỂ TÍNH EFFORT SCORE (THỜI GIAN HỌC)
     study_sessions = relationship("StudySession", back_populates="user")
+    login_sessions = relationship("UserLoginSession", back_populates="user")
     orbit_sessions = relationship("OrbitChatSession", back_populates="user")
     orbit_messages = relationship("OrbitChatMessage", back_populates="user")
 
@@ -239,6 +241,19 @@ class StudentLearningProgress(Base):
     last_active_at = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserLoginSession(Base):
+    __tablename__ = "user_login_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    login_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    logout_at = Column(DateTime, nullable=True, index=True)
+    duration_seconds = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="login_sessions")
 
 
 class OrbitChatSession(Base):

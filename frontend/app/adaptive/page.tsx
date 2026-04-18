@@ -7,6 +7,7 @@ import {
   Send,
   Flame,
   Smile,
+  Minimize2,
   MessageSquare,
   UserPlus,
   Loader2,
@@ -61,6 +62,7 @@ interface InlineQuizResult {
 }
 
 export default function AdaptiveLearningPage() {
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
   const [enrolledClasses, setEnrolledClasses] = useState<EnrolledClass[]>([]);
   const [selectedSubject, setSelectedSubject] = useState('');
 
@@ -99,6 +101,7 @@ export default function AdaptiveLearningPage() {
   const [orbitMode, setOrbitMode] = useState<'angry' | 'happy'>('happy');
   const [orbitStatusText, setOrbitStatusText] = useState('Đang vui vẻ');
   const [showDocumentSummary, setShowDocumentSummary] = useState(false);
+  const [orbitCollapsed, setOrbitCollapsed] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const userIdRef = useRef<number | null>(null);
 
@@ -117,7 +120,7 @@ export default function AdaptiveLearningPage() {
       const durationMinutes = Math.floor((endTime.getTime() - startTime.getTime()) / 60000);
       if (durationMinutes < 1) return;
 
-      fetch('http://localhost:8000/api/adaptive/log-session', {
+      fetch(`${apiBaseUrl}/api/adaptive/log-session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -151,7 +154,9 @@ export default function AdaptiveLearningPage() {
   const loadDocumentPreview = async (docId: number) => {
     setLoadingPreview(true);
     try {
-      const res = await axios.get(`http://localhost:8000/api/documents/preview/${docId}`);
+      const res = await axios.get(`${apiBaseUrl}/api/documents/preview/${docId}`, {
+        params: { user_id: userIdRef.current || userId || 0 },
+      });
       setPreviewSegments((res.data?.segments || []) as PreviewSegment[]);
     } catch {
       setPreviewSegments([]);
@@ -164,7 +169,7 @@ export default function AdaptiveLearningPage() {
     if (!userIdRef.current || !subject) return;
     setLoadingSummary(true);
     try {
-      const res = await axios.post('http://localhost:8000/api/adaptive/material-summary', {
+      const res = await axios.post(`${apiBaseUrl}/api/adaptive/material-summary`, {
         user_id: userIdRef.current,
         subject,
         source_file: sourceFile,
@@ -263,7 +268,7 @@ export default function AdaptiveLearningPage() {
     setQuizResult(null);
 
     try {
-      const res = await axios.get(`http://localhost:8000/api/assessment/roadmap/${subj}?user_id=${uid}`);
+      const res = await axios.get(`${apiBaseUrl}/api/assessment/roadmap/${subj}?user_id=${uid}`);
       let loadedRoadmap: LessonItem[] = [];
       let currentSess = 1;
 
@@ -275,8 +280,8 @@ export default function AdaptiveLearningPage() {
         setLearnerLevel((res.data.level_assigned || 'Beginner').toUpperCase());
       } else {
         try {
-          await axios.get(`http://localhost:8000/api/adaptive/recommend/${encodeURIComponent(subj)}?user_id=${uid}`);
-          const refresh = await axios.get(`http://localhost:8000/api/assessment/roadmap/${encodeURIComponent(subj)}?user_id=${uid}`);
+          await axios.get(`${apiBaseUrl}/api/adaptive/recommend/${encodeURIComponent(subj)}?user_id=${uid}`);
+          const refresh = await axios.get(`${apiBaseUrl}/api/assessment/roadmap/${encodeURIComponent(subj)}?user_id=${uid}`);
           if (refresh.data?.has_roadmap) {
             loadedRoadmap = refresh.data.roadmap_data || [];
             currentSess = refresh.data.current_session || 1;
@@ -292,7 +297,7 @@ export default function AdaptiveLearningPage() {
         }
       }
 
-      const docRes = await axios.get(`http://localhost:8000/api/documents/student/${uid}`);
+      const docRes = await axios.get(`${apiBaseUrl}/api/documents/student/${uid}`);
       const rawDocs: StudentDoc[] = docRes.data || [];
       const classesToUse = classesSnapshot || enrolledClasses;
       const classIds = classesToUse.filter((c) => c.subject === subj).map((c) => c.id);
@@ -324,11 +329,26 @@ export default function AdaptiveLearningPage() {
       setUserId(uid);
 
       try {
-        const res = await axios.get(`http://localhost:8000/api/auth/me/${uid}`);
+        const res = await axios.get(`${apiBaseUrl}/api/auth/me/${uid}`);
         const classes: EnrolledClass[] = res.data.enrolled_classes || [];
         setEnrolledClasses(classes);
 
-        let targetSubject = classes.length > 0 ? classes[0].subject : '';
+        let targetSubject = '';
+        if (classes.length > 0) {
+          targetSubject = classes[0].subject;
+          try {
+            const docsRes = await axios.get(`${apiBaseUrl}/api/documents/student/${uid}`);
+            const docs: StudentDoc[] = docsRes.data || [];
+            const subjectsWithDocs = new Set(docs.map((item) => item.subject));
+            const preferred = classes.find((item) => subjectsWithDocs.has(item.subject));
+            if (preferred?.subject) {
+              targetSubject = preferred.subject;
+            }
+          } catch {
+            // fallback to subject đầu tiên trong lớp đã tham gia
+          }
+        }
+
         const params = new URLSearchParams(window.location.search);
         const urlSubject = params.get('subject');
         const autoStart = params.get('auto_start') === 'true';
@@ -365,13 +385,13 @@ export default function AdaptiveLearningPage() {
     if (!classCode.trim() || !userId) return;
     setJoining(true);
     try {
-      const joinRes = await axios.post('http://localhost:8000/api/classroom/join', {
+      const joinRes = await axios.post(`${apiBaseUrl}/api/classroom/join`, {
         class_code: classCode.trim().toUpperCase(),
         user_id: userId,
       });
 
       toast.success(joinRes.data.message || 'Tham gia lớp học thành công!');
-      const meRes = await axios.get(`http://localhost:8000/api/auth/me/${userId}`);
+      const meRes = await axios.get(`${apiBaseUrl}/api/auth/me/${userId}`);
       const updatedClasses: EnrolledClass[] = meRes.data.enrolled_classes || [];
       setEnrolledClasses(updatedClasses);
 
@@ -389,9 +409,31 @@ export default function AdaptiveLearningPage() {
     }
   };
 
+  useEffect(() => {
+    if (!userId || enrolledClasses.length === 0) return;
+    const pendingKey = `orbit_pending_action_${userId}`;
+    const raw = localStorage.getItem(pendingKey);
+    if (!raw) return;
+
+    try {
+      const actionMetadata = JSON.parse(raw);
+      localStorage.removeItem(pendingKey);
+      void handleOrbitAction(actionMetadata);
+    } catch {
+      localStorage.removeItem(pendingKey);
+    }
+  }, [userId, enrolledClasses.length]);
+
   const handleSwitchDocument = (doc: StudentDoc, idx: number) => {
     const lesson = getLessonByIndex(idx);
     activateDocumentContext(doc, lesson, true);
+    
+    // Đảm bảo cũng gọi openDocumentFlow để nhất quán với Orbit flow
+    const currentId = Number(localStorage.getItem('userId') || localStorage.getItem('user_id') || userId || 0);
+    // Không cần gọi lại openDocumentFlow vì activateDocumentContext đã xử lý preview loading
+    // Nhưng đảm bảo loading state được set đúng cách
+    setLoadingPreview(true);
+    setLoadingSummary(true);
   };
 
   useEffect(() => {
@@ -420,7 +462,7 @@ export default function AdaptiveLearningPage() {
     setQuizIndex(0);
 
     try {
-      const res = await axios.post('http://localhost:8000/api/assessment/generate-session', {
+      const res = await axios.post(`${apiBaseUrl}/api/assessment/generate-session`, {
         subject: selectedSubject,
         user_id: currentUserId,
         session_topic: topic,
@@ -467,7 +509,7 @@ export default function AdaptiveLearningPage() {
 
     setQuizSubmitting(true);
     try {
-      const res = await axios.post('http://localhost:8000/api/assessment/submit', {
+      const res = await axios.post(`${apiBaseUrl}/api/assessment/submit`, {
         subject: selectedSubject,
         user_id: currentUserId,
         answers: quizQuestions.map((q) => ({
@@ -483,7 +525,7 @@ export default function AdaptiveLearningPage() {
       });
 
       setQuizResult(res.data);
-      const refresh = await axios.get(`http://localhost:8000/api/assessment/roadmap/${encodeURIComponent(selectedSubject)}?user_id=${currentUserId}`);
+      const refresh = await axios.get(`${apiBaseUrl}/api/assessment/roadmap/${encodeURIComponent(selectedSubject)}?user_id=${currentUserId}`);
       if (refresh.data?.has_roadmap) {
         setCurrentSessionIndex(refresh.data.current_session || currentSessionIndex);
       }
@@ -530,7 +572,7 @@ export default function AdaptiveLearningPage() {
   };
 
   const handleSendMessage = async () => {
-    if (!input.trim() || !userId || !activeLessonContext) return;
+    if (!input.trim() || !userId) return;
     const userMsg = input.trim();
     setInput('');
     setMessages((prev) => [...prev, { role: 'user', content: userMsg }]);
@@ -538,23 +580,27 @@ export default function AdaptiveLearningPage() {
   };
 
   const handleSuggestedPromptClick = async (prompt: string) => {
-    if (!userId || !activeLessonContext || loadingChat) return;
+    if (!userId || loadingChat) return;
     setMessages((prev) => [...prev, { role: 'user', content: prompt }]);
     await sendChatMessage(prompt);
   };
 
-  const handleOrbitAction = async (actionMetadata: any) => {
-    if (!actionMetadata || actionMetadata.action_type !== 'open_document') return;
-    const params = actionMetadata.params || {};
-    const targetSubject = String(params.subject || '').trim();
-    const targetDocId = Number(params.document_id || 0);
-    const currentId = Number(localStorage.getItem('userId') || localStorage.getItem('user_id') || userId || 0);
+  const handleQuickPromptPaste = (prompt: string) => {
+    if (loadingChat) return;
+    setInput(prompt);
+  };
 
+  // Unified document opening flow - dùng chung cho cả Orbit recommendation và manual opening
+  const openDocumentFlow = async (
+    targetDocId: number,
+    targetSubject: string,
+    currentId: number,
+    summary?: any
+  ) => {
     if (!currentId || !targetSubject || !targetDocId) return;
     setSelectedSubject(targetSubject);
     await autoLoadLearningContext(currentId, targetSubject, false, false, enrolledClasses, targetDocId);
 
-    const summary = params.summary;
     if (summary && typeof summary === 'object') {
       const title = String(summary.title || '').trim();
       const body = String(summary.summary || '').trim();
@@ -571,15 +617,35 @@ export default function AdaptiveLearningPage() {
     }
   };
 
+  const handleOrbitAction = async (actionMetadata: any) => {
+    if (!actionMetadata) return;
+    if (actionMetadata.action_type === 'open_route') {
+      const route = String(actionMetadata.params?.route || '').trim();
+      if (route) {
+        window.location.href = route;
+      }
+      return;
+    }
+    if (actionMetadata.action_type !== 'open_document') return;
+    const params = actionMetadata.params || {};
+    const targetSubject = String(params.subject || '').trim();
+    const targetDocId = Number(params.document_id || 0);
+    const currentId = Number(localStorage.getItem('userId') || localStorage.getItem('user_id') || userId || 0);
+
+    await openDocumentFlow(targetDocId, targetSubject, currentId, params.summary);
+  };
+
   const sendChatMessage = async (message: string) => {
     setLoadingChat(true);
     try {
       const currentId = localStorage.getItem('userId') || localStorage.getItem('user_id');
-      const res = await axios.post('http://localhost:8000/api/orbit/chat', {
-        subject: selectedSubject,
+      const fallbackSubject = selectedSubject || enrolledClasses[0]?.subject || 'all';
+      const fallbackClassId = enrolledClasses.find((c) => c.subject === fallbackSubject)?.id || null;
+      const res = await axios.post(`${apiBaseUrl}/api/orbit/chat`, {
+        subject: fallbackSubject,
         message,
         user_id: Number(currentId),
-        class_id: enrolledClasses.find((c) => c.subject === selectedSubject)?.id || null,
+        class_id: fallbackClassId,
         document_id: getActiveDocument()?.id || null,
         source_file: getActiveDocument()?.filename || '',
       });
@@ -608,14 +674,15 @@ export default function AdaptiveLearningPage() {
     }
   };
 
-  const handleSubjectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const subj = e.target.value;
-    setSelectedSubject(subj);
-    if (userId) autoLoadLearningContext(userId, subj, false, false);
+  const handleSubjectNavClick = (subject: string) => {
+    if (!userId || !subject) return;
+    setSelectedSubject(subject);
+    autoLoadLearningContext(userId, subject, false, false);
   };
 
   const activeDoc = getActiveDocument();
   const activeDocExt = activeDoc ? getFileExt(activeDoc.filename) : '';
+  const currentUserId = userId || userIdRef.current || 0;
   const isOrbitAngry = orbitMode === 'angry';
   const orbitMascot = isOrbitAngry ? '/Orbit Angry.png' : '/Orbit Happy.png';
   const orbitPanelClass = isOrbitAngry ? 'border-red-200' : 'border-emerald-200';
@@ -629,12 +696,18 @@ export default function AdaptiveLearningPage() {
   const orbitUserBubble = isOrbitAngry ? 'bg-red-600 text-white rounded-tr-none' : 'bg-emerald-600 text-white rounded-tr-none';
   const orbitInputWrap = isOrbitAngry ? 'bg-red-50 border-red-200 focus-within:border-red-500 ring-red-50' : 'bg-emerald-50 border-emerald-200 focus-within:border-emerald-500 ring-emerald-50';
   const orbitSendBtn = isOrbitAngry ? 'bg-red-600 shadow-red-100' : 'bg-emerald-600 shadow-emerald-100';
+  const subjectNavItems = Array.from(new Set(enrolledClasses.map((c) => c.subject).filter(Boolean)));
+  const quickOrbitPrompts = [
+    'Hôm nay, tôi nên học phần nào',
+    'Thành tích học của tôi thế nào',
+    'Mở cho tôi tài liệu môn Lập trình hướng đối tượng',
+  ];
 
   return (
-    <div className="fixed inset-0 text-slate-800 flex flex-col pt-[80px] pb-4 px-4 sm:px-6 overflow-hidden app-bg">
+    <div className="min-h-screen text-slate-800 flex flex-col pt-[80px] pb-4 px-4 sm:px-6 overflow-y-auto app-bg">
       <div className="max-w-[1600px] w-full mx-auto mb-4 shrink-0">
         <div className="hero-panel p-3 flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-3 w-full md:w-auto overflow-x-auto custom-scrollbar pb-1 md:pb-0">
+          <div className="flex items-center gap-3 w-full md:w-auto">
             {enrolledClasses.length === 0 ? (
               <div className="flex items-center gap-2 text-amber-600 bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-100 font-black text-[10px] uppercase shrink-0">
                 <UserPlus size={14} /> Chưa tham gia lớp nào
@@ -644,13 +717,9 @@ export default function AdaptiveLearningPage() {
                 <div className="bg-emerald-50 p-1.5 rounded-lg text-emerald-600 border border-emerald-100 shadow-sm">
                   <CheckCircle2 size={16} />
                 </div>
-                <div className="flex gap-2">
-                  {enrolledClasses.map((c) => (
-                    <span key={c.id} title={`GV: ${c.teacher_name}`} className="text-[10px] font-black text-indigo-700 bg-indigo-50 px-2.5 py-1.5 rounded-lg uppercase tracking-wider border border-indigo-100 whitespace-nowrap">
-                      {c.subject} <span className="text-indigo-400 ml-1">({c.name})</span>
-                    </span>
-                  ))}
-                </div>
+                <span className="text-[10px] font-black text-emerald-700 bg-emerald-50 px-2.5 py-1.5 rounded-lg uppercase tracking-wider border border-emerald-100 whitespace-nowrap">
+                  Đã tham gia {enrolledClasses.length} lớp học
+                </span>
               </div>
             )}
           </div>
@@ -687,44 +756,26 @@ export default function AdaptiveLearningPage() {
               </div>
             </div>
 
-            <div className="flex w-full sm:w-auto gap-2">
-              <select
-                value={selectedSubject}
-                onChange={handleSubjectChange}
-                disabled={enrolledClasses.length === 0}
-                className="flex-1 sm:w-48 py-2 px-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:ring-2 ring-indigo-500 appearance-none cursor-pointer transition-all disabled:opacity-50"
-              >
-                {enrolledClasses.length === 0 ? (
-                  <option value="">Chưa có môn học</option>
-                ) : (
-                  enrolledClasses.map((cls) => (
-                    <option key={cls.id} value={cls.subject}>{cls.subject}</option>
-                  ))
-                )}
-              </select>
-              <button
-                onClick={handleLoadRoadmap}
-                disabled={loadingContext || enrolledClasses.length === 0}
-                className="px-5 bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest rounded-lg hover:bg-indigo-600 transition-all flex items-center gap-2 disabled:opacity-50 shadow-md"
-              >
-                {loadingContext ? <Loader2 className="animate-spin" size={14} /> : <>Đồng bộ dữ liệu</>}
-              </button>
+            <div className="flex w-full sm:w-auto gap-2 items-center">
+              <div className="px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-600">
+                {selectedSubject || 'Chưa chọn môn học'}
+              </div>
             </div>
           </div>
 
           <div className="flex-1 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col min-h-0 relative">
             {enrolledClasses.length === 0 ? (
-              <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+              <div className="absolute inset-y-0 left-0 right-0 lg:right-[276px] flex flex-col items-center justify-center text-slate-400">
                 <BookOpen className="w-12 h-12 mb-3 opacity-20" />
                 <p className="text-xs font-bold uppercase tracking-widest">Bạn cần tham gia lớp học trước</p>
               </div>
             ) : loadingContext ? (
-              <div className="absolute inset-0 flex flex-col items-center justify-center text-indigo-600">
+              <div className="absolute inset-y-0 left-0 right-0 lg:right-[276px] flex flex-col items-center justify-center text-indigo-600">
                 <Loader2 className="w-10 h-10 mb-4 animate-spin" />
                 <p className="text-xs font-bold uppercase tracking-widest animate-pulse">Đang tải tài liệu...</p>
               </div>
             ) : documents.length === 0 ? (
-              <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+              <div className="absolute inset-y-0 left-0 right-0 lg:right-[276px] flex flex-col items-center justify-center text-slate-400 px-5">
                 <FileText className="w-12 h-12 mb-3 opacity-20" />
                 <p className="text-xs font-bold uppercase tracking-widest">Giáo viên chưa upload tài liệu cho môn này</p>
                 <p className="text-[11px] mt-2 text-center max-w-md">Xin lỗi, hiện chưa có học liệu để mở buổi học. Bạn hãy liên hệ giáo viên để được cập nhật tài liệu PDF/PPTX.</p>
@@ -734,7 +785,16 @@ export default function AdaptiveLearningPage() {
                 <div className="shrink-0 border-b border-slate-100 px-4 py-3 bg-slate-50/70">
                   <div className="flex items-center justify-between gap-3 mb-2">
                     <span className="text-[10px] font-black uppercase tracking-wider text-indigo-600">Trình độ: {learnerLevel}</span>
-                    <span className="text-[10px] font-bold text-slate-500 uppercase">Buổi {activeLessonNumber || currentSessionIndex}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase">Buổi {activeLessonNumber || currentSessionIndex}</span>
+                      <button
+                        onClick={handleLoadRoadmap}
+                        disabled={loadingContext || enrolledClasses.length === 0}
+                        className="px-3 py-1.5 bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest rounded-lg hover:bg-indigo-600 transition-all flex items-center gap-2 disabled:opacity-50 shadow-sm"
+                      >
+                        {loadingContext ? <Loader2 className="animate-spin" size={12} /> : <>Đồng bộ</>}
+                      </button>
+                    </div>
                   </div>
                   <div className="flex gap-2 overflow-x-auto custom-scrollbar pb-1">
                     {documents.map((doc, idx) => (
@@ -753,72 +813,143 @@ export default function AdaptiveLearningPage() {
                   </div>
                 </div>
 
-                <div className="flex-1 min-h-0 p-4 flex flex-col gap-3">
-                  {activeDoc && (
-                    <div className="shrink-0 px-3 py-2 rounded-lg border border-indigo-100 bg-indigo-50/50">
-                      <p className="text-xs font-black text-slate-800 truncate">{activeDoc.filename}</p>
-                      <p className="text-[11px] text-slate-600 mt-1">{activeLessonTopic || 'Đang học theo nội dung tài liệu đã chọn'}</p>
-                    </div>
-                  )}
-
-                  <div className="flex-1 min-h-0 rounded-xl border border-slate-200 overflow-hidden bg-slate-50">
-                    {!activeDoc ? (
-                      <div className="h-full flex flex-col items-center justify-center text-slate-400">
-                        <FileText className="w-12 h-12 mb-2 opacity-25" />
-                        <p className="text-xs font-bold uppercase">Chọn tài liệu để bắt đầu học</p>
-                      </div>
-                    ) : (
-                      <div className="h-full flex flex-col p-4">
-                        <div className="shrink-0 mb-3 flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            {activeDocExt === 'ppt' || activeDocExt === 'pptx' ? (
-                              <Presentation className="w-5 h-5 text-orange-500" />
-                            ) : (
-                              <FileText className="w-5 h-5 text-indigo-500" />
-                            )}
-                            <span className="text-xs font-black uppercase text-slate-700">Preview nội dung {activeDocExt.toUpperCase()}</span>
-                          </div>
-                          <a href={`http://localhost:8000/api/documents/download/${activeDoc.id}`} target="_blank" className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-700 text-[10px] font-bold inline-flex items-center gap-1">
-                            <ExternalLink size={12} /> Tải file
-                          </a>
-                        </div>
-
-                        <div className="flex-1 min-h-0 overflow-y-auto bg-white border border-slate-200 rounded-lg p-3 space-y-3 custom-scrollbar">
-                          {loadingPreview ? (
-                            <div className="h-full flex items-center justify-center text-slate-500 text-xs font-bold">
-                              Đang tải nội dung tài liệu...
-                            </div>
-                          ) : previewSegments.length === 0 ? (
-                            <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs font-bold gap-2">
-                              <p>Hệ thống chưa đọc được nội dung từ file gốc.</p>
-                              <p>Vui lòng thử đồng bộ lại hoặc liên hệ giáo viên upload lại file.</p>
-                            </div>
-                          ) : (
-                            previewSegments.map((seg, idx) => (
-                              <div key={`${seg.title}-${idx}`} className="border border-slate-100 rounded-lg p-3">
-                                <p className="text-[10px] font-black uppercase text-indigo-600 mb-1">{seg.title}</p>
-                                <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">{seg.content}</p>
-                              </div>
-                            ))
-                          )}
-                        </div>
+                <div className="flex-1 min-h-0 p-4 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-4">
+                  <div className="min-h-0 flex flex-col gap-3">
+                    {activeDoc && (
+                      <div className="shrink-0 px-3 py-2 rounded-lg border border-indigo-100 bg-indigo-50/50">
+                        <p className="text-xs font-black text-slate-800 truncate">{activeDoc.filename}</p>
+                        <p className="text-[11px] text-slate-600 mt-1">{activeLessonTopic || 'Đang học theo nội dung tài liệu đã chọn'}</p>
                       </div>
                     )}
+
+                    <div className="rounded-xl border border-slate-200 overflow-visible bg-slate-50">
+                      {!activeDoc ? (
+                        <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                          <FileText className="w-12 h-12 mb-2 opacity-25" />
+                          <p className="text-xs font-bold uppercase">Chọn tài liệu để bắt đầu học</p>
+                        </div>
+                      ) : (
+                        <div className="h-full flex flex-col p-0">
+                          {activeDocExt === 'pdf' ? (
+                            <div className="bg-white overflow-visible">
+                              <iframe
+                                title={`PDF ${activeDoc.filename}`}
+                                src={`${apiBaseUrl}/api/documents/view/${activeDoc.id}?user_id=${currentUserId}#page=1&zoom=page-width`}
+                                className="w-full h-[140vh]"
+                              />
+                            </div>
+                          ) : (
+                            <div className="flex-1 min-h-0 overflow-y-auto bg-white border border-slate-200 rounded-lg p-3 space-y-3 custom-scrollbar">
+                              {loadingPreview ? (
+                                <div className="h-full flex items-center justify-center text-slate-500 text-xs font-bold">
+                                  Đang tải nội dung tài liệu...
+                                </div>
+                              ) : previewSegments.length === 0 ? (
+                                <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs font-bold gap-2">
+                                  <p>Hệ thống chưa đọc được nội dung từ file gốc.</p>
+                                  <p>Vui lòng thử đồng bộ lại hoặc liên hệ giáo viên upload lại file.</p>
+                                </div>
+                              ) : (
+                                previewSegments.map((seg, idx) => (
+                                  <div key={`${seg.title}-${idx}`} className="border border-slate-100 rounded-lg p-3">
+                                    <p className="text-[10px] font-black uppercase text-indigo-600 mb-1">{seg.title}</p>
+                                    <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">{seg.content}</p>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
 
-                  <button
-                    onClick={handleTakeTest}
-                    disabled={!activeDoc || quizLoading}
-                    className="shrink-0 w-full px-4 py-3 bg-indigo-600 text-white text-xs font-black uppercase tracking-wider rounded-xl flex items-center justify-center gap-2 hover:bg-indigo-700 disabled:opacity-50 transition-all"
-                  >
-                    {quizLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <PlayCircle className="w-4 h-4" />} Làm bài kiểm tra trắc nghiệm theo tài liệu này
-                  </button>
+                  <aside className="min-h-0 flex flex-col gap-4">
+                    <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm flex flex-col gap-2">
+                      <button
+                        onClick={handleTakeTest}
+                        disabled={!activeDoc || quizLoading}
+                        className="w-full px-4 py-3 bg-indigo-600 text-white text-xs font-black uppercase tracking-wider rounded-xl flex items-center justify-center gap-2 hover:bg-indigo-700 disabled:opacity-50 transition-all"
+                      >
+                        {quizLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <PlayCircle className="w-4 h-4" />} Làm bài kiểm tra theo tài liệu này
+                      </button>
+                      {activeDoc && (
+                        <a href={`${apiBaseUrl}/api/documents/download/${activeDoc.id}`} target="_blank" className="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-slate-700 text-[10px] font-bold inline-flex items-center justify-center gap-1">
+                          <ExternalLink size={12} /> Tải file
+                        </a>
+                      )}
+                    </div>
+
+                    <div className="flex-1 min-h-0 rounded-xl border border-slate-200 bg-slate-50 p-3 flex flex-col gap-2">
+                      <p className="text-[11px] font-black uppercase tracking-widest text-slate-600 px-1">📚 Danh sách môn học</p>
+                    <div className="overflow-y-auto custom-scrollbar flex-1 pr-1 space-y-2">
+                      {subjectNavItems.map((subject) => {
+                        const isActive = selectedSubject === subject;
+                        const relatedClasses = enrolledClasses.filter((c) => c.subject === subject);
+                        return (
+                          <button
+                            key={subject}
+                            onClick={() => handleSubjectNavClick(subject)}
+                            className={`w-full text-left rounded-lg border px-3 py-2.5 transition-all ${isActive ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'bg-white border-slate-200 hover:border-indigo-400 text-slate-700'}`}
+                          >
+                            <p className="text-[11px] font-black uppercase leading-tight">{subject}</p>
+                            <p className={`text-[10px] mt-1.5 font-semibold ${isActive ? 'text-indigo-100' : 'text-slate-500'}`}>
+                              {relatedClasses.length} lớp học
+                            </p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    </div>
+                  </aside>
                 </div>
               </>
+            )}
+
+            {(enrolledClasses.length === 0 || loadingContext || documents.length === 0) && (
+              <aside className="absolute right-3 top-3 bottom-3 w-[260px] rounded-xl border border-slate-200 bg-slate-50 p-3 hidden lg:flex flex-col gap-2">
+                    <p className="text-[11px] font-black uppercase tracking-widest text-slate-600 px-1">📚 Danh sách môn học</p>
+                <div className="overflow-y-auto custom-scrollbar flex-1 pr-1 space-y-2">
+                  {subjectNavItems.map((subject) => {
+                    const isActive = selectedSubject === subject;
+                    const relatedClasses = enrolledClasses.filter((c) => c.subject === subject);
+                    return (
+                      <button
+                        key={subject}
+                        onClick={() => handleSubjectNavClick(subject)}
+                        className={`w-full text-left rounded-lg border px-3 py-2 transition-all ${isActive ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm' : 'bg-white border-slate-200 hover:border-indigo-300 text-slate-700'}`}
+                      >
+                        <p className="text-[11px] font-black uppercase leading-tight">{subject}</p>
+                        <p className={`text-[10px] mt-1 ${isActive ? 'text-indigo-100' : 'text-slate-500'}`}>
+                          {relatedClasses.length} lớp học
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </aside>
             )}
           </div>
         </div>
 
+        {orbitCollapsed && (
+          <button
+            onClick={() => setOrbitCollapsed(false)}
+            className="nova-launcher fixed bottom-5 right-5 z-[80]"
+            title="Mở Orbit"
+            aria-label="Mở Orbit"
+          >
+            <span className="nova-launcher-glow" />
+            <img
+              src={orbitMascot}
+              alt="Orbit"
+              className="h-11 w-11 rounded-full object-cover border border-white/70"
+            />
+            <span className="sr-only">Mở Orbit</span>
+          </button>
+        )}
+
+        {!orbitCollapsed && (
         <div className={`fixed right-4 top-[96px] z-30 w-[430px] max-w-[92vw] h-[calc(100vh-120px)] flex flex-col bg-white rounded-2xl border shadow-2xl overflow-hidden ${orbitPanelClass}`}>
           <div className={`border-b flex items-end justify-between px-3 py-2 bg-gradient-to-r shrink-0 ${orbitHeaderBg}`}>
             <div className="flex items-end gap-2">
@@ -834,6 +965,14 @@ export default function AdaptiveLearningPage() {
                 </p>
               </div>
             </div>
+            <button
+              onClick={() => setOrbitCollapsed(true)}
+              className={`h-8 w-8 rounded-lg border flex items-center justify-center transition-all ${isOrbitAngry ? 'border-red-200 text-red-700 hover:bg-red-100' : 'border-emerald-200 text-emerald-700 hover:bg-emerald-100'}`}
+              title="Thu gọn Orbit"
+              aria-label="Thu gọn Orbit"
+            >
+              <Minimize2 size={14} />
+            </button>
           </div>
 
           <div className={`flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar ${orbitBodyBg}`}>
@@ -905,13 +1044,26 @@ export default function AdaptiveLearningPage() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                placeholder={!activeLessonContext ? 'Vui lòng chọn bài học trước...' : 'Nhắn cho Orbit Agent...'}
-                disabled={!activeLessonContext || loadingChat}
+                placeholder={'Nhắn cho Orbit Agent...'}
+                disabled={loadingChat}
                 className="flex-1 bg-transparent border-none outline-none text-[13px] font-medium px-3 h-10 disabled:opacity-50 text-slate-900 placeholder:text-slate-400"
               />
-              <button onClick={handleSendMessage} disabled={loadingChat || !activeLessonContext || !input.trim()} className={`w-10 h-10 text-white rounded-xl flex items-center justify-center shadow-lg active:scale-90 transition-all disabled:opacity-30 disabled:active:scale-100 shrink-0 ${orbitSendBtn}`}>
+              <button onClick={handleSendMessage} disabled={loadingChat || !input.trim()} className={`w-10 h-10 text-white rounded-xl flex items-center justify-center shadow-lg active:scale-90 transition-all disabled:opacity-30 disabled:active:scale-100 shrink-0 ${orbitSendBtn}`}>
                 <Send size={16} />
               </button>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {quickOrbitPrompts.map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  onClick={() => handleQuickPromptPaste(prompt)}
+                  disabled={loadingChat}
+                  className={`px-2.5 py-1.5 rounded-lg bg-white text-[10px] font-bold transition-all disabled:opacity-50 ${isOrbitAngry ? 'border border-red-200 text-red-700 hover:bg-red-100' : 'border border-emerald-200 text-emerald-700 hover:bg-emerald-100'}`}
+                >
+                  {prompt}
+                </button>
+              ))}
             </div>
             {pendingOrbitAction?.action_type === 'open_document' && (
               <div className={`mt-2 rounded-xl border p-2.5 ${isOrbitAngry ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
@@ -934,6 +1086,7 @@ export default function AdaptiveLearningPage() {
             )}
           </div>
         </div>
+        )}
       </div>
 
       {quizMode && quizQuestions.length > 0 && (

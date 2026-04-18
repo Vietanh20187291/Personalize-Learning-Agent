@@ -4,7 +4,7 @@ import re
 from groq import Groq
 from dotenv import load_dotenv
 from sqlalchemy import func
-from db.models import StudySession, AssessmentHistory, QuestionBank
+from db.models import StudySession, AssessmentHistory, QuestionBank, UserLoginSession
 from rag.vector_store import get_vector_store
 
 # Tải biến môi trường
@@ -31,12 +31,18 @@ class EvaluationAgent:
         """
         
         # 1. TÌNH EFFORT SCORE (Lấy thời gian chat với AI)
-        total_minutes_query = self.db.query(func.sum(StudySession.duration_minutes)).filter(
+        study_minutes_query = self.db.query(func.sum(StudySession.duration_minutes)).filter(
             StudySession.user_id == user_id,
             StudySession.subject == subject
         ).scalar()
+
+        login_seconds_query = self.db.query(func.sum(UserLoginSession.duration_seconds)).filter(
+            UserLoginSession.user_id == user_id
+        ).scalar()
         
-        total_minutes = total_minutes_query if total_minutes_query else 0
+        study_minutes = study_minutes_query if study_minutes_query else 0
+        login_minutes = (login_seconds_query or 0) / 60.0
+        total_minutes = study_minutes + login_minutes
         effort_score = min(100.0, (total_minutes / 600.0) * 100.0) # Giả định mốc 600 phút
         
         # 2. BÓC TÁCH CÁC LOẠI ĐIỂM

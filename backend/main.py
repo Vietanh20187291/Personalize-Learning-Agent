@@ -26,6 +26,12 @@ def ensure_orbit_login_tracking_column():
         from sqlalchemy import inspect, text
 
         inspector = inspect(engine)
+        user_columns = [column["name"] for column in inspector.get_columns("users")]
+        if "last_login_at" not in user_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE users ADD COLUMN last_login_at DATETIME"))
+                print("✅ Đã bổ sung cột last_login_at cho users")
+
         columns = [column["name"] for column in inspector.get_columns("student_learning_progress")]
         if "last_login_at" not in columns:
             with engine.begin() as connection:
@@ -35,6 +41,11 @@ def ensure_orbit_login_tracking_column():
             with engine.begin() as connection:
                 connection.execute(text("ALTER TABLE student_learning_progress ADD COLUMN previous_login_at DATETIME"))
                 print("✅ Đã bổ sung cột previous_login_at cho student_learning_progress")
+
+        tables = inspector.get_table_names()
+        if "user_login_sessions" not in tables:
+            models.Base.metadata.tables["user_login_sessions"].create(bind=engine, checkfirst=True)
+            print("✅ Đã bổ sung bảng user_login_sessions")
     except Exception as e:
         print(f"⚠️ Không thể kiểm tra/cập nhật cột last_login_at: {e}")
 

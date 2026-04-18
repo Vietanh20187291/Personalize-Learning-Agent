@@ -72,6 +72,125 @@
 			"isBackground": true,
 			"problemMatcher": [],
 			"group": "build"
+		},
+		{
+			"label": "Force kill ports 8000 8010 3000 3001",
+			"type": "shell",
+			"command": "$ports = @(8000,8010,3000,3001); $processIds = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($processId in $processIds) { try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {} }; Write-Output ('Killed PIDs: ' + ($processIds -join ', '))",
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Start backend 8010 clean",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/backend\"; & \"${workspaceFolder}/.venv/Scripts/Activate.ps1\"; python -m uvicorn main:app --reload --port 8010",
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Probe doc view statuses",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}\"; & \"${workspaceFolder}/.venv/Scripts/Activate.ps1\"; python -c \"import requests; ids=[1,3,6,7,25]; [print(i, (lambda r:(r.status_code, r.headers.get('content-type'), r.headers.get('x-doc-view-version')))(requests.get(f'http://127.0.0.1:8010/api/documents/view/{i}', params={'user_id':4}, timeout=30))) for i in ids]\"",
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Run probe live script",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}\"; & \"${workspaceFolder}/.venv/Scripts/Activate.ps1\"; python .tmp_probe_live.py",
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Run in-process view test",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/backend\"; & \"${workspaceFolder}/.venv/Scripts/Activate.ps1\"; python .tmp_testclient_view.py",
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Kill dev ports 8000 8010 3000 3001",
+			"type": "shell",
+			"command": "$ports = @(8000,8010,3000,3001); $processIds = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($processId in $processIds) { try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {} }; Write-Output ('Killed PIDs: ' + ($processIds -join ', '))",
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Start backend clean 8010",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/backend\"; & \"${workspaceFolder}/.venv/Scripts/Activate.ps1\"; python -m uvicorn main:app --reload --port 8010",
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Start frontend clean 3000",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/frontend\"; npm run dev",
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Kill ports 8000 8010 3000 3001",
+			"type": "shell",
+			"command": "$ports = @(8000,8010,3000,3001); $processIds = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($processId in $processIds) { try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {} }; Write-Output ('Killed PIDs: ' + ($processIds -join ', '))",
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Start backend 8010",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/backend\"; & \"${workspaceFolder}/.venv/Scripts/Activate.ps1\"; python -m uvicorn main:app --reload --port 8010",
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Start frontend 3000",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/frontend\"; npm run dev",
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Kill ports after teacher page fix",
+			"type": "shell",
+			"command": "$ports = @(8000,8010,3000,3001); $processIds = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($processId in $processIds) { try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {} }; Write-Output ('Killed PIDs: ' + ($processIds -join ', '))",
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Restart backend 8010 after teacher fix",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/backend\"; & \"${workspaceFolder}/.venv/Scripts/Activate.ps1\"; python -m uvicorn main:app --reload --port 8010",
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Restart frontend 3000 after teacher fix",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/frontend\"; Remove-Item -Force \".next/dev/lock\" -ErrorAction SilentlyContinue; npm run dev",
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Kill ports after teacher page fix",
+			"type": "shell",
+			"command": "$ports = @(8000,8010,3000,3001); $processIds = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($processId in $processIds) { try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {} }; Write-Output ('Killed PIDs: ' + ($processIds -join ', '))",
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Restart backend 8010 after teacher fix",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/backend\"; & \"${workspaceFolder}/.venv/Scripts/Activate.ps1\"; python -m uvicorn main:app --reload --port 8010",
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Restart frontend 3000 after teacher fix",
+			"type": "shell",
+			"command": "Set-Location \"${workspaceFolder}/frontend\"; Remove-Item -Force \".next/dev/lock\" -ErrorAction SilentlyContinue; npm run dev",
+			"isBackground": true,
+			"group": "build"
 		}
 	]
 }

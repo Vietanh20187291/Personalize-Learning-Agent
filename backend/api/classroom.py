@@ -301,7 +301,12 @@ def get_class_members(class_id: int, db: Session = Depends(get_db)):
                 models.StudySession.user_id == m.id,
                 models.StudySession.subject_id == subject_id
             ).all()
-            total_minutes = sum([s.duration_minutes for s in sessions if s.duration_minutes])
+            study_minutes = sum([s.duration_minutes for s in sessions if s.duration_minutes])
+            login_seconds = sum(
+                int(item.duration_seconds or 0)
+                for item in db.query(models.UserLoginSession).filter(models.UserLoginSession.user_id == m.id).all()
+            )
+            total_minutes = study_minutes + int(login_seconds // 60)
             
             # Tính tỷ lệ tương tác (tối đa 100%)
             engagement_rate = min((total_minutes / EXPECTED_STUDY_MINUTES) * 100, 100) if EXPECTED_STUDY_MINUTES > 0 else 0

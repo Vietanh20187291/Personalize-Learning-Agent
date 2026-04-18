@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import unicodedata
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -65,6 +66,17 @@ def _month_start(now: datetime):
 
 def _normalize(text: str) -> str:
     return (text or "").strip().lower()
+
+
+def _normalize_ascii(text: str) -> str:
+    value = _normalize(text)
+    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    return " ".join(value.split())
+
+
+def _is_all_subject(text: str) -> bool:
+    key = _normalize(text)
+    return key in {"", "all", "tat ca", "tất cả", "all subjects", "all-subjects"}
 
 
 def _subject_name_of_classroom(classroom: models.Classroom) -> str:
@@ -153,7 +165,13 @@ def _pick_focus_subject(db: Session, user: models.User) -> Optional[str]:
     if not subject_map:
         return None
 
-    ranked = sorted(subject_map.values(), key=_focus_priority)
+    ranked = sorted(
+        subject_map.values(),
+        key=lambda item: (
+            0 if _has_available_documents_for_subject(db, user, str(item.get("subject_name") or "")) else 1,
+            *_focus_priority(item),
+        ),
+    )
     return ranked[0]["subject_name"] if ranked else None
 
 
@@ -165,12 +183,29 @@ def _resolve_classroom_for_subject(user: models.User, subject_name: str) -> Opti
     return None
 
 
+def _available_documents_for_classroom(db: Session, classroom: models.Classroom) -> List[models.Document]:
+    return db.query(models.Document).join(
+        models.DocumentPublication,
+        models.DocumentPublication.doc_id == models.Document.id,
+    ).filter(
+        models.Document.class_id == classroom.id,
+        models.DocumentPublication.is_visible_to_students == True,
+    ).order_by(models.Document.upload_time.asc()).all()
+
+
+def _has_available_documents_for_subject(db: Session, user: models.User, subject_name: str) -> bool:
+    classroom = _resolve_classroom_for_subject(user, subject_name)
+    if classroom is None:
+        return False
+    return len(_available_documents_for_classroom(db, classroom)) > 0
+
+
 def _pick_recommended_document(db: Session, user: models.User, subject_name: str) -> Optional[models.Document]:
     classroom = _resolve_classroom_for_subject(user, subject_name)
     if classroom is None:
         return None
 
-    docs = db.query(models.Document).filter(models.Document.class_id == classroom.id).order_by(models.Document.upload_time.asc()).all()
+    docs = _available_documents_for_classroom(db, classroom)
     if not docs:
         return None
 
@@ -196,10 +231,10 @@ def _pick_document_by_evaluation(db: Session, user: models.User, subject_name: s
     if classroom is None:
         return None, "Bạn chưa có lớp tương ứng để gợi ý tài liệu."
 
-    docs = db.query(models.Document).filter(
-        models.Document.class_id == classroom.id,
-        models.Document.subject_id == classroom.subject_id,
-    ).order_by(models.Document.upload_time.asc()).all()
+    docs = [
+        doc for doc in _available_documents_for_classroom(db, classroom)
+        if doc.subject_id == classroom.subject_id
+    ]
 
     if not docs:
         return None, "Môn này chưa có tài liệu trong lớp học của bạn."
@@ -267,8 +302,29 @@ def _quick_document_summary(db: Session, document: models.Document) -> Dict[str,
 def _should_recommend_study(message: str) -> bool:
     text = _normalize(message)
     return any(token in text for token in [
-        "nên học gì", "nen hoc gi", "môn nào chưa học", "mon nao chua hoc", "học môn nào", "hoc mon nao", "quên học", "quen hoc", "học ít", "hoc it"
+        "nên học gì", "nen hoc gi", "môn nào chưa học", "mon nao chua hoc", "học môn nào", "hoc mon nao", "quên học", "quen hoc", "học ít", "hoc it",
+        "học gì tiếp", "hoc gi tiep", "nên học tài liệu nào", "nen hoc tai lieu nao", "tài liệu nào", "tai lieu nao", "điểm thấp", "diem thap", "đề xuất học", "de xuat hoc"
     ])
+
+
+def _is_progress_overview_request(message: str) -> bool:
+    text = _normalize(message)
+    return any(token in text for token in [
+        "thành tích học tập", "thanh tich hoc tap", "kết quả học tập", "ket qua hoc tap", "kết quả của tôi", "ket qua cua toi",
+        "học tập thế nào", "hoc tap the nao", "tôi học thế nào", "toi hoc the nao", "điểm tôi", "diem toi", "báo cáo học tập", "bao cao hoc tap"
+    ])
+
+
+def _first_available_document_for_subject(db: Session, user: models.User, subject_name: str) -> Tuple[Optional[models.Document], Optional[models.Classroom]]:
+    classroom = _resolve_classroom_for_subject(user, subject_name)
+    if classroom is None:
+        return None, None
+
+    docs = _available_documents_for_classroom(db, classroom)
+    if not docs:
+        return None, classroom
+
+    return docs[0], classroom
 
 
 def _is_summary_request(message: str) -> bool:
@@ -278,9 +334,21 @@ def _is_summary_request(message: str) -> bool:
 
 def _is_entry_message(message: str) -> bool:
     text = _normalize(message)
-    return any(token in text for token in [
-        "bắt đầu bài học", "bat dau bai hoc", "bắt đầu học", "bat dau hoc", "chào ai", "chao ai", "học hôm nay", "hoc hom nay", "hello orbit"
-    ])
+    text_ascii = _normalize_ascii(message)
+    keywords = [
+        "bắt đầu bài học", "bat dau bai hoc", "bắt đầu học", "bat dau hoc",
+        "chào ai", "chao ai", "học hôm nay", "hoc hom nay", "hello orbit",
+        "bat dau", "start learning", "start study", "start orbit",
+        "b?t d?u", "b?t d?u b", "bai h?c",
+    ]
+    if any(token in text for token in keywords) or any(token in text_ascii for token in keywords):
+        return True
+
+    # Fallback cho trường hợp text tiếng Việt bị lỗi mã hóa kiểu "b?t d?u b?i h?c".
+    if "b?t" in text and ("d?u" in text or "h?c" in text or "b?i" in text):
+        return True
+
+    return False
 
 
 def _overall_latest_score(db: Session, user_id: int) -> Optional[float]:
@@ -293,13 +361,16 @@ def _overall_latest_score(db: Session, user_id: int) -> Optional[float]:
 
 def _entry_orbit_mode(db: Session, user_id: int, now: Optional[datetime] = None) -> Tuple[str, str]:
     current_time = now or datetime.utcnow()
-    progress = db.query(models.StudentLearningProgress).filter(models.StudentLearningProgress.user_id == user_id).first()
-    previous_login = progress.previous_login_at if progress else None
-    login_gap_days = (current_time - previous_login).days if previous_login else 0
+    week_start = current_time - timedelta(days=7)
+    has_recent_closed_login = db.query(models.UserLoginSession.id).filter(
+        models.UserLoginSession.user_id == user_id,
+        models.UserLoginSession.logout_at.isnot(None),
+        models.UserLoginSession.login_at >= week_start,
+    ).first() is not None
 
     latest_avg_score = _overall_latest_score(db, user_id)
     low_score_mode = latest_avg_score is not None and latest_avg_score < 60
-    long_gap_mode = login_gap_days >= 7
+    long_gap_mode = not has_recent_closed_login
 
     if long_gap_mode or low_score_mode:
         if long_gap_mode:
@@ -312,6 +383,15 @@ def _build_recommendation_payload(db: Session, user: models.User) -> Tuple[Optio
     focus_subject = _pick_focus_subject(db, user)
     if not focus_subject:
         return None, None
+
+    # Nếu môn ưu tiên chưa có tài liệu khả dụng thì lùi sang môn có tài liệu.
+    subject_map = _collect_subject_learning_map(db, user)
+    ranked_subjects = [item.get("subject_name") for item in sorted(subject_map.values(), key=_focus_priority)]
+    if not _has_available_documents_for_subject(db, user, focus_subject):
+        for candidate in ranked_subjects:
+            if isinstance(candidate, str) and _has_available_documents_for_subject(db, user, candidate):
+                focus_subject = candidate
+                break
 
     document, doc_reason = _pick_document_by_evaluation(db, user, focus_subject)
     if document is None:
@@ -347,13 +427,205 @@ def _build_recommendation_payload(db: Session, user: models.User) -> Tuple[Optio
     return payload, text
 
 
+def _build_recommendation_payload_for_subject(db: Session, user: models.User, subject_name: str) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
+    forced_subject = (subject_name or "").strip()
+    if not forced_subject:
+        return _build_recommendation_payload(db, user)
+
+    document, classroom = _first_available_document_for_subject(db, user, forced_subject)
+    doc_reason = "Đây là tài liệu đầu tiên của lớp bạn yêu cầu mở."
+    if document is None:
+        document, doc_reason = _pick_document_by_evaluation(db, user, forced_subject)
+        if document is None:
+            document = _pick_recommended_document(db, user, forced_subject)
+            doc_reason = "Đây là môn bạn yêu cầu mở trực tiếp."
+
+    if not document:
+        return {
+            "subject": forced_subject,
+            "reason": "Môn bạn yêu cầu hiện chưa có tài liệu khả dụng để mở.",
+        }, f"Bạn yêu cầu môn {forced_subject}, nhưng hiện chưa có tài liệu khả dụng để mở."
+
+    summary = _quick_document_summary(db, document)
+    payload: Dict[str, object] = {
+        "subject": forced_subject,
+        "reason": f"Mở theo yêu cầu của bạn. Lý do tài liệu: {doc_reason}",
+        "document": {
+            "id": document.id,
+            "filename": document.filename,
+            "subject": forced_subject,
+            "class_id": document.class_id,
+            "summary": summary,
+        },
+    }
+    text = (
+        f"Đã xác nhận yêu cầu mở tài liệu môn {forced_subject}. "
+        f"Tài liệu đề xuất: {document.filename}. "
+        f"Lý do: {doc_reason}"
+    )
+    return payload, text
+
+
+def _build_progress_overview_reply(db: Session, user: models.User) -> Tuple[str, Dict[str, object]]:
+    progress = _build_progress_payload(db, user.id)
+    subject_map = _collect_subject_learning_map(db, user)
+    enrolled_classes = list(getattr(user, "enrolled_classes", []) or [])
+
+    total_docs = 0
+    pending_docs = 0
+    low_score_docs = 0
+    best_subject = None
+    weakest_subject = None
+    best_score = -1.0
+    weakest_score = 101.0
+
+    for classroom in enrolled_classes:
+        docs = _available_documents_for_classroom(db, classroom)
+        total_docs += len(docs)
+        eval_map: Dict[int, models.StudentDocumentEvaluation] = {
+            item.document_id: item
+            for item in db.query(models.StudentDocumentEvaluation).filter(
+                models.StudentDocumentEvaluation.user_id == user.id,
+                models.StudentDocumentEvaluation.class_id == classroom.id,
+            ).all()
+        }
+        for doc in docs:
+            eval_item = eval_map.get(doc.id)
+            attempts = int(getattr(eval_item, "attempts", 0) or 0)
+            score = float(getattr(eval_item, "latest_score", 0.0) or 0.0)
+            if attempts <= 0:
+                pending_docs += 1
+            elif score < 60:
+                low_score_docs += 1
+
+    for item in subject_map.values():
+        latest_score = item.get("latest_score")
+        if latest_score is None:
+            continue
+        score = float(latest_score)
+        subject_name = str(item.get("subject_name") or "")
+        if score > best_score:
+            best_score = score
+            best_subject = subject_name
+        if score < weakest_score:
+            weakest_score = score
+            weakest_subject = subject_name
+
+    average_score = _overall_latest_score(db, user.id)
+    lines = [
+        "Mình vừa xem nhanh tình hình học tập của bạn:",
+        f"- Đã hoàn thành: {progress.lessons_total} bài/chủ đề đạt yêu cầu, {progress.tests_total} lần kiểm tra.",
+        f"- Thời gian học tích lũy: {progress.study_minutes_total} phút (tuần này {progress.study_minutes_week} phút).",
+        f"- Tài liệu cần học hiện có: {total_docs}.",
+        f"- Tài liệu chưa làm bài kiểm tra: {pending_docs}.",
+        f"- Tài liệu điểm thấp (<60): {low_score_docs}.",
+    ]
+    if average_score is not None:
+        lines.append(f"- Điểm trung bình gần nhất: {average_score:.1f}.")
+    if best_subject:
+        lines.append(f"- Môn nổi bật nhất: {best_subject}.")
+    if weakest_subject:
+        lines.append(f"- Môn cần ưu tiên nhất: {weakest_subject}.")
+
+    reply = "\n".join(lines)
+    action_metadata = {
+        "action_type": "open_route",
+        "target": "student",
+        "tab_name": "evaluation",
+        "params": {
+            "route": "/evaluation",
+        },
+        "confirm_button_text": "OK, mở tab kết quả",
+        "should_auto_execute": True,
+    }
+    return reply, action_metadata
+
+
+def _is_progress_or_plan_request(message: str) -> bool:
+    text = _normalize(message)
+    progress_tokens = [
+        "bao nhiêu bài", "bao nhieu bai", "học bao lâu", "hoc bao lau", "bao nhiêu câu", "bao nhieu cau",
+        "tiến độ", "tien do", "điểm", "diem", "score", "kết quả", "ket qua", "bao nhiêu phút", "bao nhieu phut",
+    ]
+    plan_tokens = [
+        "kế hoạch", "ke hoach", "nên học gì", "nen hoc gi", "quên học gì", "quen hoc gi",
+        "học gì tiếp", "hoc gi tiep", "đề xuất", "de xuat",
+    ]
+    return any(token in text for token in progress_tokens + plan_tokens)
+
+
+def _is_open_document_request(message: str) -> bool:
+    text = _normalize(message)
+    return any(token in text for token in [
+        "mở", "mo", "mở cho tôi", "mo cho toi", "mở tài liệu", "mo tai lieu", "open document", "open",
+    ])
+
+
+def _extract_subject_from_message(message: str, user: models.User) -> Optional[str]:
+    text = _normalize(message)
+    text_ascii = _normalize_ascii(message)
+    for item in getattr(user, "enrolled_classes", []) or []:
+        subject = (_subject_name_of_classroom(item) or "").strip()
+        if not subject:
+            continue
+        if _normalize(subject) in text or _normalize_ascii(subject) in text_ascii:
+            return subject
+    return None
+
+
+def _compose_flexible_learning_reply(db: Session, user: models.User) -> str:
+    subject_map = _collect_subject_learning_map(db, user)
+    if not subject_map:
+        return "Tôi chưa đủ dữ liệu học tập theo môn để phân tích sâu. Hãy bắt đầu từ 1 tài liệu cụ thể để tôi theo dõi sát hơn."
+
+    ranked = sorted(subject_map.values(), key=_focus_priority)
+    strongest = sorted(
+        subject_map.values(),
+        key=lambda item: (
+            -int(item.get("lessons", 0)),
+            -int(item.get("tests", 0)),
+            -int(item.get("study_minutes", 0)),
+            -(float(item.get("latest_score", 0) or 0.0)),
+        ),
+    )
+
+    weak = ranked[0] if ranked else None
+    good = strongest[0] if strongest else None
+    untouched = [
+        item.get("subject_name")
+        for item in ranked
+        if int(item.get("study_minutes", 0)) == 0 and int(item.get("tests", 0)) == 0
+    ]
+
+    lines = ["Tôi vừa rà soát nhanh tình trạng học tập đa môn của bạn:"]
+    if good:
+        lines.append(
+            f"- Môn học tốt nhất hiện tại: {good.get('subject_name')} (đã học {int(good.get('study_minutes', 0))} phút, {int(good.get('tests', 0))} lần kiểm tra)."
+        )
+    if weak:
+        lines.append(
+            f"- Môn cần ưu tiên nhất: {weak.get('subject_name')} (mức hoàn thành còn thấp: {int(weak.get('lessons', 0))} bài/chương đạt)."
+        )
+    if untouched:
+        lines.append(f"- Môn còn nhiều nội dung chưa học: {', '.join([str(x) for x in untouched[:3] if x])}.")
+
+    lines.append("Tôi sẽ đề xuất đúng 1 tài liệu ưu tiên để bạn mở và học ngay trong lượt này.")
+    return "\n".join(lines)
+
+
 def _login_gap_notice(db: Session, user_id: int, now: Optional[datetime] = None) -> Optional[str]:
     current_time = now or datetime.utcnow()
+    user = db.query(models.User).filter(models.User.id == user_id).first()
     progress = db.query(models.StudentLearningProgress).filter(models.StudentLearningProgress.user_id == user_id).first()
-    if not progress:
+    if not progress and not user:
         return "Orbit chưa có dữ liệu đăng nhập gần nhất của bạn. Hãy đăng nhập thường xuyên hơn để tôi theo dõi sát hơn."
 
-    previous_login = progress.previous_login_at or progress.last_login_at
+    previous_login = None
+    if progress:
+        previous_login = progress.previous_login_at or progress.last_login_at
+    if not previous_login and user:
+        previous_login = user.last_login_at
+
     if not previous_login:
         return "Đây là lần đầu bạn đăng nhập vào hệ thống học. Bắt đầu học đều ngay từ hôm nay nhé."
 
@@ -384,6 +656,33 @@ def _last_study_notice(db: Session, user_id: int, now: Optional[datetime] = None
     if gap_days < 7:
         return f"Lần học bài gần nhất: {gap_days} ngày trước. Bạn cần học lại sớm để không quên kiến thức."
     return f"⚠️ Lần học bài gần nhất: {gap_days} ngày trước. Orbit nhắc nghiêm: đã nghỉ quá lâu, cần quay lại học ngay."
+
+
+def _last_work_session_notice(db: Session, user_id: int, now: Optional[datetime] = None) -> str:
+    current_time = now or datetime.utcnow()
+    latest_study = db.query(models.StudySession).filter(
+        models.StudySession.user_id == user_id
+    ).order_by(models.StudySession.start_time.desc()).first()
+    latest_login = db.query(models.UserLoginSession).filter(
+        models.UserLoginSession.user_id == user_id
+    ).order_by(models.UserLoginSession.login_at.desc()).first()
+
+    candidates: List[datetime] = []
+    if latest_study and latest_study.start_time:
+        candidates.append(latest_study.start_time)
+    if latest_login and latest_login.login_at:
+        candidates.append(latest_login.login_at)
+
+    if not candidates:
+        return "Orbit chưa ghi nhận phiên làm việc nào trước đó của bạn."
+
+    last_time = max(candidates)
+    gap_days = (current_time - last_time).days
+    if gap_days <= 0:
+        return "Phiên làm việc gần nhất: hôm nay."
+    if gap_days == 1:
+        return "Phiên làm việc gần nhất: 1 ngày trước."
+    return f"Phiên làm việc gần nhất: {gap_days} ngày trước."
 
 
 def _get_or_create_orbit_session(db: Session, user_id: int, class_id: Optional[int], subject_id: Optional[int]) -> models.OrbitChatSession:
@@ -422,6 +721,8 @@ def _sync_learning_progress(db: Session, user_id: int):
 
     total_tests = db.query(models.AssessmentHistory).filter(models.AssessmentHistory.user_id == user_id).count()
     total_study = sum(int(item.duration_minutes or 0) for item in db.query(models.StudySession).filter(models.StudySession.user_id == user_id).all())
+    total_login_seconds = sum(int(item.duration_seconds or 0) for item in db.query(models.UserLoginSession).filter(models.UserLoginSession.user_id == user_id).all())
+    total_login_minutes = int(total_login_seconds // 60)
 
     total_msgs = db.query(models.OrbitChatMessage).filter(
         models.OrbitChatMessage.user_id == user_id,
@@ -440,7 +741,7 @@ def _sync_learning_progress(db: Session, user_id: int):
 
     progress.lessons_completed_total = int(total_lessons)
     progress.tests_completed_total = int(total_tests)
-    progress.total_study_minutes = int(total_study)
+    progress.total_study_minutes = int(total_study + total_login_minutes)
     progress.total_agent_messages = int(total_msgs)
     progress.total_agent_chat_seconds = int(total_chat_sec)
     progress.last_active_at = now
@@ -478,6 +779,22 @@ def _build_progress_payload(db: Session, user_id: int) -> OrbitProgressResponse:
         models.StudySession.user_id == user_id,
         models.StudySession.start_time >= month_start,
     ).all())
+
+    login_total_minutes = int(sum(int(item.duration_seconds or 0) for item in db.query(models.UserLoginSession).filter(
+        models.UserLoginSession.user_id == user_id,
+    ).all()) // 60)
+    login_week_minutes = int(sum(int(item.duration_seconds or 0) for item in db.query(models.UserLoginSession).filter(
+        models.UserLoginSession.user_id == user_id,
+        models.UserLoginSession.login_at >= week_start,
+    ).all()) // 60)
+    login_month_minutes = int(sum(int(item.duration_seconds or 0) for item in db.query(models.UserLoginSession).filter(
+        models.UserLoginSession.user_id == user_id,
+        models.UserLoginSession.login_at >= month_start,
+    ).all()) // 60)
+
+    study_total += login_total_minutes
+    study_week += login_week_minutes
+    study_month += login_month_minutes
 
     tests_total = db.query(models.AssessmentHistory).filter(models.AssessmentHistory.user_id == user_id).count()
     tests_week = db.query(models.AssessmentHistory).filter(
@@ -553,40 +870,131 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
     if user.role != "student":
         raise HTTPException(status_code=403, detail="Orbit chỉ dành cho tài khoản sinh viên")
 
-    subject_name = (req.subject or "").strip()
-    if not subject_name:
-        raise HTTPException(status_code=400, detail="Thiếu môn học")
+    enrolled_classes = list(getattr(user, "enrolled_classes", []) or [])
+    is_entry = _is_entry_message(req.message)
+    requested_subject = (req.subject or "").strip()
 
-    subject = db.query(models.Subject).filter(models.Subject.name.ilike(subject_name)).first()
-    if not subject:
-        subject = models.Subject(name=subject_name, description=f"Môn {subject_name}")
-        db.add(subject)
-        db.flush()
-
+    subject_name = requested_subject
     classroom = None
     if req.class_id:
         classroom = db.query(models.Classroom).filter(models.Classroom.id == req.class_id).first()
-    if classroom is None:
-        classroom = next((item for item in getattr(user, "enrolled_classes", []) if (item.subject or "").strip().lower() == subject_name.lower()), None)
 
-    if classroom is None:
-        raise HTTPException(status_code=400, detail=f"Bạn chưa tham gia lớp cho môn {subject_name}")
+    if classroom is None and not _is_all_subject(subject_name):
+        classroom = next(
+            (item for item in enrolled_classes if _normalize(item.subject or "") == _normalize(subject_name)),
+            None,
+        )
 
-    orbit = OrbitAgent(db)
-    is_entry = _is_entry_message(req.message)
-    if is_entry:
-        reply = ""
-    else:
-        reply = orbit.respond(user=user, subject_name=subject_name, message=req.message, class_id=classroom.id)
+    if classroom is None and enrolled_classes:
+        classroom = enrolled_classes[0]
+
+    if classroom is not None:
+        subject_name = (classroom.subject or getattr(getattr(classroom, "subject_obj", None), "name", None) or subject_name or "").strip()
+
+    subject = None
+    if subject_name:
+        subject = db.query(models.Subject).filter(models.Subject.name.ilike(subject_name)).first()
+        if not subject and not _is_all_subject(subject_name):
+            subject = models.Subject(name=subject_name, description=f"Môn {subject_name}")
+            db.add(subject)
+            db.flush()
+
     orbit_mode, orbit_status_text = _entry_orbit_mode(db, user.id)
     login_notice = _login_gap_notice(db, user.id)
     study_notice = _last_study_notice(db, user.id)
+    work_notice = _last_work_session_notice(db, user.id)
+    progress = _build_progress_payload(db, user.id)
+
+    if _is_progress_overview_request(req.message):
+        reply, action_metadata = _build_progress_overview_reply(db, user)
+        now = datetime.utcnow()
+        session = _get_or_create_orbit_session(db, user.id, classroom.id if classroom else None, subject.id if subject else None)
+
+        user_msg = models.OrbitChatMessage(
+            session_id=session.id,
+            user_id=user.id,
+            role="user",
+            content=req.message,
+            created_at=now,
+        )
+        assistant_msg = models.OrbitChatMessage(
+            session_id=session.id,
+            user_id=user.id,
+            role="assistant",
+            content=reply,
+            created_at=now,
+        )
+        db.add(user_msg)
+        db.add(assistant_msg)
+        session.message_count = int(session.message_count or 0) + 2
+        session.last_message_at = now
+        session.ended_at = now
+        _sync_learning_progress(db, user.id)
+        db.commit()
+
+        return {
+            "reply": reply,
+            "agent_name": "Orbit Agent",
+            "class_id": classroom.id if classroom else None,
+            "subject": subject_name or "all",
+            "recommendation": None,
+            "action_metadata": action_metadata,
+            "orbit_mode": orbit_mode,
+            "orbit_status_text": orbit_status_text,
+            "quick_suggestions": [
+                "Hôm nay, tôi nên học phần nào",
+                "Thành tích học của tôi thế nào",
+                "Mở cho tôi tài liệu môn Lập trình hướng đối tượng",
+            ],
+            "debug_version": "orbit_patch_v3",
+        }
+
+    if classroom is None:
+        intro_lines = [
+            "Xin chào, mình là Orbit Agent - trợ lý học tập cá nhân của bạn.",
+            ("😠 Orbit Angry đang làm việc." if orbit_mode == "angry" else "😊 Orbit Happy đang sẵn sàng đồng hành cùng bạn."),
+            f"- {work_notice}",
+            f"- {login_notice}",
+            f"- {study_notice}",
+            f"- Tiến độ hiện tại: {progress.lessons_total} bài đã qua, {progress.tests_total} bài kiểm tra.",
+            f"- Thời lượng học: tuần này {progress.study_minutes_week} phút, tháng này {progress.study_minutes_month} phút, tổng {progress.study_minutes_total} phút.",
+            "Bạn chưa join lớp nào. Hãy tham gia ít nhất 1 lớp để bắt đầu hành trình học cùng Orbit và nhận đề xuất tài liệu phù hợp.",
+        ]
+        reply = "\n".join(intro_lines)
+        return {
+            "reply": reply,
+            "agent_name": "Orbit Agent",
+            "class_id": None,
+            "subject": subject_name or "all",
+            "recommendation": None,
+            "action_metadata": None,
+            "orbit_mode": orbit_mode,
+            "orbit_status_text": orbit_status_text,
+        }
+
+    orbit = OrbitAgent(db)
+    if is_entry:
+        reply = ""
+    else:
+        # Ưu tiên phản hồi thích ứng đa môn để tránh lặp mẫu câu mặc định của OrbitAgent.
+        if _is_summary_request(req.message):
+            reply = orbit.respond(user=user, subject_name=subject_name, message=req.message, class_id=classroom.id)
+        else:
+            reply = _compose_flexible_learning_reply(db, user)
+
     if is_entry:
         mood_line = "😠 Orbit Angry đang làm việc." if orbit_mode == "angry" else "😊 Orbit Happy chào bạn quay lại học tập."
-        header_lines = ["📌 Orbit báo cáo nhanh khi bạn vừa vào hệ thống:", mood_line, f"- {login_notice}", f"- {study_notice}"]
+        header_lines = [
+            "Xin chào, mình là Orbit Agent - trợ lý học tập cá nhân của bạn.",
+            "📌 Orbit báo cáo nhanh khi bạn vừa vào hệ thống:",
+            mood_line,
+            f"- {work_notice}",
+            f"- {login_notice}",
+            f"- {study_notice}",
+            f"- Tiến độ hiện tại: {progress.lessons_total} bài đã qua, {progress.tests_total} bài kiểm tra.",
+            f"- Thời lượng học: tuần này {progress.study_minutes_week} phút, tháng này {progress.study_minutes_month} phút, tổng {progress.study_minutes_total} phút.",
+        ]
         reply = "\n".join(header_lines)
-    elif login_notice:
-        reply = f"{login_notice}\n\n{reply}"
 
     recommendation_payload: Optional[Dict[str, object]] = None
     action_metadata: Optional[Dict[str, object]] = None
@@ -600,8 +1008,19 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
             models.Document.filename == req.source_file.strip(),
         ).first()
 
-    if _should_recommend_study(req.message) or is_entry:
-        recommendation_payload, recommendation_text = _build_recommendation_payload(db, user)
+    requested_subject_from_msg = _extract_subject_from_message(req.message, user) if _is_open_document_request(req.message) else None
+    should_recommend = (
+        is_entry
+        or _should_recommend_study(req.message)
+        or _is_open_document_request(req.message)
+        or (not _is_progress_or_plan_request(req.message) and not _is_summary_request(req.message))
+    )
+
+    if should_recommend:
+        if requested_subject_from_msg:
+            recommendation_payload, recommendation_text = _build_recommendation_payload_for_subject(db, user, requested_subject_from_msg)
+        else:
+            recommendation_payload, recommendation_text = _build_recommendation_payload(db, user)
         if recommendation_text:
             reply = f"{reply}\n\n{recommendation_text}"
 
@@ -620,6 +1039,31 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
                     "summary": rec_doc.get("summary"),
                 },
                 "confirm_button_text": "OK, mở tài liệu đề xuất",
+                "should_auto_execute": False,
+            }
+    elif _is_open_document_request(req.message):
+        if requested_subject_from_msg:
+            recommendation_payload, recommendation_text = _build_recommendation_payload_for_subject(db, user, requested_subject_from_msg)
+        else:
+            recommendation_payload, recommendation_text = _build_recommendation_payload(db, user)
+        if recommendation_text:
+            reply = f"{reply}\n\n{recommendation_text}"
+
+        rec_doc = ((recommendation_payload or {}).get("document") or {}) if recommendation_payload else {}
+        rec_doc_id = rec_doc.get("id") if isinstance(rec_doc, dict) else None
+        if rec_doc_id:
+            action_metadata = {
+                "action_type": "open_document",
+                "target": "student",
+                "tab_name": "adaptive",
+                "params": {
+                    "subject": rec_doc.get("subject") or (recommendation_payload or {}).get("subject"),
+                    "document_id": rec_doc.get("id"),
+                    "class_id": rec_doc.get("class_id"),
+                    "filename": rec_doc.get("filename"),
+                    "summary": rec_doc.get("summary"),
+                },
+                "confirm_button_text": "OK, mở tài liệu này",
                 "should_auto_execute": False,
             }
 
@@ -660,7 +1104,7 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
             }
 
     now = datetime.utcnow()
-    session = _get_or_create_orbit_session(db, user.id, classroom.id, subject.id)
+    session = _get_or_create_orbit_session(db, user.id, classroom.id, subject.id if subject else None)
 
     user_msg = models.OrbitChatMessage(
         session_id=session.id,
@@ -695,6 +1139,12 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
         "action_metadata": action_metadata,
         "orbit_mode": orbit_mode,
         "orbit_status_text": orbit_status_text,
+        "quick_suggestions": [
+            "Hôm nay, tôi nên học phần nào",
+            "Thành tích học của tôi thế nào",
+            "Mở cho tôi tài liệu môn Lập trình hướng đối tượng",
+        ],
+        "debug_version": "orbit_patch_v2",
     }
 
 

@@ -1,6 +1,8 @@
 import os
+import re
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse 
+from fastapi.responses import FileResponse, StreamingResponse 
 from sqlalchemy.orm import Session
 from db.database import get_db
 from db import models
@@ -13,6 +15,41 @@ from pptx import Presentation
 from rag.vector_store import get_vector_store 
 
 router = APIRouter()
+
+
+def _resolve_document_file_path(filename: str) -> Path:
+    """Resolve uploaded file path independent of current working directory."""
+    safe_name = (filename or "").strip()
+    if not safe_name:
+        raise HTTPException(status_code=404, detail="Tên file tài liệu không hợp lệ")
+
+    project_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        project_root / "temp_uploads" / safe_name,
+        project_root / "backend" / "temp_uploads" / safe_name,
+    ]
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    raise HTTPException(status_code=404, detail="File vật lý không tồn tại trên server")
+
+
+def _can_student_access_document(db: Session, doc: models.Document, user_id: Optional[int]) -> bool:
+    publication = db.query(models.DocumentPublication).filter(models.DocumentPublication.doc_id == doc.id).first()
+    if publication and publication.is_visible_to_students:
+        return True
+
+    if not user_id:
+        return False
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user or getattr(user, "role", None) != "student":
+        return False
+
+    enrolled_class_ids = {classroom.id for classroom in (getattr(user, "enrolled_classes", []) or [])}
+    return bool(doc.class_id and doc.class_id in enrolled_class_ids)
 
 
 def _extract_preview_segments(file_path: str, filename: str):
@@ -320,35 +357,72 @@ def download_document(doc_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=403, detail="Tài liệu này chưa được giáo viên cho phép hiển thị")
         
     # Trỏ đúng vào thư mục temp_uploads theo logic lưu file
-    file_path = os.path.join("temp_uploads", doc.filename)
-    
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File vật lý không tồn tại trên server")
+    file_path = _resolve_document_file_path(doc.filename)
         
     return FileResponse(
-        path=file_path, 
+        path=str(file_path), 
         filename=doc.filename,
         media_type='application/octet-stream' # Ép trình duyệt tự động tải file xuống
     )
 
 
+@router.get("/view/{doc_id}")
+def view_document_inline(doc_id: int, user_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """API hiển thị file trực tiếp (inline) để nhúng preview PDF/PPT trong frontend."""
+    doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Tài liệu không tồn tại")
+
+    if not _can_student_access_document(db, doc, user_id):
+        raise HTTPException(status_code=403, detail="Tài liệu này chưa được giáo viên cho phép hiển thị")
+
+    file_path = _resolve_document_file_path(doc.filename)
+
+    ext = os.path.splitext(doc.filename)[1].lower()
+    media_map = {
+        ".pdf": "application/pdf",
+        ".ppt": "application/vnd.ms-powerpoint",
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".txt": "text/plain; charset=utf-8",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+    media_type = media_map.get(ext, "application/octet-stream")
+
+    safe_filename = re.sub(r'[^A-Za-z0-9._-]+', '_', doc.filename or 'document')
+
+    def iter_file_bytes(path: Path, chunk_size: int = 1024 * 1024):
+        with path.open("rb") as stream:
+            while True:
+                chunk = stream.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+
+    return StreamingResponse(
+        iter_file_bytes(file_path),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"inline; filename=\"{safe_filename}\"",
+            "Accept-Ranges": "bytes",
+            "X-Doc-View-Version": "v4_stream_unicode_fix",
+        },
+    )
+
+
 @router.get("/preview/{doc_id}")
-def preview_document(doc_id: int, db: Session = Depends(get_db)):
+def preview_document(doc_id: int, user_id: Optional[int] = None, db: Session = Depends(get_db)):
     """Trích xuất nội dung text để preview trực tiếp trong ứng dụng."""
     doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Tài liệu không tồn tại")
 
-    publication = db.query(models.DocumentPublication).filter(models.DocumentPublication.doc_id == doc_id).first()
-    if not publication or not publication.is_visible_to_students:
+    if not _can_student_access_document(db, doc, user_id):
         raise HTTPException(status_code=403, detail="Tài liệu này chưa được giáo viên cho phép hiển thị")
 
-    file_path = os.path.join("temp_uploads", doc.filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File vật lý không tồn tại trên server")
+    file_path = _resolve_document_file_path(doc.filename)
 
     try:
-        parsed = _extract_preview_segments(file_path, doc.filename)
+        parsed = _extract_preview_segments(str(file_path), doc.filename)
         segments = parsed.get("segments", [])
         if not segments:
             segments = _extract_preview_from_vector(doc.filename)

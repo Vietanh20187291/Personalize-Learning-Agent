@@ -5,6 +5,7 @@ import {
   BarChart3, History, TrendingUp, Calendar, Target, Award, ChevronDown, 
   Clock, ArrowUpRight, ArrowDownRight, Minus, Timer, LockKeyhole, Sparkles
 } from 'lucide-react';
+import OrbitPanel from '@/components/OrbitPanel';
 
 // Định nghĩa Interface
 interface AssessmentItem {
@@ -46,10 +47,15 @@ export default function EvaluationPage() {
   const [loadingSubjects, setLoadingSubjects] = useState<boolean>(true);
   const [classIdMap, setClassIdMap] = useState<{[key: string]: number}>({}); // Lưu mapping Môn học -> ID lớp
 
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
+
   const [history, setHistory] = useState<AssessmentItem[]>([]); 
   const [loadingStats, setLoadingStats] = useState<boolean>(false);
   const [stats, setStats] = useState<StatsData>({ avg: 0, total: 0, best: 0 });
   const [evalScores, setEvalScores] = useState<EvaluationScores | null>(null);
+  const orbitUserId = typeof window !== 'undefined'
+    ? parseInt(localStorage.getItem('userId') || localStorage.getItem('user_id') || '0', 10)
+    : 0;
 
   // LẤY DANH SÁCH MÔN HỌC MÀ SINH VIÊN ĐÃ THAM GIA LỚP
   useEffect(() => {
@@ -63,7 +69,7 @@ export default function EvaluationPage() {
       }
 
       try {
-        const res = await axios.get(`http://localhost:8000/api/auth/me/${userId}`);
+          const res = await axios.get(`${apiBaseUrl}/api/auth/me/${userId}`);
         const classes = res.data.enrolled_classes || [];
         
         const map: {[key: string]: number} = {};
@@ -107,7 +113,7 @@ export default function EvaluationPage() {
 
       if (!userId) return; 
 
-      const res = await axios.get(`http://localhost:8000/api/stats/learning-stats`, {
+        const res = await axios.get(`${apiBaseUrl}/api/stats/learning-stats`, {
         params: {
           user_id: userId, 
           subject: selectedSubject
@@ -140,7 +146,7 @@ export default function EvaluationPage() {
 
     try {
         // Lấy điểm Evaluation Agent từ API danh sách lớp
-        const res = await axios.get(`http://localhost:8000/api/classroom/members/${classId}`);
+      const res = await axios.get(`${apiBaseUrl}/api/classroom/members/${classId}`);
         const members = res.data || [];
         const myData = members.find((m: any) => m.id === userId);
         
@@ -191,6 +197,7 @@ export default function EvaluationPage() {
   };
 
   return (
+    <>
     <div className="page-shell text-slate-800">
       <div className="max-w-6xl mx-auto px-2 sm:px-4 space-y-8">
         
@@ -388,6 +395,14 @@ export default function EvaluationPage() {
         )}
       </div>
     </div>
+    <OrbitPanel
+      userId={orbitUserId}
+      classId={classIdMap[selectedSubject] || null}
+      selectedSubject={selectedSubject}
+      enrolledClasses={enrolledSubjects.map((subject) => ({ subject, id: classIdMap[subject] }))}
+      apiBaseUrl={apiBaseUrl}
+    />
+    </>
   );
 }
 

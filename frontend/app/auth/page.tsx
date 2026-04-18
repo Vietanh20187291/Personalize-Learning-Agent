@@ -18,6 +18,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
 function AuthContent() {
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -51,7 +52,7 @@ function AuthContent() {
         loginData.append("username", formData.email);
         loginData.append("password", formData.password);
 
-        const res = await axios.post("http://localhost:8000/api/auth/login", loginData, {
+        const res = await axios.post(`${apiBaseUrl}/api/auth/login`, loginData, {
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
         });
 
@@ -75,7 +76,7 @@ function AuthContent() {
           }
         }, 800);
       } else {
-        await axios.post("http://localhost:8000/api/auth/register", formData);
+        await axios.post(`${apiBaseUrl}/api/auth/register`, formData);
         toast.success("Đăng ký thành công! Mời bạn đăng nhập.");
         setIsLogin(true);
         router.push("/auth");

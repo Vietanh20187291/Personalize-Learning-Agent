@@ -44,6 +44,17 @@ def create_access_token(data: dict):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
+
+def _close_open_login_sessions(db: Session, user_id: int, now: datetime):
+    open_sessions = db.query(models.UserLoginSession).filter(
+        models.UserLoginSession.user_id == user_id,
+        models.UserLoginSession.logout_at.is_(None),
+    ).all()
+    for item in open_sessions:
+        item.logout_at = now
+        if item.login_at and now >= item.login_at:
+            item.duration_seconds = int((now - item.login_at).total_seconds())
+
 # --- DEPENDENCY: LẤY THÔNG TIN USER ĐANG ĐĂNG NHẬP ---
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
@@ -106,13 +117,20 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
 
+    now = datetime.utcnow()
+    previous_user_login = user.last_login_at
+    user.last_login_at = now
+
+    _close_open_login_sessions(db, user.id, now)
+    db.add(models.UserLoginSession(user_id=user.id, login_at=now))
+
     progress = db.query(models.StudentLearningProgress).filter(models.StudentLearningProgress.user_id == user.id).first()
     if not progress:
         progress = models.StudentLearningProgress(user_id=user.id)
         db.add(progress)
-    progress.previous_login_at = progress.last_login_at
-    progress.last_login_at = datetime.utcnow()
-    progress.last_active_at = datetime.utcnow()
+    progress.previous_login_at = previous_user_login or progress.last_login_at
+    progress.last_login_at = now
+    progress.last_active_at = now
     db.commit()
     
     access_token = create_access_token(data={"sub": user.username, "role": user.role, "id": user.id})
@@ -125,6 +143,19 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         "userId": user.id,
         "studentId": user.student_id # Trả về thêm MSSV cho Frontend nếu cần
     }
+
+
+@router.post("/logout")
+def logout(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    _close_open_login_sessions(db, current_user.id, now)
+
+    progress = db.query(models.StudentLearningProgress).filter(models.StudentLearningProgress.user_id == current_user.id).first()
+    if progress:
+        progress.last_active_at = now
+
+    db.commit()
+    return {"message": "Đăng xuất thành công"}
 
 @router.post("/change-password")
 def change_password(req: ChangePasswordRequest, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):

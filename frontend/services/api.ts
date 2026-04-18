@@ -1,6 +1,7 @@
 import axios from 'axios';
 
-const API_URL = 'http://localhost:8000/api';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
+const API_URL = `${API_BASE_URL}/api`;
 
 export const api = {
   // --- 1. CONTENT AGENT: Xử lý tri thức ---

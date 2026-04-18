@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 
 export default function ExamGeneratorPage() {
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
   const [classList, setClassList] = useState<any[]>([]);
   const [selectedClassId, setSelectedClassId] = useState<number | "">("");
   const [subject, setSubject] = useState("");
@@ -23,7 +24,7 @@ export default function ExamGeneratorPage() {
       const teacherId = localStorage.getItem("userId") || localStorage.getItem("user_id");
       if (!teacherId) return;
       try {
-        const res = await axios.get(`http://localhost:8000/api/classroom/teacher/${teacherId}`);
+        const res = await axios.get(`${apiBaseUrl}/api/classroom/teacher/${teacherId}`);
         setClassList(res.data || []);
         if (res.data && res.data.length > 0) {
           setSelectedClassId(res.data[0].id);
@@ -53,7 +54,7 @@ export default function ExamGeneratorPage() {
     const toastId = toast.loading("AI đang phân tích tài liệu và xáo trộn mã đề...");
 
     try {
-      const response = await axios.post("http://localhost:8000/api/exam/generate-word", {
+      const response = await axios.post(`${apiBaseUrl}/api/exam/generate-word`, {
         class_id: selectedClassId,
         subject: subject,
         exam_type: examType,

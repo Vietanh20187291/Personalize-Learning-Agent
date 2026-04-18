@@ -160,8 +160,14 @@ class OrbitAgent:
         judgement = self._discipline_judgement(stats, days_inactive)
 
         msg_lower = (message or "").lower()
-        asks_progress = any(token in msg_lower for token in ["bao nhiêu bài", "bao nhieu bai", "học bao lâu", "hoc bao lau", "bao nhiêu câu", "bao nhieu cau"]) 
-        asks_plan = any(token in msg_lower for token in ["kế hoạch", "ke hoach", "nên học gì", "nen hoc gi", "quên học gì", "quen hoc gi"])
+        asks_progress = any(token in msg_lower for token in [
+            "bao nhiêu bài", "bao nhieu bai", "học bao lâu", "hoc bao lau", "bao nhiêu câu", "bao nhieu cau",
+            "tiến độ", "tien do", "điểm", "diem", "score", "kết quả", "ket qua", "bao nhiêu phút", "bao nhieu phut"
+        ])
+        asks_plan = any(token in msg_lower for token in [
+            "kế hoạch", "ke hoach", "nên học gì", "nen hoc gi", "quên học gì", "quen hoc gi",
+            "học gì tiếp", "hoc gi tiep", "nên học tài liệu nào", "nen hoc tai lieu nao", "đề xuất", "de xuat"
+        ])
 
         directive_lines: List[str] = []
         for item in directives:

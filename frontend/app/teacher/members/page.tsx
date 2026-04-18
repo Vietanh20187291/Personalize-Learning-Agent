@@ -49,6 +49,7 @@ interface StatCardProps {
 }
 
 export default function ClassMembersPage() {
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
   const [members, setMembers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [classList, setClassList] = useState<any[]>([]);
@@ -110,7 +111,7 @@ export default function ClassMembersPage() {
       return;
     }
     try {
-      const res = await axios.get(`http://localhost:8000/api/classroom/teacher/${teacherId}`);
+      const res = await axios.get(`${apiBaseUrl}/api/classroom/teacher/${teacherId}`);
       const classes = res.data || [];
       setClassList(classes);
       if (classes.length > 0) {
@@ -128,7 +129,7 @@ export default function ClassMembersPage() {
   const fetchMembers = async (classId: number) => {
     setLoading(true);
     try {
-      const res = await axios.get(`http://localhost:8000/api/classroom/members/${classId}`);
+      const res = await axios.get(`${apiBaseUrl}/api/classroom/members/${classId}`);
       setMembers(res.data || []);
     } catch (error) {
       toast.error("Không thể tải danh sách học sinh");
@@ -140,7 +141,7 @@ export default function ClassMembersPage() {
   const fetchClassAnalytics = async (classId: number, subject: string) => {
     setStatsLoading(true);
     try {
-      const res = await axios.get(`http://localhost:8000/api/stats/class/${classId}`, {
+      const res = await axios.get(`${apiBaseUrl}/api/stats/class/${classId}`, {
         params: { subject: subject } 
       });
       setClassStats(res.data);
@@ -154,7 +155,7 @@ export default function ClassMembersPage() {
   const fetchStudentStats = async (studentId: number, subject: string) => {
     setStudentStatsLoading(true);
     try {
-      const res = await axios.get(`http://localhost:8000/api/stats/learning-stats`, {
+      const res = await axios.get(`${apiBaseUrl}/api/stats/learning-stats`, {
         params: { user_id: studentId, subject: subject }
       });
       setStudentHistory(res.data.history_list || []);
@@ -178,7 +179,7 @@ export default function ClassMembersPage() {
       return;
     }
     try {
-      await axios.delete(`http://localhost:8000/api/classroom/remove-student/${selectedClassId}/${studentId}`);
+      await axios.delete(`${apiBaseUrl}/api/classroom/remove-student/${selectedClassId}/${studentId}`);
       toast.success(`Đã xóa học sinh ${studentName} khỏi lớp.`);
       setMembers(prev => prev.filter(m => m.id !== studentId));
       if (selectedClassId && classSubject) fetchClassAnalytics(selectedClassId, classSubject);
