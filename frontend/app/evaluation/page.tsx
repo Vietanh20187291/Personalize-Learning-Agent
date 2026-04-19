@@ -47,7 +47,7 @@ export default function EvaluationPage() {
   const [loadingSubjects, setLoadingSubjects] = useState<boolean>(true);
   const [classIdMap, setClassIdMap] = useState<{[key: string]: number}>({}); // Lưu mapping Môn học -> ID lớp
 
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
   const [history, setHistory] = useState<AssessmentItem[]>([]); 
   const [loadingStats, setLoadingStats] = useState<boolean>(false);

@@ -6,11 +6,12 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import desc, func
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from db.models import AssessmentHistory, Classroom, Document, OrbitCoachDirective, QuestionBank, Subject, User
+from db.models import Classroom, Document, OrbitCoachDirective, QuestionBank, StudentDocumentScoreHistory, Subject, User
 from memory import ActionRouter, IntentClassifier, get_conversation_memory
+from services.score_metrics import compute_subject_score_metrics
 
 
 class TeacherAgent:
@@ -367,27 +368,20 @@ class TeacherAgent:
                 return student
         return None
 
-    def _latest_scores_for_students(self, histories: List[AssessmentHistory]) -> Dict[int, float]:
-        latest_scores: Dict[int, float] = {}
-        for item in histories:
-            if item.user_id is None or item.user_id in latest_scores:
-                continue
-            latest_scores[item.user_id] = float(item.score or 0)
-        return latest_scores
-
     def _class_score_summary(self, classroom: Classroom, subject: Optional[Subject] = None) -> Dict[str, Any]:
         subject_id = subject.id if subject else classroom.subject_id
-        histories = (
-            self.db.query(AssessmentHistory)
-            .filter(
-                AssessmentHistory.user_id.in_([student.id for student in classroom.students if getattr(student, "role", "student") == "student"]),
-                AssessmentHistory.subject_id == subject_id,
+        latest_scores: Dict[int, float] = {}
+        for student in classroom.students:
+            if getattr(student, "role", "student") != "student":
+                continue
+            metrics = compute_subject_score_metrics(
+                db=self.db,
+                user_id=student.id,
+                subject_id=subject_id,
+                class_id=classroom.id,
             )
-            .order_by(desc(AssessmentHistory.timestamp))
-            .all()
-        )
+            latest_scores[student.id] = float(metrics.get("test_score", 0.0) or 0.0)
 
-        latest_scores = self._latest_scores_for_students(histories)
         scores = list(latest_scores.values())
         student_count = len([student for student in classroom.students if getattr(student, "role", "student") == "student"])
         avg_score = round(sum(scores) / len(scores), 1) if scores else 0.0
@@ -582,13 +576,16 @@ class TeacherAgent:
         return {"reply": reply, "suggested_actions": actions}
 
     def _student_overview_reply(self, student: User) -> Dict[str, Any]:
-        histories = (
-            self.db.query(AssessmentHistory)
-            .filter(AssessmentHistory.user_id == student.id)
-            .order_by(AssessmentHistory.timestamp.asc())
+        attempts = (
+            self.db.query(StudentDocumentScoreHistory)
+            .filter(
+                StudentDocumentScoreHistory.user_id == student.id,
+                StudentDocumentScoreHistory.test_type != "baseline",
+            )
+            .order_by(StudentDocumentScoreHistory.tested_at.asc())
             .all()
         )
-        scores = [float(item.score or 0) for item in histories]
+        scores = [float(item.score or 0) for item in attempts]
         avg_score = round(sum(scores) / len(scores), 1) if scores else 0.0
         recent_scores = scores[-5:]
         recent_avg = round(sum(recent_scores) / len(recent_scores), 1) if recent_scores else 0.0
@@ -597,8 +594,13 @@ class TeacherAgent:
             trend = round(recent_scores[-1] - recent_scores[0], 1)
 
         by_subject: Dict[str, List[float]] = defaultdict(list)
-        for item in histories:
-            subject_name = self._clean_text(getattr(item, "subject", "") or getattr(getattr(item, "subject_obj", None), "name", "") or "Chưa rõ môn")
+        subject_ids = sorted({int(item.subject_id) for item in attempts if item.subject_id is not None})
+        subject_map = {
+            item.id: item.name
+            for item in self.db.query(Subject).filter(Subject.id.in_(subject_ids)).all()
+        } if subject_ids else {}
+        for item in attempts:
+            subject_name = self._clean_text(subject_map.get(item.subject_id, "Chưa rõ môn"))
             by_subject[subject_name].append(float(item.score or 0))
 
         subject_avgs = sorted(

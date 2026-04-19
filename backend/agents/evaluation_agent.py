@@ -4,8 +4,9 @@ import re
 from groq import Groq
 from dotenv import load_dotenv
 from sqlalchemy import func
-from db.models import StudySession, AssessmentHistory, QuestionBank, UserLoginSession
+from db.models import QuestionBank, UserLoginSession
 from rag.vector_store import get_vector_store
+from services.score_metrics import compute_subject_score_metrics
 
 # Tải biến môi trường
 load_dotenv()
@@ -24,56 +25,35 @@ class EvaluationAgent:
     # --- HÀM ĐÁNH GIÁ HIỆU SUẤT TỔNG THỂ (CẤU TRÚC 1-10-1) ---
     def evaluate_performance(self, user_id: int, subject: str, current_score: float, test_type: str):
         """
-        Đánh giá kết quả học tập bám sát cấu trúc 1-10-1:
-        - Baseline: Bỏ qua khi tính điểm trung bình, dùng làm mốc Progress.
-        - Session: Lấy trung bình cộng (40% của Test Score).
-        - Final: Bài cuối khóa (60% của Test Score).
+        Đánh giá điểm môn từ tất cả điểm kiểm tra theo từng tài liệu thuộc môn:
+        - TEST SCORE: Trung bình điểm mới nhất của tất cả tài liệu trong môn.
+        - EFFORT SCORE: Dựa trên tổng thời gian đăng nhập hệ thống.
+        - PROGRESS SCORE: Dựa trên xu hướng tăng/giảm điểm qua các mốc thời gian.
         """
-        
-        # 1. TÌNH EFFORT SCORE (Lấy thời gian chat với AI)
-        study_minutes_query = self.db.query(func.sum(StudySession.duration_minutes)).filter(
-            StudySession.user_id == user_id,
-            StudySession.subject == subject
-        ).scalar()
+
+        # 1. TÍNH EFFORT SCORE (Tổng thời gian đăng nhập hệ thống)
+        score_metrics = compute_subject_score_metrics(
+            db=self.db,
+            user_id=user_id,
+            subject_name=subject,
+        )
 
         login_seconds_query = self.db.query(func.sum(UserLoginSession.duration_seconds)).filter(
             UserLoginSession.user_id == user_id
         ).scalar()
-        
-        study_minutes = study_minutes_query if study_minutes_query else 0
+
         login_minutes = (login_seconds_query or 0) / 60.0
-        total_minutes = study_minutes + login_minutes
-        effort_score = min(100.0, (total_minutes / 600.0) * 100.0) # Giả định mốc 600 phút
-        
-        # 2. BÓC TÁCH CÁC LOẠI ĐIỂM
-        baseline_record = self.db.query(AssessmentHistory).filter_by(
-            user_id=user_id, subject=subject, test_type="baseline"
-        ).order_by(AssessmentHistory.timestamp.asc()).first()
-        baseline_score = baseline_record.score if baseline_record else current_score
-        
-        session_records = self.db.query(AssessmentHistory).filter_by(
-            user_id=user_id, subject=subject, test_type="session"
-        ).all()
-        avg_session_score = sum(r.score for r in session_records) / len(session_records) if session_records else current_score
+        effort_score = min(100.0, (login_minutes / 600.0) * 100.0)
 
-        # 3. TÍNH TEST SCORE CHUẨN XÁC
-        if test_type == "final":
-            actual_test_score = (avg_session_score * 0.4) + (current_score * 0.6)
-        elif test_type == "session":
-            # Cộng nhẩm bài đang thi vào trung bình session hiện tại
-            total_session_count = len(session_records) + 1
-            actual_test_score = ((avg_session_score * len(session_records)) + current_score) / total_session_count
-        else: # Nếu vừa làm bài Baseline xong
-            actual_test_score = current_score
+        # 2. TEST SCORE + PROGRESS SCORE lấy từ lịch sử điểm theo tài liệu
+        actual_test_score = float(score_metrics.get("test_score", current_score) or current_score)
+        progress_score = float(score_metrics.get("progress_score", 0.0) or 0.0)
+        improvement = float(score_metrics.get("improvement", 0.0) or 0.0)
 
-        # 4. TÍNH PROGRESS SCORE (Độ lệch so với Baseline)
-        improvement = current_score - baseline_score
-        progress_score = min(100.0, max(0.0, 70.0 + improvement)) 
-
-        # 5. CHỐT FINAL SCORE
+        # 3. CHỐT FINAL SCORE
         final_score = (0.5 * actual_test_score) + (0.3 * effort_score) + (0.2 * progress_score)
-        
-        # 6. GỌI AI ĐỂ TẠO NHẬN XÉT CÁ NHÂN HÓA
+
+        # 4. GỌI AI ĐỂ TẠO NHẬN XÉT CÁ NHÂN HÓA
         evaluation_msg = self._get_ai_feedback(actual_test_score, effort_score, improvement)
         
         return {

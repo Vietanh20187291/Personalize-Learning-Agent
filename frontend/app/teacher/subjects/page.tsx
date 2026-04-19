@@ -63,7 +63,7 @@ const SUBJECT_ICON_OPTIONS = [
 export default function TeacherSubjectsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
   const [subjects, setSubjects] = useState<SubjectItem[]>([]);
   const [classes, setClasses] = useState<ClassroomItem[]>([]);
   const [loadingSubjects, setLoadingSubjects] = useState(true);

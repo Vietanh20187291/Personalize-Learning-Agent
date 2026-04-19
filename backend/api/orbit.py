@@ -116,9 +116,16 @@ def _collect_subject_learning_map(db: Session, user: models.User) -> Dict[str, D
             }
         data[key]["study_minutes"] += int(item.duration_minutes or 0)
 
-    histories = db.query(models.AssessmentHistory).filter(models.AssessmentHistory.user_id == user.id).order_by(models.AssessmentHistory.timestamp.desc()).all()
-    for item in histories:
-        subject_name = (getattr(getattr(item, "subject_obj", None), "name", None) or item.subject or "").strip()
+    subjects = {
+        item.id: item.name
+        for item in db.query(models.Subject).all()
+    }
+
+    eval_rows = db.query(models.StudentDocumentEvaluation).filter(
+        models.StudentDocumentEvaluation.user_id == user.id,
+    ).all()
+    for item in eval_rows:
+        subject_name = (subjects.get(item.subject_id) or "").strip()
         if not subject_name:
             continue
         key = _normalize(subject_name)
@@ -129,12 +136,27 @@ def _collect_subject_learning_map(db: Session, user: models.User) -> Dict[str, D
                 "tests": 0,
                 "lessons": 0,
                 "latest_score": None,
+                "_score_sum": 0.0,
+                "_score_count": 0,
             }
-        data[key]["tests"] += 1
-        if data[key]["latest_score"] is None:
-            data[key]["latest_score"] = float(item.score or 0)
-        if float(item.score or 0) >= 60 and (item.test_type in ["chapter", "session"]):
+
+        if "_score_sum" not in data[key]:
+            data[key]["_score_sum"] = 0.0
+            data[key]["_score_count"] = 0
+
+        data[key]["tests"] += int(item.attempts or 0)
+        if bool(item.is_completed):
             data[key]["lessons"] += 1
+        if int(item.attempts or 0) > 0:
+            data[key]["_score_sum"] += float(item.latest_score or 0.0)
+            data[key]["_score_count"] += 1
+
+    for item in data.values():
+        score_count = int(item.get("_score_count", 0) or 0)
+        if score_count > 0:
+            item["latest_score"] = float(item.get("_score_sum", 0.0) or 0.0) / score_count
+        item.pop("_score_sum", None)
+        item.pop("_score_count", None)
 
     return data
 
@@ -352,10 +374,13 @@ def _is_entry_message(message: str) -> bool:
 
 
 def _overall_latest_score(db: Session, user_id: int) -> Optional[float]:
-    histories = db.query(models.AssessmentHistory).filter(models.AssessmentHistory.user_id == user_id).order_by(models.AssessmentHistory.timestamp.desc()).limit(8).all()
-    if not histories:
+    rows = db.query(models.StudentDocumentEvaluation).filter(
+        models.StudentDocumentEvaluation.user_id == user_id,
+        models.StudentDocumentEvaluation.attempts > 0,
+    ).all()
+    if not rows:
         return None
-    scores = [float(item.score or 0) for item in histories]
+    scores = [float(item.latest_score or 0.0) for item in rows]
     return sum(scores) / len(scores) if scores else None
 
 
@@ -713,13 +738,15 @@ def _get_or_create_orbit_session(db: Session, user_id: int, class_id: Optional[i
 def _sync_learning_progress(db: Session, user_id: int):
     now = datetime.utcnow()
 
-    total_lessons = db.query(models.AssessmentHistory).filter(
-        models.AssessmentHistory.user_id == user_id,
-        models.AssessmentHistory.test_type.in_(["chapter", "session"]),
-        models.AssessmentHistory.score >= 60,
+    total_lessons = db.query(models.StudentDocumentEvaluation).filter(
+        models.StudentDocumentEvaluation.user_id == user_id,
+        models.StudentDocumentEvaluation.is_completed == True,
     ).count()
 
-    total_tests = db.query(models.AssessmentHistory).filter(models.AssessmentHistory.user_id == user_id).count()
+    total_tests = db.query(models.StudentDocumentScoreHistory).filter(
+        models.StudentDocumentScoreHistory.user_id == user_id,
+        models.StudentDocumentScoreHistory.test_type != "baseline",
+    ).count()
     total_study = sum(int(item.duration_minutes or 0) for item in db.query(models.StudySession).filter(models.StudySession.user_id == user_id).all())
     total_login_seconds = sum(int(item.duration_seconds or 0) for item in db.query(models.UserLoginSession).filter(models.UserLoginSession.user_id == user_id).all())
     total_login_minutes = int(total_login_seconds // 60)
@@ -752,23 +779,26 @@ def _build_progress_payload(db: Session, user_id: int) -> OrbitProgressResponse:
     week_start, _ = _week_bounds(now)
     month_start = _month_start(now)
 
-    lessons_total = db.query(models.AssessmentHistory).filter(
-        models.AssessmentHistory.user_id == user_id,
-        models.AssessmentHistory.test_type.in_(["chapter", "session"]),
-        models.AssessmentHistory.score >= 60,
+    lessons_total = db.query(models.StudentDocumentEvaluation).filter(
+        models.StudentDocumentEvaluation.user_id == user_id,
+        models.StudentDocumentEvaluation.is_completed == True,
     ).count()
-    lessons_week = db.query(models.AssessmentHistory).filter(
-        models.AssessmentHistory.user_id == user_id,
-        models.AssessmentHistory.test_type.in_(["chapter", "session"]),
-        models.AssessmentHistory.score >= 60,
-        models.AssessmentHistory.timestamp >= week_start,
-    ).count()
-    lessons_month = db.query(models.AssessmentHistory).filter(
-        models.AssessmentHistory.user_id == user_id,
-        models.AssessmentHistory.test_type.in_(["chapter", "session"]),
-        models.AssessmentHistory.score >= 60,
-        models.AssessmentHistory.timestamp >= month_start,
-    ).count()
+
+    lesson_attempts_week = db.query(models.StudentDocumentScoreHistory).filter(
+        models.StudentDocumentScoreHistory.user_id == user_id,
+        models.StudentDocumentScoreHistory.score >= 60,
+        models.StudentDocumentScoreHistory.test_type != "baseline",
+        models.StudentDocumentScoreHistory.tested_at >= week_start,
+    ).all()
+    lessons_week = len({item.document_id for item in lesson_attempts_week})
+
+    lesson_attempts_month = db.query(models.StudentDocumentScoreHistory).filter(
+        models.StudentDocumentScoreHistory.user_id == user_id,
+        models.StudentDocumentScoreHistory.score >= 60,
+        models.StudentDocumentScoreHistory.test_type != "baseline",
+        models.StudentDocumentScoreHistory.tested_at >= month_start,
+    ).all()
+    lessons_month = len({item.document_id for item in lesson_attempts_month})
 
     study_total = sum(int(item.duration_minutes or 0) for item in db.query(models.StudySession).filter(models.StudySession.user_id == user_id).all())
     study_week = sum(int(item.duration_minutes or 0) for item in db.query(models.StudySession).filter(
@@ -796,14 +826,19 @@ def _build_progress_payload(db: Session, user_id: int) -> OrbitProgressResponse:
     study_week += login_week_minutes
     study_month += login_month_minutes
 
-    tests_total = db.query(models.AssessmentHistory).filter(models.AssessmentHistory.user_id == user_id).count()
-    tests_week = db.query(models.AssessmentHistory).filter(
-        models.AssessmentHistory.user_id == user_id,
-        models.AssessmentHistory.timestamp >= week_start,
+    tests_total = db.query(models.StudentDocumentScoreHistory).filter(
+        models.StudentDocumentScoreHistory.user_id == user_id,
+        models.StudentDocumentScoreHistory.test_type != "baseline",
     ).count()
-    tests_month = db.query(models.AssessmentHistory).filter(
-        models.AssessmentHistory.user_id == user_id,
-        models.AssessmentHistory.timestamp >= month_start,
+    tests_week = db.query(models.StudentDocumentScoreHistory).filter(
+        models.StudentDocumentScoreHistory.user_id == user_id,
+        models.StudentDocumentScoreHistory.test_type != "baseline",
+        models.StudentDocumentScoreHistory.tested_at >= week_start,
+    ).count()
+    tests_month = db.query(models.StudentDocumentScoreHistory).filter(
+        models.StudentDocumentScoreHistory.user_id == user_id,
+        models.StudentDocumentScoreHistory.test_type != "baseline",
+        models.StudentDocumentScoreHistory.tested_at >= month_start,
     ).count()
 
     orbit_questions_total = db.query(models.OrbitChatMessage).filter(

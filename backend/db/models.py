@@ -334,3 +334,18 @@ class StudentDocumentEvaluation(Base):
     last_test_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class StudentDocumentScoreHistory(Base):
+    __tablename__ = "student_document_score_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=False, index=True)
+    class_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True, index=True)
+    score = Column(Float, nullable=False, default=0.0)
+    test_type = Column(String, nullable=False, default="chapter")
+    total_questions = Column(Integer, nullable=True)
+    correct_count = Column(Integer, nullable=True)
+    tested_at = Column(DateTime, default=datetime.utcnow, index=True)

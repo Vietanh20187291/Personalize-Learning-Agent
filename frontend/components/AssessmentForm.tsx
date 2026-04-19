@@ -25,15 +25,30 @@ const SUBJECT_ICON_MAP: Record<string, string> = {
 const LABELS = ['A', 'B', 'C', 'D'];
 const STORAGE_KEY = 'quiz_auto_save_data';
 
+interface EnrolledClassInfo {
+  id: number;
+  name: string;
+  subject: string;
+}
+
+interface AssessmentDocumentItem {
+  id: number;
+  filename: string;
+  subject: string;
+  class_id: number;
+  class_name: string;
+}
+
 const AssessmentForm = () => {
   const [step, setStep] = useState<'select_subject' | 'quiz' | 'result'>('select_subject');
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
   const [subject, setSubject] = useState("");
   const [sessionTopic, setSessionTopic] = useState(""); 
   const [sessionNumber, setSessionNumber] = useState<number | null>(null);
   const [sourceFile, setSourceFile] = useState<string>('');
   
-  const [enrolledSubjects, setEnrolledSubjects] = useState<string[]>([]);
-  const [loadingSubjects, setLoadingSubjects] = useState(true);
+  const [availableDocuments, setAvailableDocuments] = useState<AssessmentDocumentItem[]>([]);
+  const [loadingContext, setLoadingContext] = useState(true);
 
   const [questions, setQuestions] = useState<any[]>([]);
   const [answers, setAnswers] = useState<{[key: number]: string}>({}); 
@@ -58,32 +73,61 @@ const AssessmentForm = () => {
   };
 
   useEffect(() => {
-    const fetchEnrolledClasses = async () => {
+    const fetchStudentContext = async () => {
       const userId = getUserId();
       if (!userId) {
-        setLoadingSubjects(false);
+        setLoadingContext(false);
         return;
       }
       try {
-        const res = await axios.get(`http://localhost:8000/api/auth/me/${userId}`);
-        const classes = res.data.enrolled_classes || [];
-        const subjects = Array.from(new Set(classes.map((c: any) => c.subject))) as string[];
-        setEnrolledSubjects(subjects);
+        const res = await axios.get(`${apiBaseUrl}/api/auth/me/${userId}`);
+        const classes = (res.data.enrolled_classes || []) as EnrolledClassInfo[];
+
+        const classDocumentResponses = await Promise.all(
+          classes.map(async (classInfo) => {
+            const docsRes = await axios.get(`${apiBaseUrl}/api/documents/class-documents/${classInfo.id}`);
+            return {
+              classInfo,
+              docs: Array.isArray(docsRes.data) ? docsRes.data : [],
+            };
+          })
+        );
+
+        const deduped = new Map<string, AssessmentDocumentItem>();
+        classDocumentResponses.forEach(({ classInfo, docs }) => {
+          docs.forEach((doc: any) => {
+            const filename = String(doc.title || doc.filename || '').trim();
+            if (!filename) return;
+
+            const key = `${classInfo.subject}::${classInfo.id}::${filename}`;
+            if (!deduped.has(key)) {
+              deduped.set(key, {
+                id: Number(doc.id),
+                filename,
+                subject: classInfo.subject,
+                class_id: classInfo.id,
+                class_name: classInfo.name,
+              });
+            }
+          });
+        });
+
+        setAvailableDocuments(Array.from(deduped.values()));
       } catch (error) {
         console.error("Lỗi lấy thông tin lớp:", error);
       } finally {
-        setLoadingSubjects(false);
+        setLoadingContext(false);
       }
     };
     
-    fetchEnrolledClasses();
-  }, []);
+    fetchStudentContext();
+  }, [apiBaseUrl]);
 
   const fetchRoadmap = async (selectedSub: string) => {
     const userId = getUserId();
     if (!userId) return;
     try {
-      const res = await axios.get(`http://localhost:8000/api/assessment/roadmap/${selectedSub}?user_id=${userId}`);
+      const res = await axios.get(`${apiBaseUrl}/api/assessment/roadmap/${selectedSub}?user_id=${userId}`);
       if (res.data.has_roadmap) {
         setRoadmap(res.data);
       }
@@ -107,6 +151,17 @@ const AssessmentForm = () => {
       }
     }
 
+    if (urlSubject && urlSourceFile && step === 'select_subject') {
+      handleStartDocumentQuiz(
+        urlSubject,
+        urlSourceFile,
+        urlTopic || urlSourceFile,
+        urlLevel || 'Intermediate',
+        urlSession || undefined,
+      );
+      return;
+    }
+
     if (urlSubject && urlTopic && urlLevel && step === 'select_subject') {
       handleStartSessionQuiz(urlSubject, urlTopic, urlLevel, urlSession || undefined, urlSourceFile || undefined);
     }
@@ -126,6 +181,7 @@ const AssessmentForm = () => {
         } else if (parsed.step === 'quiz' && parsed.questions?.length > 0) {
           setSubject(parsed.subject);
           setSessionTopic(parsed.sessionTopic || "");
+          setSourceFile(parsed.sourceFile || '');
           setQuestions(parsed.questions);
           setAnswers(parsed.answers || {});
           setTimer(parsed.timer || 0);
@@ -144,6 +200,7 @@ const AssessmentForm = () => {
         step: 'quiz', 
         subject,
         sessionTopic,
+        sourceFile,
         questions, 
         answers, 
         timer, 
@@ -151,7 +208,7 @@ const AssessmentForm = () => {
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(dataToSave));
     }
-  }, [step, subject, sessionTopic, questions, answers, timer]);
+  }, [step, subject, sessionTopic, sourceFile, questions, answers, timer]);
 
   useEffect(() => {
     let interval: any;
@@ -211,13 +268,30 @@ const AssessmentForm = () => {
     }
   };
 
-  const handleSelectSubject = async (selectedSub: string) => {
+  const handleStartDocumentQuiz = async (
+    docSubject: string,
+    docFilename: string,
+    topic?: string,
+    level?: string,
+    urlSession?: string,
+  ) => {
     const userId = getUserId();
-    if (!userId) { toast.error("Vui lòng đăng nhập lại."); return; }
+    if (!userId) {
+      toast.error("Vui lòng đăng nhập lại.");
+      return;
+    }
 
-    setSubject(selectedSub);
-    setSessionTopic(""); // Đảm bảo tuyệt đối topic trống cho bài Đánh giá
     setSessionNumber(null);
+    if (urlSession) {
+      const parsedSession = Number(urlSession);
+      if (!Number.isNaN(parsedSession) && parsedSession > 0) {
+        setSessionNumber(parsedSession);
+      }
+    }
+
+    setSubject(docSubject);
+    setSourceFile(docFilename);
+    setSessionTopic((topic || docFilename || '').trim());
     setLoading(true);
     setAnswers({});
     setTimer(0);
@@ -228,21 +302,30 @@ const AssessmentForm = () => {
     localStorage.removeItem(STORAGE_KEY);
 
     try {
-      const res = await axios.post("http://localhost:8000/api/assessment/generate", { 
-        subject: selectedSub,
-        user_id: userId 
+      const res = await axios.post(`${apiBaseUrl}/api/assessment/generate-chapter-quiz`, {
+        subject: docSubject,
+        user_id: userId,
+        session_topic: topic || docFilename,
+        level: level || 'Intermediate',
+        source_file: docFilename,
       });
+
       if (res.data.questions && res.data.questions.length > 0) {
         setQuestions(res.data.questions);
         setStep('quiz');
         toast.dismiss();
-        toast.success(`Khởi tạo bài kiểm tra đánh giá năng lực môn ${selectedSub}`);
+        toast.success(`Khởi tạo bài kiểm tra theo tài liệu: ${docFilename}`);
       }
     } catch (error: any) {
       toast.error(getCleanErrorMessage(error));
+      setStep('select_subject');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSelectDocument = async (doc: AssessmentDocumentItem) => {
+    await handleStartDocumentQuiz(doc.subject, doc.filename, doc.filename, 'Intermediate');
   };
 
   const handleStartSessionQuiz = async (urlSubject: string, urlTopic: string, urlLevel: string, urlSession?: string, urlSourceFile?: string) => {
@@ -270,7 +353,7 @@ const AssessmentForm = () => {
     localStorage.removeItem(STORAGE_KEY);
 
     try {
-      const res = await axios.post("http://localhost:8000/api/assessment/generate-session", { 
+      const res = await axios.post(`${apiBaseUrl}/api/assessment/generate-session`, {
         subject: urlSubject,
         user_id: userId,
         session_topic: urlTopic,
@@ -297,17 +380,17 @@ const AssessmentForm = () => {
     if (!userId) return;
     setLoading(true);
     
-
     const hasTopic = Boolean(sessionTopic && typeof sessionTopic === 'string' && sessionTopic.trim() !== "" && sessionTopic !== "null" && sessionTopic !== "undefined");
+    const isDocumentQuiz = Boolean(sourceFile && sourceFile.trim() !== '');
 
-    let testType = "baseline"; 
-    if (hasTopic) {
-        const topicLower = sessionTopic.toLowerCase();
-        if (topicLower.includes("cuối khóa") || topicLower.includes("tổng kết") || topicLower.includes("final")) {
-            testType = "final";
-        } else {
-            testType = "chapter";
-        }
+    let testType = "baseline";
+    if (isDocumentQuiz || hasTopic) {
+      const topicLower = (sessionTopic || sourceFile || '').toLowerCase();
+      if (topicLower.includes("cuối khóa") || topicLower.includes("tổng kết") || topicLower.includes("final")) {
+        testType = "final";
+      } else {
+        testType = "chapter";
+      }
     }
 
     const submissionData = {
@@ -318,15 +401,15 @@ const AssessmentForm = () => {
         selected_option: opt
       })),
       duration_seconds: timer,
-      is_session_quiz: hasTopic,
+      is_session_quiz: hasTopic || isDocumentQuiz,
       test_type: testType,
-      session_topic: hasTopic ? sessionTopic : null,
-      session_number: hasTopic ? sessionNumber : null,
-      source_file: hasTopic ? sourceFile || null : null,
+      session_topic: hasTopic || isDocumentQuiz ? (sessionTopic || sourceFile || null) : null,
+      session_number: hasTopic || isDocumentQuiz ? sessionNumber : null,
+      source_file: isDocumentQuiz ? sourceFile || null : null,
     };
 
     try {
-      const res = await axios.post("http://localhost:8000/api/assessment/submit", submissionData);
+      const res = await axios.post(`${apiBaseUrl}/api/assessment/submit`, submissionData);
       setResultData(res.data);
       // Fetch lại roadmap để xem đã Tốt nghiệp hay đã Thăng cấp chưa
       await fetchRoadmap(subject); 
@@ -363,10 +446,9 @@ const AssessmentForm = () => {
   const progressVal = Number(roadmap?.progress_percent);
   const displayProgress = isNaN(progressVal) ? 0 : Math.round(progressVal);
 
-  const displaySubjects = enrolledSubjects.map((subjectName, idx) => ({
-    id: idx + 1,
-    name: subjectName,
-    icon: SUBJECT_ICON_MAP[subjectName] || "📘",
+  const displayDocuments = availableDocuments.map((doc) => ({
+    ...doc,
+    icon: SUBJECT_ICON_MAP[doc.subject] || "📘",
   }));
   
   const isRealSessionTopic = sessionTopic && sessionTopic !== "null" && sessionTopic !== "undefined" && sessionTopic.trim() !== "";
@@ -378,16 +460,16 @@ const AssessmentForm = () => {
         <div className="max-w-5xl mx-auto p-4 text-center">
           <h2 className="text-2xl font-black text-gray-800 mb-8 uppercase tracking-tighter">Hệ thống học tập thích ứng</h2>
           
-          {loading || loadingSubjects ? (
+          {loading || loadingContext ? (
             <div className="flex flex-col items-center justify-center py-20">
               <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
               <p className="text-blue-600 font-bold animate-pulse">Đang tải dữ liệu lớp học...</p>
             </div>
-          ) : enrolledSubjects.length === 0 ? (
+          ) : displayDocuments.length === 0 ? (
             <div className="hero-panel flex flex-col items-center justify-center py-20 border border-dashed border-slate-300 max-w-2xl mx-auto">
               <LockKeyhole className="w-16 h-16 text-gray-300 mb-4" />
-              <h3 className="text-lg font-black text-gray-600 uppercase mb-2">Chưa có môn học nào được mở khóa</h3>
-              <p className="text-sm text-gray-500 mb-6 max-w-md">Bạn cần tham gia một lớp học từ Giáo viên để kích hoạt ngân hàng câu hỏi và thực hiện bài đánh giá năng lực.</p>
+              <h3 className="text-lg font-black text-gray-600 uppercase mb-2">Chưa có tài liệu nào khả dụng</h3>
+              <p className="text-sm text-gray-500 mb-6 max-w-md">Bạn cần tham gia lớp học và có tài liệu trước khi làm kiểm tra theo tài liệu.</p>
               <button 
                 onClick={() => window.location.href = '/adaptive'} 
                 className="px-6 py-3 bg-blue-600 text-white rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-blue-700 transition-all shadow-lg shadow-blue-200"
@@ -396,15 +478,22 @@ const AssessmentForm = () => {
               </button>
             </div>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4 animate-in fade-in zoom-in duration-500">
-              {displaySubjects.map((sub) => (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 animate-in fade-in zoom-in duration-500">
+              {displayDocuments.map((doc) => (
                 <button 
-                  key={sub.id} onClick={() => handleSelectSubject(sub.name)}
-                  className="group flex flex-col items-center p-5 bg-white border border-gray-100 rounded-2xl shadow-sm hover:border-blue-500 hover:bg-blue-50 transition-all hover:-translate-y-1 relative overflow-hidden"
+                  key={`${doc.class_id}-${doc.filename}-${doc.id}`}
+                  onClick={() => handleSelectDocument(doc)}
+                  className="group flex flex-col items-start p-5 bg-white border border-gray-100 rounded-2xl shadow-sm hover:border-blue-500 hover:bg-blue-50 transition-all hover:-translate-y-1 relative overflow-hidden"
                 >
                   <span className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-blue-400 to-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity"></span>
-                  <span className="text-3xl mb-3">{sub.icon}</span>
-                  <span className="text-[10px] font-bold text-gray-600 uppercase group-hover:text-blue-600 leading-tight">{sub.name}</span>
+                  <span className="text-3xl mb-3">{doc.icon}</span>
+                  <span className="text-[11px] font-black text-gray-700 group-hover:text-blue-700 leading-tight text-left w-full truncate">
+                    {doc.filename}
+                  </span>
+                  <span className="mt-2 text-[10px] font-bold text-gray-500 uppercase group-hover:text-blue-600 text-left">
+                    {doc.subject}
+                  </span>
+                  <span className="mt-1 text-[10px] text-gray-400 text-left truncate w-full">Lớp: {doc.class_name}</span>
                 </button>
               ))}
             </div>
@@ -500,7 +589,7 @@ const AssessmentForm = () => {
                       <button onClick={() => {
                         window.history.replaceState(null, "", window.location.pathname);
                         setStep('select_subject');
-                      }} className="flex-1 py-3 bg-white text-gray-500 border border-gray-200 rounded-xl font-bold text-xs uppercase hover:bg-gray-50 transition-all">Môn học khác</button>
+                      }} className="flex-1 py-3 bg-white text-gray-500 border border-gray-200 rounded-xl font-bold text-xs uppercase hover:bg-gray-50 transition-all">Tài liệu khác</button>
                   </div>
                 </div>
             </div>

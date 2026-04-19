@@ -25,19 +25,27 @@ class OrbitAgent:
         return int(sum(int(item.duration_minutes or 0) for item in query.all()))
 
     def _count_tests(self, user_id: int, since: Optional[datetime] = None) -> int:
-        query = self.db.query(models.AssessmentHistory).filter(models.AssessmentHistory.user_id == user_id)
+        query = self.db.query(models.StudentDocumentScoreHistory).filter(
+            models.StudentDocumentScoreHistory.user_id == user_id,
+            models.StudentDocumentScoreHistory.test_type != "baseline",
+        )
         if since is not None:
-            query = query.filter(models.AssessmentHistory.timestamp >= since)
+            query = query.filter(models.StudentDocumentScoreHistory.tested_at >= since)
         return int(query.count())
 
     def _count_passed_lessons(self, user_id: int, since: Optional[datetime] = None) -> int:
-        query = self.db.query(models.AssessmentHistory).filter(
-            models.AssessmentHistory.user_id == user_id,
-            models.AssessmentHistory.test_type.in_(["chapter", "session"]),
-            models.AssessmentHistory.score >= 60,
+        query = self.db.query(models.StudentDocumentEvaluation).filter(
+            models.StudentDocumentEvaluation.user_id == user_id,
+            models.StudentDocumentEvaluation.is_completed == True,
         )
         if since is not None:
-            query = query.filter(models.AssessmentHistory.timestamp >= since)
+            attempts = self.db.query(models.StudentDocumentScoreHistory).filter(
+                models.StudentDocumentScoreHistory.user_id == user_id,
+                models.StudentDocumentScoreHistory.score >= 60,
+                models.StudentDocumentScoreHistory.test_type != "baseline",
+                models.StudentDocumentScoreHistory.tested_at >= since,
+            ).all()
+            return int(len({item.document_id for item in attempts}))
         return int(query.count())
 
     def _agent_chat_stats(self, user_id: int, since: Optional[datetime] = None) -> Tuple[int, int]:
@@ -68,11 +76,12 @@ class OrbitAgent:
         if last_study:
             candidates.append(last_study.start_time)
 
-        last_test = self.db.query(models.AssessmentHistory).filter(
-            models.AssessmentHistory.user_id == user_id
-        ).order_by(models.AssessmentHistory.timestamp.desc()).first()
+        last_test = self.db.query(models.StudentDocumentScoreHistory).filter(
+            models.StudentDocumentScoreHistory.user_id == user_id,
+            models.StudentDocumentScoreHistory.test_type != "baseline",
+        ).order_by(models.StudentDocumentScoreHistory.tested_at.desc()).first()
         if last_test:
-            candidates.append(last_test.timestamp)
+            candidates.append(last_test.tested_at)
 
         last_chat = self.db.query(models.OrbitChatMessage).filter(
             models.OrbitChatMessage.user_id == user_id,

@@ -6,6 +6,7 @@ from db.database import get_db
 from db import models
 from pydantic import BaseModel
 from typing import List, Optional
+from services.score_metrics import compute_subject_score_metrics
 
 router = APIRouter()
 
@@ -262,9 +263,7 @@ def get_class_members(class_id: int, db: Session = Depends(get_db)):
     result = []
     
     # --- CẤU HÌNH CHUẨN ĐỂ ĐO LƯỜNG NỖ LỰC ---
-    # Giả định: Một môn học cần khoảng 600 phút (10 tiếng) để hoàn thành và có khoảng 5 bài test
-    EXPECTED_STUDY_MINUTES = 600 
-    EXPECTED_TESTS = 5 
+    EXPECTED_LOGIN_MINUTES = 600
     
     for m in classroom.students:
         if m.role == "student":
@@ -272,74 +271,26 @@ def get_class_members(class_id: int, db: Session = Depends(get_db)):
             # 🧠 EVALUATION AGENT LOGIC (TRUY VẤN TỪ DATABASE THẬT)
             # -------------------------------------------------------------
             
+            metrics = compute_subject_score_metrics(
+                db=db,
+                user_id=m.id,
+                subject_id=subject_id,
+                class_id=class_id,
+            )
+
             # --- 1. TEST SCORE (Trọng số 50%) ---
-            # Lấy các bài kiểm tra qua từng chương (dùng subject_id)
-            chapter_tests = db.query(models.AssessmentHistory).filter(
-                models.AssessmentHistory.user_id == m.id,
-                models.AssessmentHistory.subject_id == subject_id,
-                models.AssessmentHistory.test_type == 'chapter'
-            ).all()
-            avg_chapter = sum([t.score for t in chapter_tests]) / len(chapter_tests) if chapter_tests else 0
-            
-            # Lấy bài kiểm tra cuối kỳ (mới nhất)
-            final_test = db.query(models.AssessmentHistory).filter(
-                models.AssessmentHistory.user_id == m.id,
-                models.AssessmentHistory.subject_id == subject_id,
-                models.AssessmentHistory.test_type == 'final'
-            ).order_by(models.AssessmentHistory.timestamp.desc()).first()
-            final_test_score = final_test.score if final_test else 0
-            
-            # Tính điểm Test: 40% quá trình + 60% cuối kỳ (Nếu chưa thi cuối kỳ thì tính 100% quá trình)
-            if final_test_score > 0:
-                test_score = (avg_chapter * 0.4) + (final_test_score * 0.6)
-            else:
-                test_score = avg_chapter
+            test_score = float(metrics.get("test_score", 0.0) or 0.0)
 
             # --- 2. EFFORT SCORE (Trọng số 30%) ---
-            # Truy vấn tổng thời gian đã học (dùng subject_id)
-            sessions = db.query(models.StudySession).filter(
-                models.StudySession.user_id == m.id,
-                models.StudySession.subject_id == subject_id
-            ).all()
-            study_minutes = sum([s.duration_minutes for s in sessions if s.duration_minutes])
             login_seconds = sum(
                 int(item.duration_seconds or 0)
                 for item in db.query(models.UserLoginSession).filter(models.UserLoginSession.user_id == m.id).all()
             )
-            total_minutes = study_minutes + int(login_seconds // 60)
-            
-            # Tính tỷ lệ tương tác (tối đa 100%)
-            engagement_rate = min((total_minutes / EXPECTED_STUDY_MINUTES) * 100, 100) if EXPECTED_STUDY_MINUTES > 0 else 0
-            
-            # Tính tỷ lệ hoàn thành bài tập
-            total_tests_done = len(chapter_tests) + (1 if final_test else 0)
-            completion_rate = min((total_tests_done / EXPECTED_TESTS) * 100, 100) if EXPECTED_TESTS > 0 else 0
-            
-            # Effort Score = 50% hoàn thành + 50% tương tác
-            effort_score = (completion_rate * 0.5) + (engagement_rate * 0.5)
+            total_minutes = int(login_seconds // 60)
+            effort_score = min((total_minutes / EXPECTED_LOGIN_MINUTES) * 100, 100) if EXPECTED_LOGIN_MINUTES > 0 else 0
 
             # --- 3. PROGRESS SCORE (Trọng số 20%) ---
-            # Lấy điểm đánh giá đầu vào (Baseline test)
-            baseline_test = db.query(models.AssessmentHistory).filter(
-                models.AssessmentHistory.user_id == m.id,
-                models.AssessmentHistory.subject_id == subject_id,
-                models.AssessmentHistory.test_type == 'baseline'
-            ).order_by(models.AssessmentHistory.timestamp.asc()).first()
-            
-            # Nếu không có bài baseline, lấy tạm điểm thấp nhất hệ thống có để không bị lỗi
-            baseline_score = baseline_test.score if baseline_test else (test_score if test_score > 0 else 0)
-            
-            # Thuật toán Room for Improvement
-            room_for_improvement = 100 - baseline_score
-            if room_for_improvement <= 0:
-                progress_score = 100.0 # Nếu đầu vào đã 100 điểm thì tiến bộ luôn max
-            else:
-                current_best = final_test_score if final_test_score > 0 else avg_chapter
-                improvement = current_best - baseline_score
-                if improvement <= 0:
-                    progress_score = 0.0 # Không có tiến bộ hoặc thụt lùi
-                else:
-                    progress_score = min((improvement / room_for_improvement) * 100, 100)
+            progress_score = float(metrics.get("progress_score", 0.0) or 0.0)
 
             # --- 4. TÍNH FINAL SCORE ---
             test_score = round(test_score, 1)

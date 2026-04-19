@@ -46,6 +46,44 @@ def ensure_orbit_login_tracking_column():
         if "user_login_sessions" not in tables:
             models.Base.metadata.tables["user_login_sessions"].create(bind=engine, checkfirst=True)
             print("✅ Đã bổ sung bảng user_login_sessions")
+
+        # Backfill dữ liệu cũ: mỗi tài liệu đã có điểm sẽ có ít nhất 1 mốc trong bảng lịch sử điểm theo tài liệu.
+        if "student_document_score_history" in tables and "student_document_evaluations" in tables:
+            db = SessionLocal()
+            try:
+                existing = {
+                    (item.user_id, item.document_id)
+                    for item in db.query(models.StudentDocumentScoreHistory).all()
+                }
+                eval_rows = db.query(models.StudentDocumentEvaluation).filter(
+                    models.StudentDocumentEvaluation.attempts > 0,
+                ).all()
+
+                inserted = 0
+                for item in eval_rows:
+                    key = (item.user_id, item.document_id)
+                    if key in existing:
+                        continue
+
+                    db.add(models.StudentDocumentScoreHistory(
+                        user_id=item.user_id,
+                        document_id=item.document_id,
+                        subject_id=item.subject_id,
+                        class_id=item.class_id,
+                        score=float(item.latest_score or 0.0),
+                        test_type="session",
+                        tested_at=item.last_test_at or item.updated_at or item.created_at,
+                    ))
+                    inserted += 1
+
+                if inserted > 0:
+                    db.commit()
+                    print(f"✅ Đã backfill {inserted} dòng student_document_score_history từ dữ liệu cũ")
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
     except Exception as e:
         print(f"⚠️ Không thể kiểm tra/cập nhật cột last_login_at: {e}")
 

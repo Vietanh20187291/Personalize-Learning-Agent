@@ -62,7 +62,7 @@ interface InlineQuizResult {
 }
 
 export default function AdaptiveLearningPage() {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
   const [enrolledClasses, setEnrolledClasses] = useState<EnrolledClass[]>([]);
   const [selectedSubject, setSelectedSubject] = useState('');
 
@@ -443,7 +443,21 @@ export default function AdaptiveLearningPage() {
   }, [triggerInitialMessage, activeLessonContext]);
 
   const handleTakeTest = () => {
-    void startInlineQuiz();
+    const activeDoc = getActiveDocument();
+    if (!activeDoc || !selectedSubject) {
+      void startInlineQuiz();
+      return;
+    }
+
+    const params = new URLSearchParams({
+      subject: selectedSubject,
+      source_file: activeDoc.filename,
+      topic: activeLessonTopic || activeDoc.filename,
+      level: learnerLevel || 'Intermediate',
+      session: String(activeLessonNumber || currentSessionIndex || 1),
+    });
+
+    window.location.href = `/assessment?${params.toString()}`;
   };
 
   const startInlineQuiz = async () => {

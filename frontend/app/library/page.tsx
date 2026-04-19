@@ -15,7 +15,7 @@ export default function StudentLibraryPage() {
   const [selectedSubject, setSelectedSubject] = useState<string>("");
   const [searchTerm, setSearchTerm] = useState("");
 
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
   const orbitUserId = typeof window !== 'undefined'
     ? parseInt(localStorage.getItem('userId') || localStorage.getItem('user_id') || '0', 10)
     : 0;

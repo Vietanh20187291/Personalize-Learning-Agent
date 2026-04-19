@@ -49,7 +49,7 @@ interface StatCardProps {
 }
 
 export default function ClassMembersPage() {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
   const [members, setMembers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [classList, setClassList] = useState<any[]>([]);

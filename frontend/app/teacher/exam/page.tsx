@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 
 export default function ExamGeneratorPage() {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
   const [classList, setClassList] = useState<any[]>([]);
   const [selectedClassId, setSelectedClassId] = useState<number | "">("");
   const [subject, setSubject] = useState("");

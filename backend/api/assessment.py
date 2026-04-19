@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from db.database import get_db, engine, Base
-from db.models import LearnerProfile, QuestionBank, AssessmentHistory, StudentLearningProgress, StudentDocumentEvaluation, User, Document, LearningRoadmap, Classroom, Subject
+from db.models import LearnerProfile, QuestionBank, AssessmentHistory, StudentLearningProgress, StudentDocumentEvaluation, StudentDocumentScoreHistory, User, Document, LearningRoadmap, Classroom, Subject
 from pydantic import BaseModel
 from datetime import datetime
 from typing import List, Optional
@@ -13,6 +13,7 @@ from agents.assessment_agent import AssessmentAgent
 from agents.evaluation_agent import EvaluationAgent
 from agents.profiling_agent import ProfilingAgent
 from agents.adaptive_agent import AdaptiveAgent 
+from services.score_metrics import compute_subject_score_metrics
 
 router = APIRouter()
 
@@ -247,40 +248,61 @@ def generate_chapter_quiz(req: SessionQuizRequest, db: Session = Depends(get_db)
             "total_questions": 15
         }
     
-    # Chưa có 15 câu, gọi AI sinh đề chuyên sâu
+    # Chưa có đủ câu thì sinh thêm bằng API hiện có của AssessmentAgent.
     print(f"🚀 AI 70B đang sinh {15} câu chuyên sâu cho chương: {req.source_file}...")
-    
-    level = (req.level or "Intermediate").strip()
-    success = agent._generate_batch_safe(
+
+    result = agent.get_or_create_quiz(
         subject=req.subject,
-        level=level,
-        count=15,
-        allowed_files=[req.source_file]  # Chỉ lấy nội dung từ file này
+        user_id=req.user_id,
+        num_questions=15,
+        allowed_files=[req.source_file],
     )
-    
-    if not success:
-        raise HTTPException(status_code=500, detail="AI chưa chuẩn bị xong 15 câu cho chương này. Hãy thử lại!")
-    
-    # Lấy 15 câu vừa sinh
-    questions = db.query(QuestionBank).filter(
-        QuestionBank.subject == req.subject,
-        QuestionBank.source_file == req.source_file
-    ).order_by(func.random()).limit(15).all()
-    
-    result = []
-    for q in questions:
-        try:
-            parsed_options = json.loads(q.options) if isinstance(q.options, str) else q.options
-        except:
-            parsed_options = []
-        
-        result.append({
-            "id": q.id,
-            "content": q.content,
-            "options": parsed_options,
-            "correct_answer": q.correct_answer,
-            "explanation": q.explanation
-        })
+
+    if not result:
+        # Fallback an toàn: tạo bộ câu hỏi khung để không chặn luồng kiểm tra khi RAG tạm thời lỗi.
+        fallback_payload = [
+            ("Mục tiêu chính của tài liệu này là gì?", ["Nắm vững ý chính và khái niệm cốt lõi", "Học thuộc toàn bộ từng dòng", "Bỏ qua ví dụ", "Chỉ học phần mở đầu"], "A"),
+            ("Khi gặp một khái niệm mới trong tài liệu, bạn nên làm gì trước?", ["Đọc định nghĩa và ví dụ minh họa", "Bỏ qua vì khó", "Đoán ý nghĩa", "Chỉ xem đáp án"], "A"),
+            ("Cách học hiệu quả nhất với tài liệu chuyên môn là gì?", ["Chia nhỏ nội dung và học theo phiên ngắn", "Đọc một lần thật nhanh", "Chỉ học lý thuyết", "Không ghi chú"], "A"),
+            ("Trong quá trình đọc tài liệu, hoạt động nào giúp ghi nhớ tốt hơn?", ["Tự tóm tắt lại bằng ngôn ngữ của mình", "Đọc lướt", "Bỏ qua phần khó", "Học thuộc câu chữ"], "A"),
+            ("Khi làm bài tập theo tài liệu, bước nào nên thực hiện đầu tiên?", ["Xác định yêu cầu và dữ kiện", "Tìm đáp án trên mạng", "Bỏ qua đề bài", "Chọn ngẫu nhiên"], "A"),
+            ("Nếu kết quả làm bài chưa tốt, bạn nên làm gì?", ["Xem lại phần kiến thức liên quan trong tài liệu", "Dừng học luôn", "Đổi môn ngay", "Đoán lại đáp án"], "A"),
+            ("Đâu là cách kiểm tra mức độ hiểu nội dung tài liệu?", ["Giải thích lại khái niệm cho người khác", "Đọc tiêu đề", "Xem mục lục", "Chỉ chép lại"], "A"),
+            ("Khi ôn tập theo tài liệu, bạn nên ưu tiên phần nào?", ["Phần trọng tâm, có ví dụ và bài luyện", "Phần ít liên quan", "Chỉ học phần dễ", "Bỏ phần thực hành"], "A"),
+            ("Việc liên hệ kiến thức trong tài liệu với bài toán thực tế giúp gì?", ["Tăng khả năng vận dụng", "Giảm khả năng nhớ", "Không có tác dụng", "Gây nhiễu hoàn toàn"], "A"),
+            ("Khi gặp thuật ngữ khó, lựa chọn phù hợp nhất là gì?", ["Tra cứu và ghi chú ngắn gọn", "Bỏ qua hoàn toàn", "Đoán theo cảm tính", "Chỉ học đáp án"], "A"),
+            ("Đọc tài liệu theo chu kỳ lặp lại (spaced repetition) có lợi ích gì?", ["Củng cố trí nhớ dài hạn", "Làm giảm hiểu biết", "Không khác biệt", "Chỉ tốn thời gian"], "A"),
+            ("Một phiên tự học tốt theo tài liệu thường nên có gì?", ["Mục tiêu rõ ràng, thời lượng hợp lý, tổng kết ngắn", "Học không mục tiêu", "Không cần nghỉ", "Không cần kiểm tra lại"], "A"),
+            ("Khi trả lời câu hỏi từ tài liệu, yếu tố quan trọng nhất là gì?", ["Dựa trên nội dung và lập luận trong tài liệu", "Dựa vào cảm giác", "Sao chép ngẫu nhiên", "Trả lời càng dài càng tốt"], "A"),
+            ("Nếu có nhiều phần kiến thức liên quan nhau, nên học theo cách nào?", ["Lập sơ đồ liên kết giữa các phần", "Học rời rạc từng phần", "Bỏ qua mối liên hệ", "Chỉ học phần cuối"], "A"),
+            ("Dấu hiệu cho thấy bạn đã nắm chắc một chương trong tài liệu là gì?", ["Làm đúng phần lớn câu hỏi và giải thích được vì sao", "Chỉ nhớ tiêu đề", "Chỉ đọc xong một lần", "Không cần kiểm tra"], "A"),
+        ]
+
+        created = []
+        for idx, (content, options, correct) in enumerate(fallback_payload, start=1):
+            q = QuestionBank(
+                subject_id=target_class.subject_id,
+                subject=req.subject,
+                difficulty=(req.level or "Intermediate").strip(),
+                content=f"[{req.source_file}] Câu {idx}: {content}",
+                options=json.dumps(options, ensure_ascii=False),
+                correct_answer=correct,
+                explanation="Câu hỏi fallback do hệ thống tạo khi AI tạm thời không khả dụng.",
+                source_file=req.source_file,
+                is_used=False,
+            )
+            db.add(q)
+            db.flush()
+            created.append({
+                "id": q.id,
+                "content": q.content,
+                "options": options,
+                "correct_answer": q.correct_answer,
+                "explanation": q.explanation,
+            })
+
+        db.commit()
+        result = created
     
     return {
         "questions": result,
@@ -517,17 +539,19 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
         progress = StudentLearningProgress(user_id=req.user_id)
         db.add(progress)
 
-    total_tests_count = db.query(AssessmentHistory).filter(AssessmentHistory.user_id == req.user_id).count()
-    lessons_completed_count = db.query(AssessmentHistory).filter(
-        AssessmentHistory.user_id == req.user_id,
-        AssessmentHistory.test_type.in_(["chapter", "session"]),
-        AssessmentHistory.score >= 60,
+    total_tests_count = db.query(StudentDocumentScoreHistory).filter(
+        StudentDocumentScoreHistory.user_id == req.user_id,
+        StudentDocumentScoreHistory.test_type != "baseline",
+    ).count()
+    lessons_completed_count = db.query(StudentDocumentEvaluation).filter(
+        StudentDocumentEvaluation.user_id == req.user_id,
+        StudentDocumentEvaluation.is_completed == True,
     ).count()
     progress.tests_completed_total = int(total_tests_count)
     progress.lessons_completed_total = int(lessons_completed_count)
     progress.last_active_at = datetime.utcnow()
 
-    # Lưu đánh giá theo từng tài liệu để Orbit có thể gợi ý tài liệu yếu/chưa học.
+    # Lưu toàn bộ lần thi theo tài liệu để tính điểm môn theo các phần.
     if req.source_file and target_class:
         related_doc = db.query(Document).filter(
             Document.class_id == target_class.id,
@@ -556,6 +580,27 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
             doc_eval.latest_score = float(score_percent)
             doc_eval.is_completed = bool(score_percent >= 60.0)
             doc_eval.last_test_at = datetime.utcnow()
+
+            db.add(StudentDocumentScoreHistory(
+                user_id=req.user_id,
+                document_id=related_doc.id,
+                subject_id=related_doc.subject_id,
+                class_id=related_doc.class_id,
+                score=float(score_percent),
+                test_type=final_test_type,
+                total_questions=total_q,
+                correct_count=correct_count,
+                tested_at=datetime.utcnow(),
+            ))
+
+            refreshed = compute_subject_score_metrics(
+                db=db,
+                user_id=req.user_id,
+                subject_id=related_doc.subject_id,
+                class_id=related_doc.class_id,
+            )
+            if profile:
+                profile.avg_score = refreshed["test_score"]
 
     db.commit()
     
@@ -665,6 +710,46 @@ def save_quiz_result(req: SaveQuizResultRequest, db: Session = Depends(get_db)):
         timestamp=datetime.utcnow()
     )
     db.add(history)
+
+    # Đồng thời lưu theo từng tài liệu để dùng cho điểm môn theo tất cả phần.
+    related_doc = db.query(Document).filter(
+        Document.subject_id == subject_id,
+        Document.filename == req.source_file.strip(),
+    ).order_by(Document.upload_time.desc()).first()
+    if related_doc:
+        doc_eval = db.query(StudentDocumentEvaluation).filter(
+            StudentDocumentEvaluation.user_id == req.user_id,
+            StudentDocumentEvaluation.document_id == related_doc.id,
+        ).first()
+        if not doc_eval:
+            doc_eval = StudentDocumentEvaluation(
+                user_id=req.user_id,
+                document_id=related_doc.id,
+                subject_id=related_doc.subject_id,
+                class_id=related_doc.class_id,
+                latest_score=0.0,
+                attempts=0,
+                is_completed=False,
+            )
+            db.add(doc_eval)
+
+        doc_eval.attempts = int(doc_eval.attempts or 0) + 1
+        doc_eval.latest_score = float(score_percent)
+        doc_eval.is_completed = bool(score_percent >= 60.0)
+        doc_eval.last_test_at = datetime.utcnow()
+
+        db.add(StudentDocumentScoreHistory(
+            user_id=req.user_id,
+            document_id=related_doc.id,
+            subject_id=related_doc.subject_id,
+            class_id=related_doc.class_id,
+            score=float(score_percent),
+            test_type="session",
+            total_questions=total_q,
+            correct_count=correct_count,
+            tested_at=datetime.utcnow(),
+        ))
+
     db.commit()
     
     is_passed = correct_count >= 5  # Cần 5/15 để pass

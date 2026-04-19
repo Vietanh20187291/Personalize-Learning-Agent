@@ -30,7 +30,7 @@ interface SubjectItem {
 
 export default function TeacherPage() {
   const router = useRouter();
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8010';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
   
   const [refreshKey, setRefreshKey] = useState(0);
   const [classes, setClasses] = useState([]);
