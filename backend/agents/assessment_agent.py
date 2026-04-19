@@ -58,7 +58,11 @@ class AssessmentAgent:
                     self.provider = "ollama"
                     self.model = self.ollama_fallback_model
 
-        self.vector_store = get_vector_store()
+        try:
+            self.vector_store = get_vector_store()
+        except Exception as exc:
+            print(f"⚠️ AssessmentAgent fallback mode (vector store unavailable): {exc}")
+            self.vector_store = None
 
     def _chat_json(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int):
         if self.provider == "groq":
@@ -213,11 +217,18 @@ class AssessmentAgent:
         return True
 
     def _build_rag_context(self, subject: str, allowed_files=None):
+        if self.vector_store is None:
+            return ""
+
         query = f"Tổng hợp tất cả khái niệm cốt lõi và chương mục của môn {subject}"
 
         # Chroma thường lưu metadata source dạng đường dẫn (vd: temp_uploads/file.pdf)
         # trong khi allowed_files chỉ là tên file. Vì vậy cần lọc mềm theo basename.
-        docs = self.vector_store.similarity_search(query, k=120)
+        try:
+            docs = self.vector_store.similarity_search(query, k=120)
+        except Exception as exc:
+            print(f"⚠️ AssessmentAgent không truy xuất được RAG context: {exc}")
+            return ""
 
         if allowed_files:
             allowed_set = {self._clean_text(str(x)).lower() for x in allowed_files if self._clean_text(str(x))}
@@ -251,6 +262,34 @@ class AssessmentAgent:
         raw_context = "\n".join(lines)[:30000]
         return raw_context
 
+    def _is_academic_sentence(self, sentence: str, subject: str):
+        low = self._clean_text(sentence).lower()
+        if len(low) < 25:
+            return False
+
+        academic_blacklist = [
+            "phương pháp học", "cách học", "ôn tập", "đáp án", "trắc nghiệm",
+            "mục tiêu học", "mục tiêu môn học", "giảng viên", "giáo viên", "khoa", "bộ môn",
+            "lịch học", "học phần", "môn học", "hướng dẫn", "ghi chú", "tài liệu tham khảo",
+            "slide", "pdf", "docx", "ppt", "điểm danh", "email", "liên hệ",
+        ]
+        if any(token in low for token in academic_blacklist):
+            return False
+
+        if any(token in low for token in ["bài tập lớn", "bài tập về nhà", "phương pháp ôn", "cách làm bài", "mẹo làm bài"]):
+            return False
+
+        subject_low = self._clean_text(subject).lower()
+        if subject_low and subject_low in low:
+            return True
+
+        subject_keywords = self._subject_domain_keywords(subject)
+        tokens = {t.lower() for t in re.findall(r"[A-Za-zÀ-ỹ0-9]{2,}", low)}
+        if subject_keywords.intersection(tokens):
+            return True
+
+        return self._is_domain_consistent(low, subject)
+
     def _subject_domain_keywords(self, subject: str):
         subject_low = self._clean_text(subject).lower()
         base = {
@@ -265,6 +304,34 @@ class AssessmentAgent:
             "cơ sở dữ liệu": {
                 "sql", "schema", "table", "quan hệ", "ràng buộc", "truy vấn", "transaction",
                 "normalization", "khóa", "index", "database", "cơ sở dữ liệu",
+            },
+            "lưu trữ và phân tích dữ liệu": {
+                "lưu trữ", "phân tích", "dữ liệu", "khai phá", "kho dữ liệu", "truy vấn", "chuẩn hóa",
+                "biểu diễn", "xử lý", "mô hình", "bảng", "dataset",
+            },
+            "lập trình hướng đối tượng": {
+                "class", "object", "đối tượng", "lớp", "kế thừa", "đa hình", "đóng gói", "trừu tượng",
+                "constructor", "method", "property", "interface",
+            },
+            "cấu trúc dữ liệu và giải thuật": {
+                "mảng", "stack", "queue", "ngăn xếp", "hàng đợi", "cây", "đồ thị", "tìm kiếm",
+                "sắp xếp", "độ phức tạp", "thuật toán", "linked list", "hash", "heap",
+            },
+            "an toàn và bảo mật thông tin": {
+                "mã hóa", "xác thực", "phân quyền", "băm", "tấn công", "lỗ hổng", "chữ ký số",
+                "bảo mật", "an toàn", "kiểm soát truy cập", "cipher", "hash",
+            },
+            "quản trị công nghệ": {
+                "quản trị", "công nghệ", "chiến lược", "quy trình", "dự án", "nguồn lực", "vận hành",
+                "chuyển đổi số", "hệ thống", "tổ chức", "điều phối",
+            },
+            "toán rời rạc": {
+                "tập hợp", "quan hệ", "hàm", "logic", "mệnh đề", "đồ thị", "tổ hợp", "suy diễn",
+                "quy nạp", "vị từ", "hoán vị", "chỉnh hợp",
+            },
+            "xử lý dữ liệu đa phương tiện": {
+                "ảnh", "âm thanh", "video", "nén", "lọc", "pixel", "codec", "định dạng",
+                "độ phân giải", "bitrate", "màu sắc", "tín hiệu",
             },
             "mạng": {"tcp", "ip", "router", "switch", "protocol", "giao thức", "lan", "wan", "dns", "http", "https"},
             "lập trình": {"hàm", "biến", "mảng", "vòng lặp", "class", "object", "object-oriented", "thuật toán", "đệ quy"},
@@ -298,6 +365,64 @@ class AssessmentAgent:
                 "Giao dịch và tính ACID",
                 "Chỉ mục và tối ưu truy vấn",
                 "Ràng buộc toàn vẹn",
+            ],
+            "lưu trữ và phân tích dữ liệu": [
+                "Khái niệm lưu trữ dữ liệu",
+                "Mục tiêu của phân tích dữ liệu",
+                "Quy trình xử lý dữ liệu",
+                "Tổ chức và truy vấn dữ liệu",
+                "Tiền xử lý dữ liệu",
+                "Trực quan hóa dữ liệu",
+                "Khai phá dữ liệu",
+                "Kho dữ liệu",
+            ],
+            "lập trình hướng đối tượng": [
+                "Lớp và đối tượng",
+                "Đóng gói trong OOP",
+                "Kế thừa trong OOP",
+                "Đa hình trong OOP",
+                "Trừu tượng trong OOP",
+                "Constructor và destructor",
+            ],
+            "cấu trúc dữ liệu và giải thuật": [
+                "Mảng và danh sách liên kết",
+                "Ngăn xếp và hàng đợi",
+                "Cây nhị phân",
+                "Đồ thị và duyệt đồ thị",
+                "Sắp xếp và tìm kiếm",
+                "Độ phức tạp thuật toán",
+                "Băm và bảng băm",
+            ],
+            "an toàn và bảo mật thông tin": [
+                "Nguyên tắc an toàn thông tin",
+                "Mã hóa và giải mã",
+                "Xác thực và phân quyền",
+                "Hàm băm mật mã",
+                "Chữ ký số",
+                "Các mối đe dọa an ninh phổ biến",
+            ],
+            "quản trị công nghệ": [
+                "Chiến lược công nghệ",
+                "Quản lý nguồn lực công nghệ",
+                "Vận hành hệ thống",
+                "Quản trị dự án công nghệ",
+                "Chuyển đổi số trong tổ chức",
+            ],
+            "toán rời rạc": [
+                "Mệnh đề và logic",
+                "Tập hợp và quan hệ",
+                "Hàm và ánh xạ",
+                "Quy nạp toán học",
+                "Tổ hợp và hoán vị",
+                "Lý thuyết đồ thị",
+            ],
+            "xử lý dữ liệu đa phương tiện": [
+                "Biểu diễn ảnh số",
+                "Xử lý âm thanh số",
+                "Xử lý video số",
+                "Kỹ thuật nén dữ liệu",
+                "Lọc và biến đổi tín hiệu",
+                "Độ phân giải và bitrate",
             ],
             "mạng": [
                 "Mô hình OSI và TCP/IP",
@@ -377,6 +502,8 @@ class AssessmentAgent:
                     continue
                 if not re.search(r"[A-Za-zÀ-ỹ]", sentence):
                     continue
+                if not self._is_academic_sentence(sentence, subject):
+                    continue
 
                 tokens = {t.lower() for t in re.findall(r"[A-Za-zÀ-ỹ0-9]{2,}", sentence)}
                 domain_hints = {
@@ -450,6 +577,8 @@ class AssessmentAgent:
             if not re.search(r"[A-Za-zÀ-ỹ]", concept):
                 continue
             if any(k in concept.lower() for k in noise_concept_keywords):
+                continue
+            if not self._is_academic_sentence(concept, subject):
                 continue
             if not self._is_domain_consistent(concept, subject):
                 continue
@@ -539,6 +668,9 @@ class AssessmentAgent:
         subject = self._clean_text(subject)
         bloom_level = (bloom_level or "understand").lower()
 
+        if getattr(self, "_disable_llm_generation", False):
+            return self._generate_mcq_fallback(concept, subject, bloom_level)
+
         llm_q = self._generate_mcq_with_llm(concept, subject, bloom_level)
         if llm_q:
             return llm_q
@@ -627,6 +759,83 @@ Trả về JSON đúng schema:
                 0,
             ),
             (
+                ["lớp", "object", "đối tượng", "oop", "kế thừa", "đa hình", "đóng gói"],
+                "lập trình hướng đối tượng",
+                [
+                    "Lập trình hướng đối tượng tổ chức chương trình quanh lớp và đối tượng để mô hình hóa thực thể thực tế.",
+                    "Lập trình hướng đối tượng chỉ là kỹ thuật sắp xếp dữ liệu theo thứ tự thời gian xử lý.",
+                    "Lập trình hướng đối tượng là cơ chế truyền dữ liệu giữa các máy chủ qua mạng TCP.",
+                    "Lập trình hướng đối tượng bắt buộc mọi hàm phải viết dưới dạng đệ quy để tăng tốc.",
+                ],
+                0,
+            ),
+            (
+                ["mảng", "danh sách", "stack", "queue", "cây", "đồ thị", "thuật toán"],
+                "cấu trúc dữ liệu và giải thuật",
+                [
+                    "Mảng, danh sách liên kết, ngăn xếp, hàng đợi và đồ thị là các cấu trúc dữ liệu cơ bản.",
+                    "Cấu trúc dữ liệu chỉ dùng để lưu tệp đa phương tiện mà không ảnh hưởng đến xử lý thuật toán.",
+                    "Giải thuật chỉ là cách đặt tên biến trong chương trình mà không liên quan đến độ phức tạp.",
+                    "Cây nhị phân là một giao thức mạng dùng để định tuyến dữ liệu giữa các nút.",
+                ],
+                0,
+            ),
+            (
+                ["lưu trữ", "phân tích", "dữ liệu", "kho dữ liệu", "khai phá"],
+                "lưu trữ và phân tích dữ liệu",
+                [
+                    "Lưu trữ và phân tích dữ liệu nhấn mạnh việc tổ chức dữ liệu, truy vấn và rút ra tri thức hữu ích.",
+                    "Lưu trữ dữ liệu chỉ là lưu văn bản hướng dẫn học tập của giảng viên.",
+                    "Phân tích dữ liệu là thao tác viết lại tài liệu theo ngôn ngữ đơn giản mà không cần dữ liệu.",
+                    "Kho dữ liệu là một kiểu cáp mạng dùng để kết nối máy chủ với thiết bị ngoại vi.",
+                ],
+                0,
+            ),
+            (
+                ["bảo mật", "an toàn", "mã hóa", "xác thực", "phân quyền", "hash"],
+                "an toàn và bảo mật thông tin",
+                [
+                    "An toàn thông tin bao gồm xác thực, phân quyền, mã hóa và kiểm soát truy cập.",
+                    "An toàn thông tin chỉ là đặt mật khẩu dài hơn cho mọi tệp PDF.",
+                    "Mã hóa là cách tăng dung lượng ổ cứng để lưu dữ liệu lâu hơn.",
+                    "Phân quyền nghĩa là cho mọi người dùng toàn bộ quyền truy cập như nhau.",
+                ],
+                0,
+            ),
+            (
+                ["quản trị", "công nghệ", "chuyển đổi số", "dự án", "vận hành"],
+                "quản trị công nghệ",
+                [
+                    "Quản trị công nghệ tập trung vào chiến lược, nguồn lực, quy trình và vận hành hệ thống.",
+                    "Quản trị công nghệ là cách viết code theo phong cách nhiều màu sắc nhất có thể.",
+                    "Chuyển đổi số chỉ là đổi tên tài liệu sang tiếng Anh.",
+                    "Vận hành hệ thống không liên quan đến con người, quy trình hay tài nguyên.",
+                ],
+                0,
+            ),
+            (
+                ["logic", "mệnh đề", "tập hợp", "quan hệ", "đồ thị", "quy nạp"],
+                "toán rời rạc",
+                [
+                    "Toán rời rạc nghiên cứu mệnh đề, tập hợp, quan hệ, đồ thị và các cấu trúc rời rạc khác.",
+                    "Toán rời rạc chủ yếu là phép tính liên tục trên đạo hàm và tích phân.",
+                    "Lý thuyết đồ thị là kỹ thuật nén ảnh trong đa phương tiện.",
+                    "Quy nạp toán học chỉ áp dụng cho lưu trữ tệp văn bản.",
+                ],
+                0,
+            ),
+            (
+                ["ảnh", "âm thanh", "video", "nén", "pixel", "codec"],
+                "xử lý dữ liệu đa phương tiện",
+                [
+                    "Xử lý dữ liệu đa phương tiện gồm biểu diễn, nén, lọc và biến đổi ảnh, âm thanh, video.",
+                    "Xử lý đa phương tiện chỉ là chỉnh sửa tên file cho ngắn hơn.",
+                    "Pixel là một kiểu cấu trúc dữ liệu để lưu bảng băm.",
+                    "Codec chỉ dùng để phân quyền truy cập tài liệu trong lớp học.",
+                ],
+                0,
+            ),
+            (
                 ["deadlock", "bế tắc"],
                 "bế tắc",
                 [
@@ -676,7 +885,8 @@ Trả về JSON đúng schema:
             correct_idx = 0
         else:
             topic, opts, correct_idx = selected
-            q_text = stem.format(topic=topic, subject=subject)
+            question_topic = concept if self._clean_text(topic).lower() == self._clean_text(subject).lower() else topic
+            q_text = stem.format(topic=question_topic, subject=subject)
 
         labels = ["A", "B", "C", "D"]
         q = {
@@ -842,29 +1052,114 @@ Trả về JSON đúng schema:
     def get_or_create_quiz(self, subject: str, user_id: int, num_questions: int = 20, allowed_files=None):
         self._resolve_subject_id(subject)
 
-        # Nếu đã có thì lấy random
+        # Student flow chỉ đọc câu hỏi đã được sinh sẵn trong DB.
         existing_query = self.db.query(QuestionBank).filter(QuestionBank.subject == subject)
         if allowed_files:
             existing_query = existing_query.filter(QuestionBank.source_file.in_(allowed_files))
         existing = existing_query.all()
 
-        if len(existing) >= num_questions:
-            random.shuffle(existing)
-            return self._format(existing[:num_questions])
+        if not existing:
+            return []
 
-        # Nếu chưa đủ → generate mới
-        needed = num_questions - len(existing)
-        print(f"🚀 Generating {needed} questions for subject: {subject}")
+        random.shuffle(existing)
+        return self._format(existing[:num_questions])
 
-        self._generate_from_rag_concepts(subject, needed, allowed_files=allowed_files)
+    def pre_generate_questions_for_document(self, subject: str, source_file: str, count: int = 20, force_refresh: bool = True):
+        subject = self._clean_text(subject)
+        source_file = self._clean_text(source_file)
+        if not subject or not source_file:
+            return []
 
-        questions_query = self.db.query(QuestionBank).filter(QuestionBank.subject == subject)
-        if allowed_files:
-            questions_query = questions_query.filter(QuestionBank.source_file.in_(allowed_files))
-        questions = questions_query.all()
+        subject_id = self._resolve_subject_id(subject)
+        self._active_subject = subject
 
-        random.shuffle(questions)
-        return self._format(questions[:num_questions])
+        if force_refresh:
+            self.db.query(QuestionBank).filter(
+                QuestionBank.subject == subject,
+                QuestionBank.source_file == source_file,
+            ).delete(synchronize_session=False)
+            self.db.commit()
+
+        previous_llm_flag = getattr(self, "_disable_llm_generation", False)
+        self._disable_llm_generation = True
+
+        try:
+            concepts = []
+            try:
+                rag_context = self._build_rag_context(subject, allowed_files=[source_file])
+                docs = [type("Doc", (), {"page_content": rag_context})()]
+                clean_texts = self.clean_rag(docs)
+                concepts = self.extract_concepts(clean_texts, subject)
+            except Exception as exc:
+                print(f"⚠️ Pre-generate fallback for {source_file}: {exc}")
+
+            if not concepts:
+                concepts = self._fallback_concepts_for_subject(subject, limit=max(8, count))
+
+            generated = self.generate_questions_from_concepts(concepts, count)
+            if not generated:
+                generated = self.generate_questions_from_concepts(
+                    self._fallback_concepts_for_subject(subject, limit=max(8, count)),
+                    count,
+                )
+
+            if len(generated) < count:
+                supplemental_concepts = self._fallback_concepts_for_subject(subject, limit=max(count * 2, 16))
+                supplemental = self.generate_questions_from_concepts(
+                    supplemental_concepts,
+                    count - len(generated),
+                )
+                combined = []
+                seen_questions = set()
+                for mcq in generated + supplemental:
+                    question_text = self._clean_text(mcq.get("question", ""))
+                    if not question_text:
+                        continue
+                    question_key = question_text.lower()
+                    if question_key in seen_questions:
+                        continue
+                    seen_questions.add(question_key)
+                    combined.append(mcq)
+                generated = combined[:count]
+
+            saved_questions = []
+            seen = set()
+            for mcq in generated:
+                q = self._clean_text(mcq.get("question", ""))
+                if not q or q.lower() in seen:
+                    continue
+                seen.add(q.lower())
+
+                final_opts = mcq.get("options", [])
+                ans = mcq.get("correct_answer", "A")
+                bloom_level = mcq.get("bloom_level", "understand")
+                exp = f"[bloom:{bloom_level}] {mcq.get('explanation', '')}"
+
+                db_q = QuestionBank(
+                    subject_id=subject_id,
+                    subject=subject,
+                    difficulty="Basic",
+                    content=q,
+                    options=json.dumps(final_opts, ensure_ascii=False),
+                    correct_answer=ans,
+                    explanation=exp,
+                    is_used=False,
+                    source_file=source_file,
+                )
+                self.db.add(db_q)
+                self.db.flush()
+                saved_questions.append({
+                    "id": db_q.id,
+                    "content": db_q.content,
+                    "options": final_opts,
+                    "correct_answer": db_q.correct_answer,
+                    "explanation": mcq.get("explanation", ""),
+                })
+
+            self.db.commit()
+            return saved_questions
+        finally:
+            self._disable_llm_generation = previous_llm_flag
 
     # ========================
     # FORMAT OUTPUT

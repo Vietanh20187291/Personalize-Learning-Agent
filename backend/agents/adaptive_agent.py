@@ -30,8 +30,13 @@ class AdaptiveAgent:
             self.client = None
         self.model = "llama-3.3-70b-versatile"
         
-        # Kết nối tới Vector Database (ChromaDB)
-        self.vector_store = get_vector_store()
+        # Kết nối tới Vector Database (ChromaDB). Nếu embedding lỗi tạm thời,
+        # agent vẫn chạy ở chế độ fallback để không làm gián đoạn trải nghiệm học.
+        try:
+            self.vector_store = get_vector_store()
+        except Exception as exc:
+            print(f"⚠️ AdaptiveAgent fallback mode (vector store unavailable): {exc}")
+            self.vector_store = None
 
     def _resolve_subject(self, subject: str) -> Subject:
         subject_name = (subject or "").strip()
@@ -170,6 +175,9 @@ class AdaptiveAgent:
         return None
 
     def _collect_rag_text(self, subject: str, source_file: str = "", allowed_filenames: list = None, document_id: Optional[int] = None):
+        if self.vector_store is None:
+            return ""
+
         search_filter = {"subject": {"$eq": subject}}
         if allowed_filenames:
             search_filter = {"$and": [{"subject": {"$eq": subject}}, {"source": {"$in": allowed_filenames}}]}
@@ -431,8 +439,14 @@ NỘI DUNG ĐÃ LÀM SẠCH:
         MATERIAL_BRIEF_CACHE[cache_key] = brief
         return brief
 
-    def summarize_material(self, subject: str, source_file: str, session_topic: str = "", allowed_filenames: list = None):
-        brief = self._get_material_brief(subject, source_file=source_file, allowed_filenames=allowed_filenames, session_topic=session_topic)
+    def summarize_material(self, subject: str, source_file: str, session_topic: str = "", allowed_filenames: list = None, document_id: Optional[int] = None):
+        brief = self._get_material_brief(
+            subject,
+            source_file=source_file,
+            allowed_filenames=allowed_filenames,
+            session_topic=session_topic,
+            document_id=document_id,
+        )
         result = dict(brief)
         result["suggested_prompts"] = brief.get("suggested_prompts") or [
             "Từ tài liệu này, phần nào dễ nhầm nhất?",
@@ -457,7 +471,7 @@ NỘI DUNG ĐÃ LÀM SẠCH:
             current_level = profile.current_level if profile else "Beginner"
 
         context_summary = ""
-        if allowed_filenames:
+        if allowed_filenames and self.vector_store is not None:
             try:
                 if current_level == "Advanced":
                     search_query = f"Kiến thức nâng cao, chuyên sâu, thiết kế hệ thống, bảo mật, tối ưu hóa, giao thức phức tạp của môn {subject_name}"
@@ -784,15 +798,18 @@ TRÌNH ĐỘ HỌC VIÊN: {current_level}
             num_questions = 10
             k_val = 20
 
-        try:
-            docs = self.vector_store.similarity_search(search_query, k=k_val, filter=search_filter)
-            if not docs and allowed_filenames:
-                docs_all = self.vector_store.similarity_search(search_query, k=max(k_val * 2, 40))
-                docs = [d for d in docs_all if os.path.basename(d.metadata.get("source", "")) in allowed_filenames]
-            # Ép dung lượng nạp lên mức 15.000 ký tự để AI thông minh nhất có thể
-            context_docs = "\n\n".join([doc.page_content for doc in docs])[:15000] 
-        except Exception as e:
-            print(f"❌ Lỗi RAG lấy tài liệu: {e}")
+        if self.vector_store is not None:
+            try:
+                docs = self.vector_store.similarity_search(search_query, k=k_val, filter=search_filter)
+                if not docs and allowed_filenames:
+                    docs_all = self.vector_store.similarity_search(search_query, k=max(k_val * 2, 40))
+                    docs = [d for d in docs_all if os.path.basename(d.metadata.get("source", "")) in allowed_filenames]
+                # Ép dung lượng nạp lên mức 15.000 ký tự để AI thông minh nhất có thể
+                context_docs = "\n\n".join([doc.page_content for doc in docs])[:15000]
+            except Exception as e:
+                print(f"❌ Lỗi RAG lấy tài liệu: {e}")
+                context_docs = "Dữ liệu kiến thức đang được cập nhật."
+        else:
             context_docs = "Dữ liệu kiến thức đang được cập nhật."
 
         prompt = f"""
