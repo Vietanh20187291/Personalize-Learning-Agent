@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, JSON, ForeignKey, DateTime, Boolean, Text, Table, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, JSON, ForeignKey, DateTime, Date, Boolean, Text, Table, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from db.database import Base
@@ -61,6 +61,8 @@ class User(Base):
     login_sessions = relationship("UserLoginSession", back_populates="user")
     orbit_sessions = relationship("OrbitChatSession", back_populates="user")
     orbit_messages = relationship("OrbitChatMessage", back_populates="user")
+    learning_plans = relationship("StudentLearningPlan", back_populates="user")
+    learning_plan_steps = relationship("StudentLearningPlanStep", back_populates="user")
 
 # --- BẢNG LỚP HỌC ---
 class Classroom(Base):
@@ -349,3 +351,44 @@ class StudentDocumentScoreHistory(Base):
     total_questions = Column(Integer, nullable=True)
     correct_count = Column(Integer, nullable=True)
     tested_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class StudentLearningPlan(Base):
+    __tablename__ = "student_learning_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    generated_at = Column(DateTime, default=datetime.utcnow, index=True)
+    generated_for_login_at = Column(DateTime, nullable=True)
+    generation_reason = Column(String, default="login")
+    status = Column(String, default="active", index=True)
+    notes = Column(Text, nullable=True)
+
+    user = relationship("User", back_populates="learning_plans")
+    steps = relationship("StudentLearningPlanStep", back_populates="plan", cascade="all, delete-orphan")
+
+
+class StudentLearningPlanStep(Base):
+    __tablename__ = "student_learning_plan_steps"
+    __table_args__ = (UniqueConstraint("plan_id", "document_id", name="uq_plan_document"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    plan_id = Column(Integer, ForeignKey("student_learning_plans.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=False, index=True)
+    class_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True, index=True)
+    step_order = Column(Integer, nullable=False, index=True)
+    planned_date = Column(Date, nullable=False, index=True)
+    priority_group = Column(String, default="no_score", index=True)
+    latest_score = Column(Float, nullable=True)
+    reason = Column(Text, nullable=True)
+    subject_name = Column(String, nullable=True)
+    document_title = Column(String, nullable=True)
+    document_filename = Column(String, nullable=True)
+    is_completed = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    plan = relationship("StudentLearningPlan", back_populates="steps")
+    user = relationship("User", back_populates="learning_plan_steps")

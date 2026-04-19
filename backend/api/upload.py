@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from db.database import get_db
 from db import models
 from agents.content_agent import content_agent 
+from agents.assessment_agent import AssessmentAgent
 from rag.vector_store import get_vector_store
 
 router = APIRouter()
@@ -112,12 +113,26 @@ async def upload_document(
             db.commit()
             db.refresh(new_doc)
 
+            # Sinh sẵn bộ câu hỏi cho sinh viên ngay sau khi upload tài liệu.
+            generated_questions = []
+            try:
+                assessment_agent = AssessmentAgent(db)
+                generated_questions = assessment_agent.pre_generate_questions_for_document(
+                    subject=final_subject,
+                    source_file=safe_filename,
+                    count=20,
+                    force_refresh=True,
+                )
+            except Exception as question_error:
+                print(f"⚠️ Không thể sinh sẵn câu hỏi cho {safe_filename}: {question_error}")
+
             return {
                 "id": new_doc.id,
                 "filename": safe_filename, 
                 "subject_id": subject_id,
                 "subject": final_subject,
                 "class_id": class_id,
+                "generated_question_count": len(generated_questions),
                 "message": f"✅ Tài liệu đã được nạp riêng cho lớp học này."
             }
         else:

@@ -20,6 +20,7 @@ interface DocumentManagerProps {
 }
 
 export default function DocumentManager({ classId }: DocumentManagerProps) {
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -33,8 +34,8 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
     try {
       // Nếu có classId thì gửi kèm lên query string để Backend lọc
       const url = classId 
-        ? `http://localhost:8000/api/upload/documents?class_id=${classId}`
-        : `http://localhost:8000/api/upload/documents`;
+        ? `${apiBaseUrl}/api/upload/documents?class_id=${classId}`
+        : `${apiBaseUrl}/api/upload/documents`;
         
       const res = await axios.get(url);
       setDocuments(res.data);
@@ -56,7 +57,7 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
     if (!confirm("Bạn có chắc chắn muốn xóa tài liệu này khỏi kho học liệu của lớp?")) return;
 
     try {
-      await axios.delete(`http://localhost:8000/api/upload/documents/${id}`);
+      await axios.delete(`${apiBaseUrl}/api/upload/documents/${id}`);
       toast.success("Đã xóa tài liệu thành công!");
       // Cập nhật lại UI ngay lập tức
       setDocuments(documents.filter(doc => doc.id !== id));
@@ -83,7 +84,7 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
 
     setSavingEdit(true);
     try {
-      await axios.put(`http://localhost:8000/api/upload/documents/${id}`, {
+      await axios.put(`${apiBaseUrl}/api/upload/documents/${id}`, {
         title: editingTitle.trim(),
       });
       setDocuments((prev) =>
@@ -102,7 +103,7 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
     setUpdatingVisibilityId(doc.id);
     try {
       const nextValue = !doc.is_visible_to_students;
-      await axios.put(`http://localhost:8000/api/upload/documents/${doc.id}/visibility`, {
+      await axios.put(`${apiBaseUrl}/api/upload/documents/${doc.id}/visibility`, {
         is_visible_to_students: nextValue,
       });
       setDocuments((prev) => prev.map((d) => (d.id === doc.id ? { ...d, is_visible_to_students: nextValue } : d)));

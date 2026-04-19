@@ -423,7 +423,7 @@ class TeacherAgent:
             "weak_students": weak_students[:5],
             "low_score_students": low_score_students[:5],
             "strong_students": strong_students[:5],
-            "histories_count": len(histories),
+            "histories_count": len(scores),
             "scores": scores,
         }
 

@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { FileText, Trash2, Filter, Search, FolderOpen, Loader2, Download } from 'lucide-react';
 import axios from 'axios';
-import { toast } from 'react-hot-toast';
+import toast from 'react-hot-toast';
 
 // 1. ĐỊNH NGHĨA KIỂU DỮ LIỆU
 interface DocumentData {
@@ -15,6 +15,7 @@ interface DocumentData {
 }
 
 export default function DocumentLibrary() {
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
   // Gán kiểu DocumentData[] cho state
   const [documents, setDocuments] = useState<DocumentData[]>([]);
   const [filterSubject, setFilterSubject] = useState('all');
@@ -25,8 +26,8 @@ export default function DocumentLibrary() {
   const fetchDocs = async () => {
     try {
       // Lấy classId động từ localStorage, nếu chưa có thì tạm dùng 2
-      const classId = localStorage.getItem("classId") || "2"; 
-      const res = await axios.get(`http://localhost:8000/api/documents/class-documents/${classId}`);
+      const classId = localStorage.getItem("classId") || "2";
+      const res = await axios.get(`${apiBaseUrl}/api/documents/class-documents/${classId}`);
       setDocuments(res.data);
     } catch (error) {
       toast.error("Lỗi khi tải kho tài liệu");
@@ -43,7 +44,7 @@ export default function DocumentLibrary() {
     
     setDeleteId(id);
     try {
-      await axios.delete(`http://localhost:8000/api/documents/delete/${id}`);
+      await axios.delete(`${apiBaseUrl}/api/documents/delete/${id}`);
       toast.success("Đã xóa tài liệu");
       // Cập nhật lại danh sách ngay lập tức ở giao diện
       setDocuments(documents.filter(d => d.id !== id));
@@ -125,7 +126,7 @@ export default function DocumentLibrary() {
                   </div>
                   <div>
                     <a 
-                      href={`http://localhost:8000/${doc.file_path}`} 
+                      href={`${apiBaseUrl}/${doc.file_path}`} 
                       target="_blank" 
                       rel="noopener noreferrer"
                       className="font-bold text-slate-800 hover:text-indigo-600 transition-colors cursor-pointer block mb-1"
@@ -139,7 +140,7 @@ export default function DocumentLibrary() {
                 {/* Luôn hiển thị cụm nút bấm, thêm nút Tải xuống */}
                 <div className="flex items-center gap-2 border-l border-slate-100 pl-4 ml-4">
                   <a 
-                    href={`http://localhost:8000/${doc.file_path}`} 
+                    href={`${apiBaseUrl}/${doc.file_path}`} 
                     target="_blank"
                     rel="noopener noreferrer"
                     download={doc.title}

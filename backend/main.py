@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager # Thư viện quản lý vòng đời (lifespan)
-from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, exam_generator, subject, teacher_agent, orbit
+from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, exam_generator, subject, teacher_agent, orbit, planning
 from services.orbit_reminders import start_weekly_orbit_reminder_loop
 # --- IMPORT DATABASE VÀ MODELS ---
 from db import models
@@ -12,10 +12,11 @@ from db.models import User, Subject
 from api.auth import hash_password 
 
 # --- IMPORT CÁC ROUTER API ---
-from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent, orbit 
+from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent, orbit, planning 
 
 from fastapi.staticfiles import StaticFiles
 import os
+from datetime import datetime, timedelta
 
 # Tự động tạo bảng nếu chưa có 
 models.Base.metadata.create_all(bind=engine)
@@ -46,6 +47,51 @@ def ensure_orbit_login_tracking_column():
         if "user_login_sessions" not in tables:
             models.Base.metadata.tables["user_login_sessions"].create(bind=engine, checkfirst=True)
             print("✅ Đã bổ sung bảng user_login_sessions")
+
+        # Backfill lịch sử login cho sinh viên cũ chưa có dòng trong user_login_sessions.
+        if "user_login_sessions" in tables and "users" in tables:
+            db = SessionLocal()
+            try:
+                student_rows = db.query(models.User).filter(models.User.role == "student").all()
+                inserted_sessions = 0
+                for student in student_rows:
+                    has_session = db.query(models.UserLoginSession.id).filter(
+                        models.UserLoginSession.user_id == student.id,
+                    ).first() is not None
+                    if has_session:
+                        continue
+
+                    progress = db.query(models.StudentLearningProgress).filter(
+                        models.StudentLearningProgress.user_id == student.id,
+                    ).first()
+
+                    login_at = None
+                    if progress and progress.last_login_at:
+                        login_at = progress.last_login_at
+                    elif student.last_login_at:
+                        login_at = student.last_login_at
+
+                    if login_at is None:
+                        # Không có mốc lịch sử: tạo một phiên cũ để đảm bảo có dữ liệu login in/out.
+                        login_at = datetime.utcnow() - timedelta(days=30)
+
+                    logout_at = login_at + timedelta(minutes=30)
+                    db.add(models.UserLoginSession(
+                        user_id=student.id,
+                        login_at=login_at,
+                        logout_at=logout_at,
+                        duration_seconds=1800,
+                    ))
+                    inserted_sessions += 1
+
+                if inserted_sessions > 0:
+                    db.commit()
+                    print(f"✅ Đã backfill {inserted_sessions} dòng user_login_sessions cho sinh viên cũ")
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
 
         # Backfill dữ liệu cũ: mỗi tài liệu đã có điểm sẽ có ít nhất 1 mốc trong bảng lịch sử điểm theo tài liệu.
         if "student_document_score_history" in tables and "student_document_evaluations" in tables:
@@ -213,6 +259,9 @@ app.include_router(teacher_agent.router, prefix="/api/teacher", tags=["Teacher A
 
 # 10. Orbit Agent (Hỗ trợ sinh viên)
 app.include_router(orbit.router, prefix="/api/orbit", tags=["Orbit AI"])
+
+# 11. Planning Agent (Kế hoạch học tập theo tài liệu)
+app.include_router(planning.router, prefix="/api/planning", tags=["Planning AI"])
 
 @app.get("/")
 def read_root():

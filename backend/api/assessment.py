@@ -58,6 +58,12 @@ class SaveQuizResultRequest(BaseModel):
     answers: List[AnswerSubmission]  # [{question_id, selected_option}]
     total_questions: int = 15  # Mặc định 15 câu/chương
 
+class DocumentQuestionBankRequest(BaseModel):
+    subject: str
+    user_id: int
+    source_file: str
+    target_count: int = 20
+
 class SubmitRequest(BaseModel):
     subject: str
     user_id: int 
@@ -180,6 +186,56 @@ def generate_session_assessment(req: SessionQuizRequest, db: Session = Depends(g
         "source_file": requested_file or None,
     }
 
+
+@router.post("/ensure-document-question-bank")
+def ensure_document_question_bank(req: DocumentQuestionBankRequest, db: Session = Depends(get_db)):
+    if not req.subject or not req.source_file:
+        raise HTTPException(status_code=400, detail="Cần chỉ định môn học (subject) và tên file tài liệu (source_file)")
+
+    user = db.query(User).filter(User.id == req.user_id).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Người dùng không hợp lệ.")
+
+    target_class = next((c for c in getattr(user, 'enrolled_classes', []) if c.subject == req.subject), None)
+    if not target_class:
+        raise HTTPException(status_code=400, detail=f"Bạn chưa tham gia lớp học nào cho môn '{req.subject}'.")
+
+    doc = db.query(Document).filter(
+        Document.class_id == target_class.id,
+        Document.filename == req.source_file.strip()
+    ).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy tài liệu '{req.source_file}' trong lớp học của bạn.")
+
+    requested_file = req.source_file.strip()
+    existing_count = db.query(func.count(QuestionBank.id)).filter(
+        QuestionBank.subject == req.subject,
+        QuestionBank.source_file == requested_file,
+    ).scalar() or 0
+
+    generated_count = 0
+    if existing_count < req.target_count:
+        agent = AssessmentAgent(db)
+        generated = agent.pre_generate_questions_for_document(
+            subject=req.subject,
+            source_file=requested_file,
+            count=req.target_count,
+            force_refresh=True,
+        )
+        generated_count = len(generated)
+        existing_count = db.query(func.count(QuestionBank.id)).filter(
+            QuestionBank.subject == req.subject,
+            QuestionBank.source_file == requested_file,
+        ).scalar() or 0
+
+    return {
+        "subject": req.subject,
+        "source_file": requested_file,
+        "existing_count": int(existing_count),
+        "generated_count": int(generated_count),
+        "is_ready": int(existing_count) >= req.target_count,
+    }
+
 # --- 2B. SINH 15 CÂU TRỰ NGHIỆM THEO CHƯƠNG/TÀI LIỆU ---
 @router.post("/generate-chapter-quiz")
 def generate_chapter_quiz(req: SessionQuizRequest, db: Session = Depends(get_db)):
@@ -207,109 +263,54 @@ def generate_chapter_quiz(req: SessionQuizRequest, db: Session = Depends(get_db)
     if not doc:
         raise HTTPException(status_code=404, detail=f"Không tìm thấy tài liệu '{req.source_file}' trong lớp học của bạn.")
 
-    # ==========================================
-    # MỘT LẦN CHỈ SINH QUI 15 CÂU CỦA CHƯƠNG ĐÓ
-    # ==========================================
+    requested_file = req.source_file.strip()
     agent = AssessmentAgent(db)
-    
-    # Kiểm tra thử xem đã có 15 câu cho chương này chưa
-    existing = db.query(QuestionBank).filter(
+
+    # Chỉ đọc các câu hỏi đã được sinh sẵn trong DB lúc upload tài liệu.
+    query = db.query(QuestionBank).filter(
         QuestionBank.subject == req.subject,
-        QuestionBank.source_file == req.source_file
-    ).all()
+        QuestionBank.source_file == requested_file,
+    )
+    existing = query.all()
+
+    if len(existing) < 15:
+        agent.pre_generate_questions_for_document(
+            subject=req.subject,
+            source_file=requested_file,
+            count=20,
+            force_refresh=True,
+        )
+        existing = query.all()
+
+    if not existing:
+        raise HTTPException(status_code=404, detail="Chưa có bộ câu hỏi đã sinh sẵn cho tài liệu này. Vui lòng để giảng viên upload hoặc làm mới tài liệu.")
     
+    questions = existing
     if len(existing) >= 15:
         # Đã có sẵn, chỉ cần random 15 câu và trả về
-        questions = db.query(QuestionBank).filter(
-            QuestionBank.subject == req.subject,
-            QuestionBank.source_file == req.source_file
-        ).order_by(func.random()).limit(15).all()
-        
-        result = []
-        for q in questions:
-            try:
-                parsed_options = json.loads(q.options) if isinstance(q.options, str) else q.options
-            except:
-                parsed_options = []
-            
-            result.append({
-                "id": q.id,
-                "content": q.content,
-                "options": parsed_options,
-                "correct_answer": q.correct_answer,
-                "explanation": q.explanation
-            })
-        
-        return {
-            "questions": result,
-            "subject": req.subject,
-            "source_file": req.source_file,
-            "min_pass_correct": 5,  # Cần 5/15 câu đúng thì mới pass
-            "total_questions": 15
-        }
-    
-    # Chưa có đủ câu thì sinh thêm bằng API hiện có của AssessmentAgent.
-    print(f"🚀 AI 70B đang sinh {15} câu chuyên sâu cho chương: {req.source_file}...")
+        questions = query.order_by(func.random()).limit(15).all()
 
-    result = agent.get_or_create_quiz(
-        subject=req.subject,
-        user_id=req.user_id,
-        num_questions=15,
-        allowed_files=[req.source_file],
-    )
+    result = []
+    for q in questions:
+        try:
+            parsed_options = json.loads(q.options) if isinstance(q.options, str) else q.options
+        except:
+            parsed_options = []
 
-    if not result:
-        # Fallback an toàn: tạo bộ câu hỏi khung để không chặn luồng kiểm tra khi RAG tạm thời lỗi.
-        fallback_payload = [
-            ("Mục tiêu chính của tài liệu này là gì?", ["Nắm vững ý chính và khái niệm cốt lõi", "Học thuộc toàn bộ từng dòng", "Bỏ qua ví dụ", "Chỉ học phần mở đầu"], "A"),
-            ("Khi gặp một khái niệm mới trong tài liệu, bạn nên làm gì trước?", ["Đọc định nghĩa và ví dụ minh họa", "Bỏ qua vì khó", "Đoán ý nghĩa", "Chỉ xem đáp án"], "A"),
-            ("Cách học hiệu quả nhất với tài liệu chuyên môn là gì?", ["Chia nhỏ nội dung và học theo phiên ngắn", "Đọc một lần thật nhanh", "Chỉ học lý thuyết", "Không ghi chú"], "A"),
-            ("Trong quá trình đọc tài liệu, hoạt động nào giúp ghi nhớ tốt hơn?", ["Tự tóm tắt lại bằng ngôn ngữ của mình", "Đọc lướt", "Bỏ qua phần khó", "Học thuộc câu chữ"], "A"),
-            ("Khi làm bài tập theo tài liệu, bước nào nên thực hiện đầu tiên?", ["Xác định yêu cầu và dữ kiện", "Tìm đáp án trên mạng", "Bỏ qua đề bài", "Chọn ngẫu nhiên"], "A"),
-            ("Nếu kết quả làm bài chưa tốt, bạn nên làm gì?", ["Xem lại phần kiến thức liên quan trong tài liệu", "Dừng học luôn", "Đổi môn ngay", "Đoán lại đáp án"], "A"),
-            ("Đâu là cách kiểm tra mức độ hiểu nội dung tài liệu?", ["Giải thích lại khái niệm cho người khác", "Đọc tiêu đề", "Xem mục lục", "Chỉ chép lại"], "A"),
-            ("Khi ôn tập theo tài liệu, bạn nên ưu tiên phần nào?", ["Phần trọng tâm, có ví dụ và bài luyện", "Phần ít liên quan", "Chỉ học phần dễ", "Bỏ phần thực hành"], "A"),
-            ("Việc liên hệ kiến thức trong tài liệu với bài toán thực tế giúp gì?", ["Tăng khả năng vận dụng", "Giảm khả năng nhớ", "Không có tác dụng", "Gây nhiễu hoàn toàn"], "A"),
-            ("Khi gặp thuật ngữ khó, lựa chọn phù hợp nhất là gì?", ["Tra cứu và ghi chú ngắn gọn", "Bỏ qua hoàn toàn", "Đoán theo cảm tính", "Chỉ học đáp án"], "A"),
-            ("Đọc tài liệu theo chu kỳ lặp lại (spaced repetition) có lợi ích gì?", ["Củng cố trí nhớ dài hạn", "Làm giảm hiểu biết", "Không khác biệt", "Chỉ tốn thời gian"], "A"),
-            ("Một phiên tự học tốt theo tài liệu thường nên có gì?", ["Mục tiêu rõ ràng, thời lượng hợp lý, tổng kết ngắn", "Học không mục tiêu", "Không cần nghỉ", "Không cần kiểm tra lại"], "A"),
-            ("Khi trả lời câu hỏi từ tài liệu, yếu tố quan trọng nhất là gì?", ["Dựa trên nội dung và lập luận trong tài liệu", "Dựa vào cảm giác", "Sao chép ngẫu nhiên", "Trả lời càng dài càng tốt"], "A"),
-            ("Nếu có nhiều phần kiến thức liên quan nhau, nên học theo cách nào?", ["Lập sơ đồ liên kết giữa các phần", "Học rời rạc từng phần", "Bỏ qua mối liên hệ", "Chỉ học phần cuối"], "A"),
-            ("Dấu hiệu cho thấy bạn đã nắm chắc một chương trong tài liệu là gì?", ["Làm đúng phần lớn câu hỏi và giải thích được vì sao", "Chỉ nhớ tiêu đề", "Chỉ đọc xong một lần", "Không cần kiểm tra"], "A"),
-        ]
-
-        created = []
-        for idx, (content, options, correct) in enumerate(fallback_payload, start=1):
-            q = QuestionBank(
-                subject_id=target_class.subject_id,
-                subject=req.subject,
-                difficulty=(req.level or "Intermediate").strip(),
-                content=f"[{req.source_file}] Câu {idx}: {content}",
-                options=json.dumps(options, ensure_ascii=False),
-                correct_answer=correct,
-                explanation="Câu hỏi fallback do hệ thống tạo khi AI tạm thời không khả dụng.",
-                source_file=req.source_file,
-                is_used=False,
-            )
-            db.add(q)
-            db.flush()
-            created.append({
-                "id": q.id,
-                "content": q.content,
-                "options": options,
-                "correct_answer": q.correct_answer,
-                "explanation": q.explanation,
-            })
-
-        db.commit()
-        result = created
+        result.append({
+            "id": q.id,
+            "content": q.content,
+            "options": parsed_options,
+            "correct_answer": q.correct_answer,
+            "explanation": q.explanation
+        })
     
     return {
         "questions": result,
         "subject": req.subject,
         "source_file": req.source_file,
-        "min_pass_correct": 5,  # Cần 5/15 câu đúng thì mới pass
-        "total_questions": 15
+        "min_pass_correct": max(1, round(len(result) * 0.33)),
+        "total_questions": len(result)
     }
 
 # --- 3. NỘP BÀI, CHẤM ĐIỂM & ĐIỀU HƯỚNG LỘ TRÌNH (THĂNG CẤP) ---

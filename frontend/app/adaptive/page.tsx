@@ -207,11 +207,29 @@ export default function AdaptiveLearningPage() {
     }
   };
 
+  const ensureDocumentQuestionBank = async (subject: string, sourceFile: string) => {
+    const currentUserId = userIdRef.current;
+    if (!currentUserId || !subject || !sourceFile) return;
+
+    try {
+      await axios.post(`${apiBaseUrl}/api/assessment/generate-chapter-quiz`, {
+        subject,
+        user_id: currentUserId,
+        session_topic: sourceFile,
+        level: 'Intermediate',
+        source_file: sourceFile,
+      });
+    } catch {
+      // Không chặn trải nghiệm đọc tài liệu nếu warm-up thất bại tạm thời.
+    }
+  };
+
   const activateDocumentContext = (doc: StudentDoc, lesson: LessonItem | null, autoAsk = false) => {
     const lessonNo = lesson?.session || 0;
     const topic = lesson?.topic || doc.filename.replace(/\.[^/.]+$/, '');
     const desc = lesson?.description || `Nội dung tài liệu ${doc.filename}`;
     const context = `BUỔI ${lessonNo || '?'}: ${topic} - Mô tả: ${desc}`;
+    const docSubject = doc.subject || selectedSubject;
 
     setActiveDocumentId(doc.id);
     setActiveLessonNumber(lessonNo);
@@ -226,12 +244,15 @@ export default function AdaptiveLearningPage() {
     ]);
 
     void loadDocumentPreview(doc.id);
-    const summaryPromise = loadMaterialSummary(selectedSubject, doc.filename, topic, doc.id);
+    const summaryPromise = loadMaterialSummary(docSubject, doc.filename, topic, doc.id);
+    const warmupPromise = ensureDocumentQuestionBank(docSubject, doc.filename);
 
     if (autoAsk) {
-      void summaryPromise.finally(() => {
+      void Promise.allSettled([summaryPromise, warmupPromise]).finally(() => {
         setTriggerInitialMessage(true);
       });
+    } else {
+      void warmupPromise;
     }
   };
 

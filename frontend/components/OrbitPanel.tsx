@@ -15,6 +15,18 @@ interface PendingOrbitAction {
   params?: Record<string, any>;
 }
 
+interface OrbitPanelSnapshot {
+  orbitCollapsed?: boolean;
+  orbitMode?: 'angry' | 'happy';
+  orbitStatusText?: string;
+  messages?: Message[];
+  input?: string;
+  pendingOrbitAction?: PendingOrbitAction | null;
+  sessionId?: number | null;
+}
+
+const orbitPanelCache = new Map<string, OrbitPanelSnapshot>();
+
 interface OrbitPanelProps {
   userId: number;
   classId?: number | null;
@@ -44,6 +56,8 @@ export default function OrbitPanel({
   const [input, setInput] = useState('');
   const [loadingChat, setLoadingChat] = useState(false);
   const [pendingOrbitAction, setPendingOrbitAction] = useState<PendingOrbitAction | null>(null);
+  const [sessionId, setSessionId] = useState<number | null>(null);
+  const [hydrated, setHydrated] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const quickOrbitPrompts = [
@@ -85,41 +99,86 @@ export default function OrbitPanel({
 
   useEffect(() => {
     try {
+      const cached = orbitPanelCache.get(storageKey);
+      if (cached) {
+        if (typeof cached.orbitCollapsed === 'boolean') setOrbitCollapsed(cached.orbitCollapsed);
+        if (cached.orbitMode === 'angry' || cached.orbitMode === 'happy') setOrbitMode(cached.orbitMode);
+        if (typeof cached.orbitStatusText === 'string' && cached.orbitStatusText.trim()) setOrbitStatusText(cached.orbitStatusText);
+        if (Array.isArray(cached.messages)) setMessages(cached.messages.slice(-40));
+        if (typeof cached.input === 'string') setInput(cached.input);
+        if (cached.pendingOrbitAction) setPendingOrbitAction(cached.pendingOrbitAction);
+        if (typeof cached.sessionId === 'number') setSessionId(cached.sessionId);
+        setHydrated(true);
+        return;
+      }
+
       const raw = localStorage.getItem(storageKey);
       if (!raw) return;
-      const parsed = JSON.parse(raw) as {
-        orbitCollapsed?: boolean;
-        orbitMode?: 'angry' | 'happy';
-        orbitStatusText?: string;
-        messages?: Message[];
-        input?: string;
-        pendingOrbitAction?: PendingOrbitAction | null;
-      };
+      const parsed = JSON.parse(raw) as OrbitPanelSnapshot;
+      orbitPanelCache.set(storageKey, parsed);
       if (typeof parsed.orbitCollapsed === 'boolean') setOrbitCollapsed(parsed.orbitCollapsed);
       if (parsed.orbitMode === 'angry' || parsed.orbitMode === 'happy') setOrbitMode(parsed.orbitMode);
       if (typeof parsed.orbitStatusText === 'string' && parsed.orbitStatusText.trim()) setOrbitStatusText(parsed.orbitStatusText);
       if (Array.isArray(parsed.messages)) setMessages(parsed.messages.slice(-40));
       if (typeof parsed.input === 'string') setInput(parsed.input);
       if (parsed.pendingOrbitAction) setPendingOrbitAction(parsed.pendingOrbitAction);
+      if (typeof parsed.sessionId === 'number') setSessionId(parsed.sessionId);
     } catch {
       // ignore storage parse errors
+    } finally {
+      setHydrated(true);
     }
   }, [storageKey]);
 
   useEffect(() => {
+    if (!hydrated || !userId) return;
+    if (messages.length > 0) return;
+
+    const fetchHistory = async () => {
+      try {
+        const params = sessionId ? { session_id: sessionId, limit: 40 } : { limit: 40 };
+        const res = await axios.get(`${apiBaseUrl}/api/orbit/history/${userId}`, { params });
+        const serverMessages = Array.isArray(res.data?.messages)
+          ? res.data.messages
+              .map((item: any) => ({ role: item?.role, content: item?.content }))
+              .filter((item: any) => (item.role === 'user' || item.role === 'assistant') && typeof item.content === 'string')
+          : [];
+        if (serverMessages.length > 0) {
+          setMessages(serverMessages.slice(-40));
+        }
+        if (typeof res.data?.session_id === 'number') {
+          setSessionId(res.data.session_id);
+        }
+      } catch {
+        // ignore history fetch failures
+      }
+    };
+
+    void fetchHistory();
+  }, [hydrated, userId, sessionId, messages.length, apiBaseUrl]);
+
+  useEffect(() => {
+    setHydrated(false);
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const snapshot: OrbitPanelSnapshot = {
+      orbitCollapsed,
+      orbitMode,
+      orbitStatusText,
+      messages: messages.slice(-40),
+      input,
+      pendingOrbitAction,
+      sessionId,
+    };
+    orbitPanelCache.set(storageKey, snapshot);
     try {
-      localStorage.setItem(storageKey, JSON.stringify({
-        orbitCollapsed,
-        orbitMode,
-        orbitStatusText,
-        messages: messages.slice(-40),
-        input,
-        pendingOrbitAction,
-      }));
+      localStorage.setItem(storageKey, JSON.stringify(snapshot));
     } catch {
       // ignore storage write failures
     }
-  }, [storageKey, orbitCollapsed, orbitMode, orbitStatusText, messages, input, pendingOrbitAction]);
+  }, [storageKey, hydrated, orbitCollapsed, orbitMode, orbitStatusText, messages, input, pendingOrbitAction, sessionId]);
 
   const handleQuickPromptPaste = (prompt: string) => {
     if (loadingChat) return;
@@ -139,7 +198,12 @@ export default function OrbitPanel({
         class_id: fallbackClassId,
         document_id: documentId || null,
         source_file: sourceFile || '',
+        session_id: sessionId,
       });
+
+      if (typeof res.data?.session_id === 'number') {
+        setSessionId(res.data.session_id);
+      }
       
       setMessages((prev) => [...prev, { role: 'assistant', content: res.data.reply }]);
       if (res.data?.orbit_mode === 'angry' || res.data?.orbit_mode === 'happy') {

@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 import unicodedata
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -21,6 +21,7 @@ class OrbitChatRequest(BaseModel):
     class_id: Optional[int] = None
     document_id: Optional[int] = None
     source_file: Optional[str] = None
+    session_id: Optional[int] = None
 
 
 class OrbitProgressResponse(BaseModel):
@@ -52,6 +53,17 @@ class TeacherDirectiveRequest(BaseModel):
 class WeeklyInactivityQuery(BaseModel):
     teacher_id: Optional[int] = None
     class_id: Optional[int] = None
+
+
+class OrbitHistoryMessage(BaseModel):
+    role: str
+    content: str
+    created_at: str
+
+
+class OrbitHistoryResponse(BaseModel):
+    session_id: Optional[int]
+    messages: List[OrbitHistoryMessage]
 
 
 def _week_bounds(now: datetime):
@@ -384,18 +396,38 @@ def _overall_latest_score(db: Session, user_id: int) -> Optional[float]:
     return sum(scores) / len(scores) if scores else None
 
 
+def _latest_login_at(db: Session, user_id: int) -> Optional[datetime]:
+    latest_login = db.query(models.UserLoginSession).filter(
+        models.UserLoginSession.user_id == user_id,
+    ).order_by(models.UserLoginSession.login_at.desc()).first()
+
+    progress = db.query(models.StudentLearningProgress).filter(
+        models.StudentLearningProgress.user_id == user_id,
+    ).first()
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+
+    candidates: List[datetime] = []
+    if latest_login and latest_login.login_at:
+        candidates.append(latest_login.login_at)
+    if progress and progress.last_login_at:
+        candidates.append(progress.last_login_at)
+    if user and user.last_login_at:
+        candidates.append(user.last_login_at)
+
+    if not candidates:
+        return None
+    return max(candidates)
+
+
 def _entry_orbit_mode(db: Session, user_id: int, now: Optional[datetime] = None) -> Tuple[str, str]:
     current_time = now or datetime.utcnow()
     week_start = current_time - timedelta(days=7)
-    has_recent_closed_login = db.query(models.UserLoginSession.id).filter(
-        models.UserLoginSession.user_id == user_id,
-        models.UserLoginSession.logout_at.isnot(None),
-        models.UserLoginSession.login_at >= week_start,
-    ).first() is not None
+    latest_login_at = _latest_login_at(db, user_id)
+    has_recent_login = bool(latest_login_at and latest_login_at >= week_start)
 
     latest_avg_score = _overall_latest_score(db, user_id)
     low_score_mode = latest_avg_score is not None and latest_avg_score < 60
-    long_gap_mode = not has_recent_closed_login
+    long_gap_mode = not has_recent_login
 
     if long_gap_mode or low_score_mode:
         if long_gap_mode:
@@ -710,8 +742,21 @@ def _last_work_session_notice(db: Session, user_id: int, now: Optional[datetime]
     return f"Phiên làm việc gần nhất: {gap_days} ngày trước."
 
 
-def _get_or_create_orbit_session(db: Session, user_id: int, class_id: Optional[int], subject_id: Optional[int]) -> models.OrbitChatSession:
+def _get_or_create_orbit_session(db: Session, user_id: int, class_id: Optional[int], subject_id: Optional[int], requested_session_id: Optional[int] = None) -> models.OrbitChatSession:
     now = datetime.utcnow()
+
+    if requested_session_id:
+        existing = db.query(models.OrbitChatSession).filter(
+            models.OrbitChatSession.id == requested_session_id,
+            models.OrbitChatSession.user_id == user_id,
+        ).first()
+        if existing:
+            if class_id and not existing.class_id:
+                existing.class_id = class_id
+            if subject_id and not existing.subject_id:
+                existing.subject_id = subject_id
+            return existing
+
     active_threshold = now - timedelta(minutes=15)
     session = db.query(models.OrbitChatSession).filter(
         models.OrbitChatSession.user_id == user_id,
@@ -733,6 +778,37 @@ def _get_or_create_orbit_session(db: Session, user_id: int, class_id: Optional[i
     db.add(session)
     db.flush()
     return session
+
+
+def _get_recent_orbit_messages(db: Session, user_id: int, session_id: Optional[int] = None, limit: int = 40):
+    target_session = None
+    if session_id:
+        target_session = db.query(models.OrbitChatSession).filter(
+            models.OrbitChatSession.id == session_id,
+            models.OrbitChatSession.user_id == user_id,
+        ).first()
+    if target_session is None:
+        target_session = db.query(models.OrbitChatSession).filter(
+            models.OrbitChatSession.user_id == user_id,
+        ).order_by(models.OrbitChatSession.last_message_at.desc()).first()
+
+    if target_session is None:
+        return None, []
+
+    rows = db.query(models.OrbitChatMessage).filter(
+        models.OrbitChatMessage.user_id == user_id,
+        models.OrbitChatMessage.session_id == target_session.id,
+    ).order_by(models.OrbitChatMessage.created_at.asc()).all()
+
+    payload = [
+        {
+            "role": item.role,
+            "content": item.content,
+            "created_at": (item.created_at or datetime.utcnow()).isoformat(),
+        }
+        for item in rows[-limit:]
+    ]
+    return target_session.id, payload
 
 
 def _sync_learning_progress(db: Session, user_id: int):
@@ -943,7 +1019,13 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
     if _is_progress_overview_request(req.message):
         reply, action_metadata = _build_progress_overview_reply(db, user)
         now = datetime.utcnow()
-        session = _get_or_create_orbit_session(db, user.id, classroom.id if classroom else None, subject.id if subject else None)
+        session = _get_or_create_orbit_session(
+            db,
+            user.id,
+            classroom.id if classroom else None,
+            subject.id if subject else None,
+            requested_session_id=req.session_id,
+        )
 
         user_msg = models.OrbitChatMessage(
             session_id=session.id,
@@ -981,6 +1063,7 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
                 "Thành tích học của tôi thế nào",
                 "Mở cho tôi tài liệu môn Lập trình hướng đối tượng",
             ],
+            "session_id": session.id,
             "debug_version": "orbit_patch_v3",
         }
 
@@ -1139,7 +1222,13 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
             }
 
     now = datetime.utcnow()
-    session = _get_or_create_orbit_session(db, user.id, classroom.id, subject.id if subject else None)
+    session = _get_or_create_orbit_session(
+        db,
+        user.id,
+        classroom.id,
+        subject.id if subject else None,
+        requested_session_id=req.session_id,
+    )
 
     user_msg = models.OrbitChatMessage(
         session_id=session.id,
@@ -1179,7 +1268,28 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
             "Thành tích học của tôi thế nào",
             "Mở cho tôi tài liệu môn Lập trình hướng đối tượng",
         ],
+        "session_id": session.id,
         "debug_version": "orbit_patch_v2",
+    }
+
+
+@router.get("/history/{user_id}", response_model=OrbitHistoryResponse)
+def get_orbit_history(
+    user_id: int,
+    session_id: Optional[int] = Query(default=None),
+    limit: int = Query(default=40, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
+    if user.role != "student":
+        raise HTTPException(status_code=403, detail="Orbit chỉ dành cho tài khoản sinh viên")
+
+    sid, messages = _get_recent_orbit_messages(db, user_id, session_id=session_id, limit=limit)
+    return {
+        "session_id": sid,
+        "messages": messages,
     }
 
 

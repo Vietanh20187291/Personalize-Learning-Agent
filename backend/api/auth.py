@@ -6,6 +6,7 @@ from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from db.database import get_db
 from db import models
+from agents.planning_agent import PlanningAgent
 from pydantic import BaseModel
 from typing import Optional
 
@@ -132,6 +133,17 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     progress.last_login_at = now
     progress.last_active_at = now
     db.commit()
+
+    if user.role == "student":
+        try:
+            PlanningAgent(db).regenerate_for_user(
+                user_id=user.id,
+                reason="login",
+                reference_login_at=now,
+            )
+        except Exception as planning_error:
+            # Không chặn luồng đăng nhập nếu agent kế hoạch gặp lỗi.
+            print(f"⚠️ PlanningAgent login refresh failed for user {user.id}: {planning_error}")
     
     access_token = create_access_token(data={"sub": user.username, "role": user.role, "id": user.id})
     

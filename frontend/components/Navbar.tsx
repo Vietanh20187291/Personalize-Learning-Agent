@@ -4,7 +4,6 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { 
   BrainCircuit, 
-  Layout, 
   LineChart, 
   GraduationCap, 
   FileText,
@@ -81,6 +80,7 @@ export default function Navbar() {
   } else if (user.role === 'student') {
     navs = [
       { name: 'Gia sư AI', href: '/adaptive', icon: GraduationCap },
+      { name: 'Kế hoạch học tập', href: '/planning', icon: BrainCircuit },
       { name: 'Kiểm tra', href: '/assessment', icon: FileText },
       { name: 'Kết quả', href: '/evaluation', icon: LineChart },
       { name: 'Thư viện', href: '/library', icon: BookOpen },

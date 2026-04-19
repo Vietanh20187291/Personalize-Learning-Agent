@@ -1,6 +1,7 @@
 import os
 import json
 import re
+from datetime import datetime
 from groq import Groq
 from dotenv import load_dotenv
 from sqlalchemy import func
@@ -23,6 +24,40 @@ class EvaluationAgent:
         self.vector_store = get_vector_store()
 
     # --- HÀM ĐÁNH GIÁ HIỆU SUẤT TỔNG THỂ (CẤU TRÚC 1-10-1) ---
+    def _compute_login_time_metrics(self, user_id: int):
+        now = datetime.utcnow()
+        sessions = self.db.query(UserLoginSession).filter(
+            UserLoginSession.user_id == user_id,
+        ).all()
+
+        total_seconds = 0
+        counted_sessions = 0
+        for item in sessions:
+            if not item.login_at:
+                continue
+
+            if item.duration_seconds and int(item.duration_seconds) > 0:
+                total_seconds += int(item.duration_seconds)
+                counted_sessions += 1
+                continue
+
+            if item.logout_at and item.logout_at >= item.login_at:
+                total_seconds += int((item.logout_at - item.login_at).total_seconds())
+                counted_sessions += 1
+                continue
+
+            # Phiên mở chưa logout: chỉ cộng phần thời gian đã trôi qua.
+            if item.logout_at is None and now >= item.login_at:
+                total_seconds += int((now - item.login_at).total_seconds())
+                counted_sessions += 1
+
+        total_minutes = total_seconds / 60.0
+        return {
+            "total_seconds": total_seconds,
+            "total_minutes": total_minutes,
+            "session_count": counted_sessions,
+        }
+
     def evaluate_performance(self, user_id: int, subject: str, current_score: float, test_type: str):
         """
         Đánh giá điểm môn từ tất cả điểm kiểm tra theo từng tài liệu thuộc môn:
@@ -38,11 +73,8 @@ class EvaluationAgent:
             subject_name=subject,
         )
 
-        login_seconds_query = self.db.query(func.sum(UserLoginSession.duration_seconds)).filter(
-            UserLoginSession.user_id == user_id
-        ).scalar()
-
-        login_minutes = (login_seconds_query or 0) / 60.0
+        login_metrics = self._compute_login_time_metrics(user_id)
+        login_minutes = float(login_metrics.get("total_minutes", 0.0) or 0.0)
         effort_score = min(100.0, (login_minutes / 600.0) * 100.0)
 
         # 2. TEST SCORE + PROGRESS SCORE lấy từ lịch sử điểm theo tài liệu
@@ -59,6 +91,8 @@ class EvaluationAgent:
         return {
             "actual_test_score": round(actual_test_score, 2),
             "effort_score": round(effort_score, 2),
+            "effort_total_login_minutes": round(login_minutes, 2),
+            "effort_login_session_count": int(login_metrics.get("session_count", 0) or 0),
             "progress_score": round(progress_score, 2),
             "final_score": round(final_score, 2),
             "evaluation_msg": evaluation_msg
