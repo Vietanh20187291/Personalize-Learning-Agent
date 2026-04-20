@@ -16,7 +16,11 @@ from api import assessment, upload, adaptive, stats, auth, classroom, admin, doc
 
 from fastapi.staticfiles import StaticFiles
 import os
+import json
+import re
+import threading
 from datetime import datetime, timedelta
+from agents.assessment_agent import AssessmentAgent
 
 # Tự động tạo bảng nếu chưa có 
 models.Base.metadata.create_all(bind=engine)
@@ -198,12 +202,94 @@ def create_initial_admin():
     finally:
         db.close()
 
+
+def warmup_document_question_banks(target_count: int = 20):
+    db = SessionLocal()
+    try:
+        docs = db.query(models.Document).all()
+        if not docs:
+            print("ℹ️ Không có tài liệu để warmup bộ câu hỏi.")
+            return
+
+        agent = AssessmentAgent(db)
+        previous_disable_llm = getattr(agent, "_disable_llm_generation", False)
+        agent._disable_llm_generation = True
+        refreshed = 0
+        skipped = 0
+
+        for doc in docs:
+            subject_name = (doc.subject or "").strip()
+            if not subject_name and getattr(doc, "subject_id", None):
+                subject_obj = db.query(models.Subject).filter(models.Subject.id == doc.subject_id).first()
+                subject_name = (getattr(subject_obj, "name", "") or "").strip()
+            source_file = (doc.filename or "").strip()
+            if not subject_name or not source_file:
+                skipped += 1
+                continue
+
+            rows = db.query(models.QuestionBank).filter(
+                models.QuestionBank.subject == subject_name,
+                models.QuestionBank.source_file == source_file,
+            ).all()
+
+            is_enough = len(rows) >= target_count
+            low_diversity = False
+            if rows:
+                signatures = []
+                for row in rows:
+                    try:
+                        options = json.loads(row.options) if isinstance(row.options, str) else (row.options or [])
+                    except Exception:
+                        options = []
+                    if not isinstance(options, list) or len(options) != 4:
+                        continue
+                    normalized = []
+                    for option in options:
+                        text = str(option).strip()
+                        text = re.sub(r"^[A-D][\.)]\s*", "", text, flags=re.IGNORECASE)
+                        normalized.append(text.lower())
+                    signatures.append("|".join(normalized))
+
+                if not signatures:
+                    low_diversity = True
+                else:
+                    unique_count = len(set(signatures))
+                    most_common = max(signatures.count(sig) for sig in set(signatures))
+                    low_diversity = unique_count <= max(2, len(signatures) // 5) or most_common >= max(4, int(len(signatures) * 0.6))
+
+            if is_enough and not low_diversity:
+                skipped += 1
+                continue
+
+            generated = agent.pre_generate_questions_for_document(
+                subject=subject_name,
+                source_file=source_file,
+                count=target_count,
+                force_refresh=True,
+            )
+            if generated:
+                refreshed += 1
+
+        agent._disable_llm_generation = previous_disable_llm
+
+        print(f"✅ Warmup câu hỏi hoàn tất: regenerated={refreshed}, skipped={skipped}, total_docs={len(docs)}")
+    except Exception as exc:
+        db.rollback()
+        print(f"⚠️ Warmup bộ câu hỏi thất bại: {exc}")
+    finally:
+        db.close()
+
 # --- QUẢN LÝ VÒNG ĐỜI (LIFESPAN) ---
 # Đảm bảo server khởi động xong mới chạy hàm tạo Admin
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     create_default_subjects()  # Tạo môn học trước
     create_initial_admin()      # Rồi tạo admin
+    threading.Thread(
+        target=warmup_document_question_banks,
+        kwargs={"target_count": 20},
+        daemon=True,
+    ).start()
     start_weekly_orbit_reminder_loop(SessionLocal)
     yield 
 

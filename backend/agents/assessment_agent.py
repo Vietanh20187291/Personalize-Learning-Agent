@@ -461,6 +461,36 @@ class AssessmentAgent:
                 continue
             seen.add(k)
             dedup.append(self._clean_text(c))
+
+        # Bổ sung concept tổng quát để luôn đủ số lượng câu hỏi fallback khi startup warmup.
+        suffix_seeds = [
+            "mục tiêu học tập",
+            "thành phần cốt lõi",
+            "quy trình thực hành",
+            "lỗi thường gặp",
+            "tiêu chí đánh giá",
+            "ứng dụng thực tế",
+            "so sánh mô hình",
+            "nguyên tắc thiết kế",
+            "chiến lược tối ưu",
+            "tình huống vận dụng",
+            "phân tích rủi ro",
+            "kịch bản kiểm thử",
+            "bài toán điển hình",
+            "mẫu triển khai",
+            "thực hành nâng cao",
+            "bài học tổng kết",
+        ]
+        idx = 0
+        while len(dedup) < limit:
+            seed = suffix_seeds[idx % len(suffix_seeds)]
+            candidate = self._clean_text(f"{subject} - {seed} #{idx + 1}")
+            key = candidate.lower()
+            if key not in seen:
+                seen.add(key)
+                dedup.append(candidate)
+            idx += 1
+
         return dedup[:limit]
 
     def clean_rag(self, docs):
@@ -745,6 +775,7 @@ Trả về JSON đúng schema:
 
     def _generate_mcq_fallback(self, concept: str, subject: str, bloom_level: str):
         concept_low = self._clean_text(concept).lower()
+        concept_clean = self._clean_text(concept)
         bloom_level = (bloom_level or "understand").lower()
         mappings = [
             (
@@ -888,6 +919,14 @@ Trả về JSON đúng schema:
             question_topic = concept if self._clean_text(topic).lower() == self._clean_text(subject).lower() else topic
             q_text = stem.format(topic=question_topic, subject=subject)
 
+            # Giảm trùng bộ đáp án fallback: gắn ngữ cảnh theo concept hiện tại.
+            opts = [
+                f"{self._clean_text(opts[0])} Trọng tâm: {concept_clean}.",
+                f"{self._clean_text(opts[1])} Trong ngữ cảnh {concept_clean}.",
+                f"{self._clean_text(opts[2])} Khi xét {concept_clean}.",
+                f"{self._clean_text(opts[3])} Trong phạm vi {concept_clean}.",
+            ]
+
         labels = ["A", "B", "C", "D"]
         q = {
             "question": self._clean_text(q_text),
@@ -918,6 +957,42 @@ Trả về JSON đúng schema:
         tokens = re.findall(r"[a-zà-ỹ0-9]{3,}", low)
         stop = {"trong", "của", "và", "được", "một", "những", "các", "cho", "với", "the", "that", "this"}
         return {t for t in tokens if t not in stop}
+
+    def _normalize_option_text(self, option: str):
+        text = self._clean_text(str(option))
+        text = re.sub(r"^[A-D][\.)]\s*", "", text, flags=re.IGNORECASE)
+        return self._clean_text(text).lower()
+
+    def _option_signature(self, options):
+        normalized = [self._normalize_option_text(opt) for opt in (options or [])]
+        return "|".join(normalized)
+
+    def _question_pool_has_low_diversity(self, rows):
+        if not rows:
+            return True
+
+        signatures = []
+        for row in rows:
+            try:
+                parsed = json.loads(row.options) if isinstance(row.options, str) else (row.options or [])
+            except Exception:
+                parsed = []
+            if not isinstance(parsed, list) or len(parsed) != 4:
+                continue
+            signatures.append(self._option_signature(parsed))
+
+        if not signatures:
+            return True
+
+        unique_signatures = set(signatures)
+        if len(unique_signatures) <= max(2, len(signatures) // 5):
+            return True
+
+        most_common_count = max(signatures.count(sig) for sig in unique_signatures)
+        if most_common_count >= max(4, int(len(signatures) * 0.6)):
+            return True
+
+        return False
 
     def validate_question(self, q):
         question = self._clean_text(q.get("question", ""))
@@ -995,6 +1070,7 @@ Trả về JSON đúng schema:
         bloom_targets = self._build_bloom_schedule(count)
         questions = []
         used_questions = set()
+        used_option_signatures = set()
         unique_concepts = []
         seen = set()
 
@@ -1025,7 +1101,13 @@ Trả về JSON đúng schema:
             q_key = self._clean_text(q["question"]).lower()
             if q_key in used_questions:
                 continue
+
+            option_signature = self._option_signature(q.get("options", []))
+            if option_signature in used_option_signatures:
+                continue
+
             used_questions.add(q_key)
+            used_option_signatures.add(option_signature)
             questions.append(q)
 
         return questions
@@ -1073,15 +1155,26 @@ Trả về JSON đúng schema:
         subject_id = self._resolve_subject_id(subject)
         self._active_subject = subject
 
-        if force_refresh:
+        existing_rows = self.db.query(QuestionBank).filter(
+            QuestionBank.subject == subject,
+            QuestionBank.source_file == source_file,
+        ).all()
+
+        should_refresh = force_refresh
+        if not should_refresh:
+            should_refresh = len(existing_rows) < count or self._question_pool_has_low_diversity(existing_rows)
+
+        if should_refresh:
             self.db.query(QuestionBank).filter(
                 QuestionBank.subject == subject,
                 QuestionBank.source_file == source_file,
             ).delete(synchronize_session=False)
             self.db.commit()
+        else:
+            return self._format(existing_rows[:count])
 
         previous_llm_flag = getattr(self, "_disable_llm_generation", False)
-        self._disable_llm_generation = True
+        self._disable_llm_generation = previous_llm_flag
 
         try:
             concepts = []

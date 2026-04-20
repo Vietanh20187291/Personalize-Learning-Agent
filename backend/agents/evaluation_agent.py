@@ -21,7 +21,11 @@ class EvaluationAgent:
         self.client = Groq(api_key=self.api_key)
         self.model = "llama-3.3-70b-versatile" 
         self.db = db_session
-        self.vector_store = get_vector_store()
+        try:
+            self.vector_store = get_vector_store()
+        except Exception as exc:
+            print(f"⚠️ EvaluationAgent fallback mode (vector store unavailable): {exc}")
+            self.vector_store = None
 
     # --- HÀM ĐÁNH GIÁ HIỆU SUẤT TỔNG THỂ (CẤU TRÚC 1-10-1) ---
     def _compute_login_time_metrics(self, user_id: int):
@@ -210,7 +214,7 @@ class EvaluationAgent:
             
             # Lấy context từ tài liệu
             doc_context = ""
-            if source_file:
+            if source_file and self.vector_store is not None:
                 try:
                     docs = self.vector_store.similarity_search(
                         question_text,

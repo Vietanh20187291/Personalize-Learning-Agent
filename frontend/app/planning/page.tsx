@@ -85,6 +85,7 @@ export default function PlanningPage() {
 
   const [inProgressDocIds, setInProgressDocIds] = useState<number[]>([]);
   const [draggingDocId, setDraggingDocId] = useState<number | null>(null);
+  const [dragSourceColumn, setDragSourceColumn] = useState<"todo" | "inprogress" | null>(null);
 
   const [examples, setExamples] = useState<string[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatItem[]>([
@@ -201,11 +202,14 @@ export default function PlanningPage() {
 
   const handleRegenerate = async () => {
     if (!userId) return;
+    const confirmed = window.confirm("Bạn có chắc muốn làm mới kế hoạch? Hệ thống sẽ tạo lại kế hoạch học tập mới từ Planning Agent.");
+    if (!confirmed) return;
+
     try {
       setRefreshing(true);
       const res = await axios.post(`${apiBaseUrl}/api/planning/plan/regenerate`, {
         user_id: userId,
-        reason: "manual_regenerate",
+        reason: `manual_regenerate_confirmed_${Date.now()}`,
       });
       setPlan(res.data?.plan || null);
       setInProgressDocIds([]);
@@ -249,14 +253,30 @@ export default function PlanningPage() {
 
   const onTodoDragStart = (docId: number) => {
     setDraggingDocId(docId);
+    setDragSourceColumn("todo");
+  };
+
+  const onInProgressDragStart = (docId: number) => {
+    setDraggingDocId(docId);
+    setDragSourceColumn("inprogress");
   };
 
   const onDropToInProgress = () => {
     if (!draggingDocId) return;
+    if (dragSourceColumn !== "todo") return;
     const canMove = todoSteps.some((step) => step.document_id === draggingDocId);
     if (!canMove) return;
     setInProgressDocIds((prev) => (prev.includes(draggingDocId) ? prev : [...prev, draggingDocId]));
     setDraggingDocId(null);
+    setDragSourceColumn(null);
+  };
+
+  const onDropToTodo = () => {
+    if (!draggingDocId) return;
+    if (dragSourceColumn !== "inprogress") return;
+    setInProgressDocIds((prev) => prev.filter((id) => id !== draggingDocId));
+    setDraggingDocId(null);
+    setDragSourceColumn(null);
   };
 
   const sendPlanningMessage = async (content: string) => {
@@ -352,12 +372,16 @@ export default function PlanningPage() {
               <Columns3 size={18} className="text-slate-700" />
               <h2 className="text-lg font-black text-slate-800">Kanban Board</h2>
               <span className="ml-auto text-xs font-semibold text-slate-500">
-                Chỉ cho phép kéo từ To Do sang In Progress
+                Cho phép kéo hai chiều giữa To Do và In Progress
               </span>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 min-h-[420px]">
+              <div
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={onDropToTodo}
+                className="rounded-2xl border border-slate-200 bg-slate-50 p-3 min-h-[420px]"
+              >
                 <div className="flex items-center justify-between px-1 pb-2">
                   <p className="text-xs uppercase tracking-[0.18em] font-black text-slate-600">To Do</p>
                   <span className="text-xs font-bold text-slate-500">{todoSteps.length}</span>
@@ -425,7 +449,12 @@ export default function PlanningPage() {
                 </div>
                 <div className="space-y-3">
                   {inProgressSteps.map((step) => (
-                    <div key={`progress_${step.id}`} className="rounded-xl border border-indigo-200 bg-white p-3 shadow-sm">
+                    <div
+                      key={`progress_${step.id}`}
+                      draggable
+                      onDragStart={() => onInProgressDragStart(step.document_id)}
+                      className="rounded-xl border border-indigo-200 bg-white p-3 shadow-sm cursor-grab"
+                    >
                       <p className="text-sm font-black text-slate-800">{step.document_title || step.document_filename}</p>
                       <p className="text-xs text-slate-600 mt-1">Môn: <span className="font-bold">{step.subject_name || "Chưa rõ"}</span></p>
                       <div className="flex flex-wrap gap-2 mt-2 text-xs">
