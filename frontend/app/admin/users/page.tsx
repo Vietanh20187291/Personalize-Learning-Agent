@@ -13,6 +13,7 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
+import { confirmAlert } from '@/services/alerts';
 
 interface UserData {
   id: number;
@@ -31,7 +32,7 @@ export default function ManageUsersPage() {
   const fetchUsers = async () => {
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch('http://localhost:8000/api/admin/users', {
+      const res = await fetch('http://localhost:8010/api/admin/users', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
@@ -49,12 +50,19 @@ export default function ManageUsersPage() {
 
   // 2. Hàm Xóa tài khoản
   const handleDelete = async (id: number, name: string) => {
-    if (!window.confirm(`Bạn có chắc chắn muốn xóa tài khoản của "${name}" không? Hành động này không thể hoàn tác!`)) return;
+    const confirmed = await confirmAlert({
+      title: "Xóa tài khoản",
+      message: `Bạn có chắc chắn muốn xóa tài khoản của "${name}" không? Hành động này không thể hoàn tác!`,
+      confirmText: "Xóa tài khoản",
+      cancelText: "Hủy",
+      tone: "danger",
+    });
+    if (!confirmed) return;
 
     setDeleteLoading(id);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`http://localhost:8000/api/admin/delete-user/${id}`, {
+      const res = await fetch(`http://localhost:8010/api/admin/delete-user/${id}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });

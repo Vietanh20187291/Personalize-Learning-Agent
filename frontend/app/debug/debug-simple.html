@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Debug Viewer</title>
+    <style>
+        body {
+            font-family: monospace;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            margin-top: 0;
+            color: #fff;
+        }
+        .status {
+            padding: 10px;
+            margin-bottom: 20px;
+            background: #333;
+            border-radius: 4px;
+        }
+        .connected { color: #4ec9b0; }
+        .disconnected { color: #f48771; }
+        .logs {
+            border: 1px solid #444;
+            padding: 10px;
+            height: 500px;
+            overflow-y: auto;
+            background: #252526;
+            margin-bottom: 20px;
+        }
+        .log-entry {
+            margin-bottom: 15px;
+            padding: 10px;
+            border-left: 3px solid #666;
+            background: #1e1e1e;
+        }
+        .log-request {
+            border-left-color: #dcdcaa;
+        }
+        .log-response {
+            border-left-color: #4ec9b0;
+        }
+        .log-error {
+            border-left-color: #f48771;
+        }
+        .log-time {
+            color: #858585;
+            font-size: 12px;
+        }
+        .log-type {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .log-content {
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-size: 12px;
+            margin-top: 5px;
+            padding: 5px;
+            background: #252526;
+            border-radius: 3px;
+        }
+        .log-label {
+            color: #9cdcfe;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>LLM Debug Viewer</h1>
+        
+        <div class="status">
+            Status: <span id="status" class="disconnected">Disconnected</span>
+            | Requests: <span id="req-count">0</span>
+            | Responses: <span id="res-count">0</span>
+        </div>
+
+        <div class="logs" id="logs">
+            <p style="color: #858585;">Waiting for events...</p>
+        </div>
+
+        <button onclick="clearLogs()" style="padding: 8px 16px; background: #333; color: #d4d4d4; border: 1px solid #555; cursor: pointer; border-radius: 4px;">Clear Logs</button>
+    </div>
+
+    <script>
+        let requestCount = 0;
+        let responseCount = 0;
+
+        function connectSSE() {
+            const apiBase = 'http://localhost:8000';
+            const sseUrl = `${apiBase}/debug/stream`;
+
+            console.log('[DEBUG] Connecting to:', sseUrl);
+
+            const eventSource = new EventSource(sseUrl);
+
+            eventSource.onopen = () => {
+                console.log('[DEBUG] Connected');
+                document.getElementById('status').textContent = 'Connected';
+                document.getElementById('status').className = 'connected';
+            };
+
+            eventSource.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    console.log('[DEBUG] Data:', data);
+                    addLog(data);
+                } catch (e) {
+                    console.error('[DEBUG] Parse error:', e);
+                }
+            };
+
+            eventSource.onerror = (error) => {
+                console.error('[DEBUG] Connection error:', error);
+                document.getElementById('status').textContent = 'Disconnected';
+                document.getElementById('status').className = 'disconnected';
+                eventSource.close();
+                
+                // Reconnect after 3 seconds
+                setTimeout(connectSSE, 3000);
+            };
+        }
+
+        function addLog(data) {
+            const logsDiv = document.getElementById('logs');
+            
+            // Clear "Waiting for events" message if exists
+            if (logsDiv.querySelector('p[style*="color"]')) {
+                logsDiv.innerHTML = '';
+            }
+
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+
+            const time = new Date(data.timestamp).toLocaleTimeString();
+            const timeSpan = `<div class="log-time">[${time}]</div>`;
+
+            if (data.type === 'llm_request') {
+                requestCount++;
+                document.getElementById('req-count').textContent = requestCount;
+                entry.className += ' log-request';
+                entry.innerHTML = timeSpan + 
+                    `<div class="log-type">➜ REQUEST</div>` +
+                    `<div class="log-content">` +
+                    `<div><span class="log-label">System Prompt:</span></div>` +
+                    `<div>${escapeHtml(data.system_prompt || '')}</div>` +
+                    `<div style="margin-top: 5px;"><span class="log-label">User Prompt:</span></div>` +
+                    `<div>${escapeHtml(data.prompt || '')}</div>` +
+                    `</div>`;
+            } else if (data.type === 'llm_response') {
+                responseCount++;
+                document.getElementById('res-count').textContent = responseCount;
+                entry.className += ' log-response';
+                entry.innerHTML = timeSpan + 
+                    `<div class="log-type">⬅ RESPONSE (${data.duration_ms}ms)</div>` +
+                    `<div class="log-content">` +
+                    `<div>${escapeHtml(data.response || '')}</div>` +
+                    `</div>`;
+            } else if (data.type === 'llm_error') {
+                entry.className += ' log-error';
+                entry.innerHTML = timeSpan + 
+                    `<div class="log-type">✕ ERROR (${data.duration_ms}ms)</div>` +
+                    `<div class="log-content">` +
+                    `<div>${escapeHtml(data.error || '')}</div>` +
+                    `</div>`;
+            }
+
+            logsDiv.appendChild(entry);
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return (text || '').replace(/[&<>"']/g, m => map[m]);
+        }
+
+        function clearLogs() {
+            document.getElementById('logs').innerHTML = '<p style="color: #858585;">Cleared</p>';
+            requestCount = 0;
+            responseCount = 0;
+            document.getElementById('req-count').textContent = '0';
+            document.getElementById('res-count').textContent = '0';
+        }
+
+        connectSSE();
+    </script>
+</body>
+</html>

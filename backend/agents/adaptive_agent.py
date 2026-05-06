@@ -2,6 +2,7 @@ import json
 import os
 import re
 import random
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -11,7 +12,9 @@ from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, Te
 from pptx import Presentation
 from sqlalchemy.orm import Session
 
-from db.models import Document, LearnerProfile, LearningRoadmap, Subject
+from config import settings
+from db.models import Document, DocumentPublication, LearnerProfile, LearningRoadmap, StudentDocumentEvaluation, Subject, User
+from llm_trace import log_llm_error, log_llm_request, log_llm_response
 from rag.vector_store import get_vector_store
 
 # Tải biến môi trường
@@ -22,10 +25,14 @@ MATERIAL_BRIEF_CACHE: Dict[str, dict] = {}
 class AdaptiveAgent:
     def __init__(self, db: Session):
         self.db = db
-        self.api_key = (os.getenv("GROQ_KEY_ADAPTIVE") or "").strip()
+        self.api_key = self._resolve_groq_api_key()
+        self.request_timeout_seconds = float(getattr(settings, "ADAPTIVE_AGENT_TIMEOUT_SECONDS", 18) or 18)
         api_key_low = self.api_key.lower()
         if self.api_key and "dummy" not in api_key_low and "testing" not in api_key_low and "placeholder" not in api_key_low:
-            self.client = Groq(api_key=self.api_key)
+            try:
+                self.client = Groq(api_key=self.api_key, timeout=self.request_timeout_seconds)
+            except TypeError:
+                self.client = Groq(api_key=self.api_key)
         else:
             self.client = None
         self.model = "llama-3.3-70b-versatile"
@@ -37,6 +44,26 @@ class AdaptiveAgent:
         except Exception as exc:
             print(f"⚠️ AdaptiveAgent fallback mode (vector store unavailable): {exc}")
             self.vector_store = None
+
+    def _resolve_groq_api_key(self) -> str:
+        candidate_names = [
+            "GROQ_KEY_ADAPTIVE",
+            "GROQ_API_KEY",
+            "GROQ_KEY_DEBUG",
+            "GROQ_KEY_ASSESSMENT",
+        ]
+        blocked_tokens = ("dummy", "testing", "placeholder")
+
+        for env_name in candidate_names:
+            value = (os.getenv(env_name) or "").strip()
+            if not value:
+                continue
+            lowered = value.lower()
+            if any(token in lowered for token in blocked_tokens):
+                continue
+            return value
+
+        return (os.getenv("GROQ_KEY_ADAPTIVE") or "").strip()
 
     def _resolve_subject(self, subject: str) -> Subject:
         subject_name = (subject or "").strip()
@@ -68,6 +95,114 @@ class AdaptiveAgent:
             {"session": 11, "topic": "KIỂM TRA TỔNG HỢP CUỐI KHÓA", "description": "Bài thi đánh giá toàn diện mức độ nắm vững kiến thức.", "focus_level": level_text},
         ]
         return sessions
+
+    def _build_document_driven_roadmap(
+        self,
+        user_id: int,
+        subject_id: int,
+        subject_name: str,
+        current_level: str,
+        allowed_filenames: Optional[list] = None,
+    ) -> List[dict]:
+        user = self.db.query(User).filter(User.id == user_id).first()
+        enrolled_class_ids = [c.id for c in (getattr(user, "enrolled_classes", []) or [])]
+
+        query = self.db.query(Document).join(
+            DocumentPublication,
+            DocumentPublication.doc_id == Document.id,
+        ).filter(
+            Document.subject_id == subject_id,
+            DocumentPublication.is_visible_to_students == True,
+        )
+
+        if enrolled_class_ids:
+            query = query.filter(Document.class_id.in_(enrolled_class_ids))
+        if allowed_filenames:
+            query = query.filter(Document.filename.in_(allowed_filenames))
+
+        docs = query.order_by(Document.upload_time.asc(), Document.id.asc()).all()
+        if not docs:
+            docs = self.db.query(Document).filter(
+                Document.subject_id == subject_id,
+            ).order_by(Document.upload_time.asc(), Document.id.asc()).all()
+            if allowed_filenames:
+                docs = [doc for doc in docs if (doc.filename or "") in set(allowed_filenames)]
+
+        eval_rows = self.db.query(StudentDocumentEvaluation).filter(
+            StudentDocumentEvaluation.user_id == user_id,
+            StudentDocumentEvaluation.subject_id == subject_id,
+        ).all()
+        eval_map = {int(row.document_id): row for row in eval_rows}
+
+        prioritized = []
+        completed = []
+        for doc in docs:
+            evaluation = eval_map.get(int(doc.id))
+            attempts = int(evaluation.attempts or 0) if evaluation else 0
+            latest_score = float(evaluation.latest_score) if evaluation and evaluation.latest_score is not None else None
+            title = self._clean_text(doc.title or doc.filename or f"Tài liệu {doc.id}")
+
+            if attempts <= 0:
+                prioritized.append({
+                    "doc": doc,
+                    "title": title,
+                    "score": -1.0,
+                    "priority": 0,
+                    "reason": "Chưa học tài liệu này, nên ưu tiên trước.",
+                })
+                continue
+
+            if latest_score is not None and latest_score < 40.0:
+                prioritized.append({
+                    "doc": doc,
+                    "title": title,
+                    "score": latest_score,
+                    "priority": 1,
+                    "reason": f"Điểm gần nhất {latest_score:.1f} dưới 40, cần học lại kỹ.",
+                })
+                continue
+
+            completed.append({
+                "doc": doc,
+                "title": title,
+                "score": latest_score if latest_score is not None else 100.0,
+                "priority": 2,
+                "reason": "Đã học ổn, giữ làm tài liệu ôn tập sau cùng.",
+            })
+
+        if not prioritized:
+            prioritized = completed[:]
+
+        prioritized.sort(
+            key=lambda item: (
+                int(item["priority"]),
+                float(item["score"]),
+                str(item["title"]).lower(),
+                str(item["doc"].filename or "").lower(),
+            )
+        )
+
+        day_pattern = (3, 4)
+        roadmap: List[dict] = []
+        for idx, item in enumerate(prioritized, start=1):
+            block_days = day_pattern[(idx - 1) % len(day_pattern)]
+            title = str(item["title"])
+            description = (
+                f"Tập trung {block_days} ngày cho tài liệu '{title}'. "
+                f"{item['reason']}"
+            )
+            roadmap.append(
+                {
+                    "session": idx,
+                    "topic": title,
+                    "description": description[:220],
+                    "focus_level": (current_level or "Beginner").upper(),
+                    "document_id": int(item["doc"].id),
+                    "source_file": str(item["doc"].filename or ""),
+                }
+            )
+
+        return roadmap or self._build_fallback_roadmap(subject_name, current_level)
 
     def _build_fallback_tutor_reply(self, subject: str, user_message: str, roadmap_context: str, context_docs: str) -> str:
         short_context = ""
@@ -173,6 +308,72 @@ class AdaptiveAgent:
                 return doc
 
         return None
+
+    def _resolve_document_file_path(self, doc: Optional[Document]) -> str:
+        if not doc:
+            return ""
+
+        project_root = Path(__file__).resolve().parents[2]
+        backend_root = Path(__file__).resolve().parents[1]
+        candidates: List[Path] = []
+
+        raw_path = self._clean_text(getattr(doc, "file_path", ""))
+        if raw_path:
+            path_obj = Path(raw_path)
+            candidates.append(path_obj)
+            if not path_obj.is_absolute():
+                candidates.append((project_root / raw_path).resolve())
+                candidates.append((backend_root / raw_path).resolve())
+
+        filename = self._clean_text(getattr(doc, "filename", ""))
+        if filename:
+            candidates.append((project_root / "temp_uploads" / filename).resolve())
+            candidates.append((backend_root / "temp_uploads" / filename).resolve())
+
+        seen = set()
+        for candidate in candidates:
+            candidate_str = str(candidate)
+            if candidate_str in seen:
+                continue
+            seen.add(candidate_str)
+            try:
+                if candidate.exists() and candidate.is_file():
+                    return candidate_str
+            except Exception:
+                continue
+
+        return ""
+
+    def _get_document_chat_context(
+        self,
+        subject: str,
+        source_file: str = "",
+        allowed_filenames: list = None,
+        document_id: Optional[int] = None,
+    ) -> Dict[str, str]:
+        doc = self._fetch_document(subject, source_file=source_file, document_id=document_id)
+        effective_source = self._clean_text(getattr(doc, "filename", "")) or self._clean_text(source_file)
+
+        raw_text = ""
+        resolved_path = self._resolve_document_file_path(doc)
+        if resolved_path:
+            raw_text = self._load_document_text(resolved_path)
+
+        if not raw_text.strip():
+            raw_text = self._collect_rag_text(
+                subject,
+                source_file=effective_source,
+                allowed_filenames=allowed_filenames,
+                document_id=document_id,
+            )
+
+        normalized_text = self._normalize_material_text(raw_text)
+        final_text = normalized_text or self._clean_text(raw_text)
+
+        return {
+            "source_file": effective_source or self._clean_text(source_file),
+            "content": final_text[:22000],
+        }
 
     def _collect_rag_text(self, subject: str, source_file: str = "", allowed_filenames: list = None, document_id: Optional[int] = None):
         if self.vector_store is None:
@@ -349,6 +550,8 @@ NỘI DUNG ĐÃ LÀM SẠCH:
 """.strip()
 
         try:
+            started = time.perf_counter()
+            log_llm_request("groq", self.model, prompt=prompt, system_prompt="Output valid JSON only.")
             completion = self.client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": "Output valid JSON only."},
@@ -359,8 +562,10 @@ NỘI DUNG ĐÃ LÀM SẠCH:
                 max_tokens=2200,
                 response_format={"type": "json_object"},
             )
-            data = json.loads(completion.choices[0].message.content)
-
+            raw_content = completion.choices[0].message.content
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            log_llm_response("groq", self.model, response=str(raw_content), duration_ms=duration_ms)
+            data = json.loads(raw_content)
             summary = self._clean_text(str(data.get("summary", "")))
             rewritten_material = self._clean_text(str(data.get("rewritten_material", "")))
             rewritten_title = self._clean_text(str(data.get("rewritten_title", ""))) or self._clean_text(source_file) or f"{subject} - Học liệu đã biên tập"
@@ -394,6 +599,7 @@ NỘI DUNG ĐÃ LÀM SẠCH:
                 "suggested_prompts": suggested_prompts or self._build_rule_based_material_brief(subject, source_file, cleaned_text)["suggested_prompts"],
             }
         except Exception as exc:
+            log_llm_error("groq", self.model, error_message=str(exc), duration_ms=0.0)
             print(f"⚠️ Lỗi biên tập học liệu: {exc}")
             return self._build_rule_based_material_brief(subject, source_file, cleaned_text)
 
@@ -409,7 +615,17 @@ NỘI DUNG ĐÃ LÀM SẠCH:
             file_text = self._load_document_text(doc.file_path)
 
         effective_source = doc.filename if doc and doc.filename else source_file
-        rag_text = self._collect_rag_text(subject, source_file=effective_source, allowed_filenames=allowed_filenames, document_id=document_id)
+        rag_text = ""
+        # Avoid Chroma similarity_search here when the opened document file is
+        # already available. This keeps document-grounded tutoring stable on
+        # Windows where the Rust Chroma client can crash the process.
+        if not file_text.strip():
+            rag_text = self._collect_rag_text(
+                subject,
+                source_file=effective_source,
+                allowed_filenames=allowed_filenames,
+                document_id=document_id,
+            )
 
         combined_parts = [part for part in [file_text, rag_text] if part.strip()]
         combined_text = "\n\n".join(combined_parts)
@@ -470,78 +686,14 @@ NỘI DUNG ĐÃ LÀM SẠCH:
                 profile = self.db.query(LearnerProfile).filter_by(user_id=user_id, subject=subject_name).first()
             current_level = profile.current_level if profile else "Beginner"
 
-        context_summary = ""
-        if allowed_filenames and self.vector_store is not None:
-            try:
-                if current_level == "Advanced":
-                    search_query = f"Kiến thức nâng cao, chuyên sâu, thiết kế hệ thống, bảo mật, tối ưu hóa, giao thức phức tạp của môn {subject_name}"
-                elif current_level == "Intermediate":
-                    search_query = f"Kiến thức vận dụng, các mô hình thực tế, thuật toán, cấu trúc chi tiết của môn {subject_name}"
-                else:
-                    search_query = f"Mục lục, giới thiệu, các khái niệm cơ bản, tổng quan của môn {subject_name}"
-
-                # Tăng k lên 40 để AI nhìn được bức tranh toàn cảnh toàn bộ cuốn giáo trình
-                docs = self.vector_store.similarity_search(
-                    search_query, 
-                    k=40, 
-                    filter={"source": {"$in": allowed_filenames}}
-                )
-                context_summary = "\n".join([doc.page_content for doc in docs])
-            except Exception as e:
-                print(f"⚠️ Lỗi trích xuất chủ đề: {e}")
-
-        prompt = f"""
-        BẠN LÀ CHUYÊN GIA THIẾT KẾ CHƯƠNG TRÌNH HỌC (CURRICULUM ARCHITECT).
-        MÔN HỌC: {subject_name}
-        TRÌNH ĐỘ HỌC VIÊN HIỆN TẠI: {current_level.upper()}
-        
-        TÀI LIỆU GIÁO VIÊN (NGUỒN THAM KHẢO):
-        {context_summary[:12000] if context_summary else "Không có tài liệu."}
-
-        [CHIẾN LƯỢC ÉP KIỂU THEO TRÌNH ĐỘ]:
-        Học viên đang ở trình độ **{current_level.upper()}**. Bạn PHẢI thiết kế ĐÚNG 11 SESSIONS (10 học + 1 thi).
-
-        QUY TẮC NỘI DUNG TỪ SESSION 1 ĐẾN 10 (Lệnh sống còn):
-        - Bám sát hệ thống kiến thức trong tài liệu. 
-        - Phân bổ kiến thức logic từ Session 1 đến 10, không được lặp lại chủ đề.
-        - Mức Intermediate/Advanced: CẤM dạy lại "Giới thiệu/Tổng quan cơ bản". Đi thẳng vào kiến thức thực tế/chuyên sâu.
-
-        QUY TẮC SESSION 11: 
-        - Bắt buộc là: {{"session": 11, "topic": "KIỂM TRA TỔNG HỢP CUỐI KHÓA", "description": "Bài thi đánh giá toàn diện...", "focus_level": "{current_level.upper()}"}}
-
-        [YÊU CẦU ĐẦU RA JSON]:
-        {{
-            "strategy": "Ghi rõ chiến lược thiết kế...",
-            "roadmap": [
-                {{
-                    "session": 1,
-                    "topic": "Tên bài học...",
-                    "description": "Mô tả chi tiết (Tối đa 20 từ)...",
-                    "focus_level": "{current_level.upper()}"
-                }}
-            ]
-        }}
-        """
-
         try:
-            final_roadmap = []
-            if self.client:
-                chat_completion = self.client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": "You are a strict curriculum architect. Output valid JSON containing exactly 11 sessions."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    model=self.model,
-                    temperature=0.2,
-                    max_tokens=4000,
-                    response_format={"type": "json_object"}
-                )
-
-                roadmap_data = json.loads(chat_completion.choices[0].message.content)
-                final_roadmap = roadmap_data.get("roadmap", [])
-
-            if len(final_roadmap) != 11:
-                final_roadmap = self._build_fallback_roadmap(subject_name, current_level)
+            final_roadmap = self._build_document_driven_roadmap(
+                user_id=user_id,
+                subject_id=subject_id,
+                subject_name=subject_name,
+                current_level=current_level,
+                allowed_filenames=allowed_filenames,
+            )
 
             self.db.query(LearningRoadmap).filter_by(user_id=user_id, subject_id=subject_id).delete()
 
@@ -587,72 +739,71 @@ NỘI DUNG ĐÃ LÀM SẠCH:
         if history is None:
             history = []
 
-        material_brief = self._get_material_brief(
+        document_context = self._get_document_chat_context(
             subject,
             source_file=source_file,
             allowed_filenames=allowed_filenames,
-            session_topic=session_topic,
             document_id=document_id,
         )
-        rewritten_material = material_brief.get("rewritten_material", "")
-        summary = material_brief.get("summary", "")
-        key_points = material_brief.get("key_points", []) or []
-        important_notes = material_brief.get("important_notes", []) or []
+        document_text = document_context.get("content", "")
+        effective_source = document_context.get("source_file", "") or self._clean_text(source_file)
 
-        key_points_text = "\n".join([f"- {item}" for item in key_points[:6]]) if key_points else "- Chưa trích được ý chính rõ ràng từ tài liệu."
-        notes_text = "\n".join([f"- {item}" for item in important_notes[:5]]) if important_notes else "- Chưa trích được lưu ý quan trọng rõ ràng từ tài liệu."
+        if not document_text:
+            return "Mình chưa đọc được nội dung của tài liệu đang mở. Hãy mở lại đúng tài liệu này rồi gửi câu hỏi thêm một lần nữa."
 
-        subject_obj = self.db.query(Subject).filter(Subject.name.ilike((subject or "").strip())).first()
-        profile = None
-        if subject_obj:
-            profile = self.db.query(LearnerProfile).filter_by(subject_id=subject_obj.id).first()
-        if not profile:
-            profile = self.db.query(LearnerProfile).filter_by(subject=subject).first()
-        current_level = profile.current_level if profile else "Beginner"
+        system_prompt = f"""Bạn là Tutor Agent của môn {subject}.
 
-        system_prompt = f"""BẠN LÀ MỘT GIA SƯ AI TƯƠNG TÁC 1-1 CỰC KỲ XUẤT SẮC CỦA MÔN {subject}.
-    TÀI LIỆU ĐÃ ĐƯỢC BIÊN TẬP LẠI THEO CÁCH DỄ HỌC, KHÔNG CÒN PHẦN THÔNG TIN HÀNH CHÍNH THỪA.
-TRÌNH ĐỘ HỌC VIÊN: {current_level}
-[NỘI DUNG BUỔI HỌC HÔM NAY]: {roadmap_context}
-    [BẢN BIÊN TẬP TÀI LIỆU]: {rewritten_material[:5000]}
-    [TÓM TẮT NGẮN]: {summary[:900]}
-    [Ý CHÍNH]:
-    {key_points_text}
-    [LƯU Ý QUAN TRỌNG]:
-    {notes_text}
+Nhiệm vụ:
+- Trả lời đúng câu hỏi người dùng dựa trên tài liệu đang mở.
+- Tài liệu đính kèm ở dưới là ngữ cảnh chính; không cần tự tóm tắt trước nếu người dùng chưa yêu cầu.
+- Nếu tài liệu không có đủ thông tin để kết luận, nói rõ là không thấy thông tin đó trong tài liệu hiện tại.
+- Không trả lời kiểu chung chung như "không thể hỗ trợ".
+- Trả lời bằng tiếng Việt, rõ ràng, dễ hiểu, ưu tiên đi thẳng vào yêu cầu.
 
-[NGUYÊN TẮC TỐI THƯỢNG]:
-    - Trả lời trực tiếp, không lặp lại nguyên văn bản biên tập.
-    - Nếu người học chào mở bài, hãy tóm tắt mục tiêu buổi học, 2-3 ý quan trọng nhất và 1 câu hỏi gợi mở.
-    - Nếu người học hỏi chi tiết, giải thích theo ngôn ngữ đơn giản, có ví dụ ngắn nếu phù hợp.
-    - Chỉ dựa trên bản biên tập tài liệu và ngữ cảnh buổi học; không bịa thêm kiến thức ngoài tài liệu.
+Ngữ cảnh phiên học:
+- Buổi học hiện tại: {roadmap_context or session_topic or effective_source or subject}
+- Tài liệu đang mở: {effective_source or "Tài liệu hiện tại"}
 
-[PHONG CÁCH]: Ngắn gọn (tối đa 3-4 câu), thân thiện, năng động.
+[NỘI DUNG TÀI LIỆU ĐANG MỞ]
+{document_text}
 """
 
         api_messages = [{"role": "system", "content": system_prompt}]
-        # Lấy 8 tin nhắn gần nhất để AI có context tốt hơn về cuộc trò chuyện
-        for msg in history[-8:]: 
+        for msg in history[-8:]:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             if role in ["user", "assistant"] and content:
                 api_messages.append({"role": role, "content": content})
+        api_messages.append({"role": "user", "content": user_message})
 
         if not self.client:
-            return self._build_fallback_tutor_reply(subject, user_message, roadmap_context, rewritten_material or summary)
+            return "Tutor Agent hiện chưa kết nối được Groq. Hãy kiểm tra khóa Groq của hệ thống rồi thử lại."
 
         try:
+            trace_prompt = "\n\n".join([
+                f"{msg.get('role', 'user').upper()}: {msg.get('content', '')}"
+                for msg in api_messages[1:]
+                if str(msg.get('content', '')).strip()
+            ])
+            started = time.perf_counter()
+            log_llm_request("groq", self.model, prompt=trace_prompt, system_prompt=system_prompt)
             chat_completion = self.client.chat.completions.create(
                 messages=api_messages,
                 model=self.model,
-                temperature=0.6 
+                temperature=0.35,
             )
-            return chat_completion.choices[0].message.content
+            response_text = str(chat_completion.choices[0].message.content or "").strip()
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            log_llm_response("groq", self.model, response=str(response_text), duration_ms=duration_ms)
+            return response_text or "Mình chưa nhận được câu trả lời từ Groq cho tài liệu này. Bạn hãy gửi lại câu hỏi ngắn hơn."
         except Exception as e:
+            log_llm_error("groq", self.model, error_message=str(e), duration_ms=0.0)
             error_text = str(e).lower()
             if "invalid_api_key" in error_text or "401" in error_text:
-                return self._build_fallback_tutor_reply(subject, user_message, roadmap_context, rewritten_material or summary)
-            return "Gia sư AI đang tạm gián đoạn kết nối. Bạn gửi lại câu hỏi ngắn hơn, mình sẽ hướng dẫn từng bước."
+                return "Tutor Agent chưa thể gọi Groq vì khóa API không hợp lệ hoặc đã hết hiệu lực."
+            if "rate limit" in error_text or "429" in error_text:
+                return "Tutor Agent đang chạm giới hạn tạm thời từ Groq. Bạn thử gửi lại sau ít phút."
+            return "Tutor Agent đang lỗi kết nối tới Groq. Bạn hãy thử gửi lại câu hỏi ngắn hơn."
 
     # ==========================================
     # 3. HÀM SINH CÂU HỎI TRẮC NGHIỆM

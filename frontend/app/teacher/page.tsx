@@ -1,512 +1,435 @@
 "use client";
-import React, { useState, useEffect, useCallback } from 'react';
-import axios from 'axios';
-import FileUploader from '@/components/FileUploader';
-import { 
-  LayoutDashboard, 
-  Plus, 
-  Loader2, 
-  ChevronRight,
-  GraduationCap,
-  Info,
-  BookOpen,
-  FolderOpen,
-  Copy,
-  Trash2,
-  Bot,
-  Sparkles,
-  SendHorizontal
-} from 'lucide-react';
-import { toast } from 'react-hot-toast';
-import { useRouter } from 'next/navigation';
-import Link from 'next/link';
 
-interface SubjectItem {
+import { useEffect, useMemo, useState } from "react";
+import axios from "axios";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { toast } from "react-hot-toast";
+import {
+  ArrowRight,
+  BookOpen,
+  FileText,
+  FolderOpen,
+  GraduationCap,
+  LayoutDashboard,
+  LibraryBig,
+  Plus,
+  Sparkles,
+  Users,
+} from "lucide-react";
+
+type SubjectItem = {
   id: number;
   name: string;
   description?: string;
   icon?: string;
+  class_count?: number;
+};
+
+type ClassroomItem = {
+  id: number;
+  name: string;
+  subject_id: number;
+  subject: string;
+  class_code: string;
+  teacher_id: number;
+  student_count?: number;
+};
+
+type DocumentItem = {
+  id: number;
+  title?: string;
+  filename?: string;
+  subject?: string;
+  is_visible_to_students?: boolean;
+};
+
+type TeacherModuleCardProps = {
+  title: string;
+  description: string;
+  href: string;
+  icon: React.ReactNode;
+  metric: string;
+  chips?: string[];
+  accentClass: string;
+};
+
+function TeacherModuleCard({
+  title,
+  description,
+  href,
+  icon,
+  metric,
+  chips = [],
+  accentClass,
+}: TeacherModuleCardProps) {
+  return (
+    <Link href={href} className="section-panel group p-5 transition-all hover:-translate-y-1">
+      <div className="flex items-start justify-between gap-4">
+        <div className={`flex h-11 w-11 items-center justify-center rounded-[1rem] ${accentClass}`}>
+          {icon}
+        </div>
+        <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">
+          {metric}
+        </span>
+      </div>
+
+      <h3 className="mt-4 text-base font-black text-slate-900">{title}</h3>
+      <p className="mt-2 text-sm leading-6 text-slate-600">{description}</p>
+
+      {chips.length > 0 ? (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {chips.slice(0, 3).map((chip) => (
+            <span
+              key={chip}
+              className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold text-slate-600"
+            >
+              {chip}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex items-center gap-2 text-[11px] font-black uppercase tracking-[0.18em] text-[var(--brand)]">
+        <span>Mở khu vực</span>
+        <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+      </div>
+    </Link>
+  );
 }
 
 export default function TeacherPage() {
   const router = useRouter();
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
-  
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [classes, setClasses] = useState([]);
-  const [selectedClassId, setSelectedClassId] = useState<number | null>(null);
-  const [selectedClassName, setSelectedClassName] = useState<string>("");
-  
-  const [newClassName, setNewClassName] = useState("");
-  const [newClassSubjectId, setNewClassSubjectId] = useState<number | null>(null);
-  const [subjects, setSubjects] = useState<SubjectItem[]>([]);
-  
-  const [loadingClasses, setLoadingClasses] = useState(true);
-  const [createLoading, setCreateLoading] = useState(false);
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8010";
+
   const [teacherId, setTeacherId] = useState<string | null>(null);
-  const [agentPrompt, setAgentPrompt] = useState("");
-  const [agentLoading, setAgentLoading] = useState(false);
-  const [agentReply, setAgentReply] = useState("");
-  const [agentSuggestions, setAgentSuggestions] = useState<string[]>([]);
+  const [subjects, setSubjects] = useState<SubjectItem[]>([]);
+  const [allClasses, setAllClasses] = useState<ClassroomItem[]>([]);
+  const [documents, setDocuments] = useState<DocumentItem[]>([]);
+
+  const [loadingOverview, setLoadingOverview] = useState(true);
+  const [loadingDocuments, setLoadingDocuments] = useState(false);
+
+  const [selectedSubjectId, setSelectedSubjectId] = useState<number | null>(null);
+  const [selectedClassId, setSelectedClassId] = useState<number | null>(null);
 
   useEffect(() => {
-    const id = localStorage.getItem("userId");
     const role = localStorage.getItem("role");
-    
-    if (role !== 'teacher' || !id) {
-      router.push('/auth');
+    const userId = localStorage.getItem("userId");
+
+    if (role !== "teacher" || !userId) {
+      router.push("/auth");
       return;
     }
 
-    setTeacherId(id);
-    fetchSubjects();
-    fetchClasses(id);
+    setTeacherId(userId);
   }, [router]);
 
-  const fetchSubjects = async () => {
-    try {
-      const res = await axios.get(`${apiBaseUrl}/api/subjects`);
-      setSubjects(res.data || []);
-    } catch (e) {
-      toast.error("Không thể tải danh sách môn học");
-      setSubjects([]);
-    }
-  };
+  useEffect(() => {
+    if (!teacherId) return;
+    void loadOverview(teacherId);
+  }, [teacherId]);
 
-  const fetchClasses = async (id: string, selectNewId?: number) => {
-    try {
-      const res = await axios.get(`${apiBaseUrl}/api/classroom/teacher/${id}`);
-      const data = res.data;
-      setClasses(data);
-      
-      // Nếu có ID lớp mới truyền vào, chọn luôn lớp đó
-      if (selectNewId) {
-          const newClass = data.find((c: any) => c.id === selectNewId);
-          if (newClass) {
-              setSelectedClassId(newClass.id);
-              setSelectedClassName(newClass.name);
-              localStorage.setItem("classId", newClass.id.toString());
-              
-              setRefreshKey(prev => prev + 1);
-          }
-      } 
-      // Nếu load lần đầu, chọn lớp đầu tiên
-      else if (data.length > 0 && !selectedClassId) {
-        setSelectedClassId(data[0].id);
-        setSelectedClassName(data[0].name);
-        localStorage.setItem("classId", data[0].id.toString());
-      } else if (data.length === 0) {
-        setSelectedClassId(null);
-        setSelectedClassName("");
-      }
-    } catch (e) {
-      toast.error("Không thể tải danh sách lớp học");
-    } finally {
-      setLoadingClasses(false);
-    }
-  };
+  const filteredClasses = useMemo(() => {
+    if (!selectedSubjectId) return [];
+    return allClasses.filter((item) => item.subject_id === selectedSubjectId);
+  }, [allClasses, selectedSubjectId]);
 
-  const handleCreateClass = async () => {
-    if (!newClassName.trim()) {
-      toast.error("Vui lòng nhập tên lớp!");
-      return;
-    }
-    if (!newClassSubjectId) {
-      toast.error("Vui lòng chọn môn học cho lớp này!");
+  const selectedSubject = useMemo(
+    () => subjects.find((item) => item.id === selectedSubjectId) || null,
+    [subjects, selectedSubjectId]
+  );
+
+  const selectedClass = useMemo(
+    () => allClasses.find((item) => item.id === selectedClassId) || null,
+    [allClasses, selectedClassId]
+  );
+
+  const totalStudents = useMemo(
+    () => allClasses.reduce((sum, item) => sum + Number(item.student_count || 0), 0),
+    [allClasses]
+  );
+
+  const visibleDocuments = useMemo(
+    () => documents.filter((item) => item.is_visible_to_students).length,
+    [documents]
+  );
+
+  useEffect(() => {
+    if (!subjects.length) {
+      setSelectedSubjectId(null);
       return;
     }
 
-    setCreateLoading(true);
-    try {
-      const res = await axios.post(`${apiBaseUrl}/api/classroom/create`, {
-        name: newClassName,
-        subject_id: newClassSubjectId,
-        teacher_id: parseInt(teacherId!)
-      });
-      toast.success(`Đã tạo lớp ${newClassName} thành công!`);
-      
-      setNewClassName("");
-      setNewClassSubjectId(null);
-      
-      // Gọi lại hàm lấy danh sách lớp và báo nó chọn luôn lớp vừa tạo
-      if (res.data.class_id) {
-          fetchClasses(teacherId!, res.data.class_id);
-      } else {
-          fetchClasses(teacherId!);
+    setSelectedSubjectId((current) => {
+      if (current && subjects.some((item) => item.id === current)) {
+        return current;
       }
-      
-    } catch (e: any) {
-      const errorMsg = e.response?.data?.detail || "Lỗi khi tạo lớp học";
-      toast.error(errorMsg);
-    } finally {
-      setCreateLoading(false);
-    }
-  };
 
-  // HÀM XÓA LỚP HỌC
-  const handleDeleteClass = async (e: React.MouseEvent, classIdToDelete: number, className: string) => {
-    e.stopPropagation(); // Ngăn sự kiện click chọn lớp
-    
-    if (!window.confirm(`⚠️ CẢNH BÁO: Bạn có chắc chắn muốn xóa lớp "${className}"? Toàn bộ tài liệu và học sinh trong lớp này sẽ bị gỡ bỏ!`)) {
-        return;
-    }
-
-    try {
-      await axios.delete(`${apiBaseUrl}/api/classroom/delete/${classIdToDelete}?teacher_id=${teacherId}`);
-        toast.success(`Đã xóa lớp ${className}`);
-        
-        // Cập nhật lại UI sau khi xóa
-        if (selectedClassId === classIdToDelete) {
-            setSelectedClassId(null);
-            setSelectedClassName("");
+      const storedClassId = Number(localStorage.getItem("currentClassId") || localStorage.getItem("classId"));
+      if (storedClassId) {
+        const matchedClass = allClasses.find((item) => item.id === storedClassId);
+        if (matchedClass) {
+          return matchedClass.subject_id;
         }
-        
-        fetchClasses(teacherId!);
-    } catch (error: any) {
-        const errorMsg = error.response?.data?.detail || "Lỗi khi xóa lớp học";
-        toast.error(errorMsg);
-    }
-  };
+      }
 
-  const handleUploadSuccess = useCallback(() => {
-    setRefreshKey(prev => prev + 1);
-    toast.success(`Đã cập nhật tri thức cho lớp ${selectedClassName}`);
-  }, [selectedClassName]);
+      return subjects[0]?.id ?? null;
+    });
+  }, [subjects, allClasses]);
 
-  const handleCopyCode = (e: React.MouseEvent, code: string) => {
-    e.stopPropagation(); 
-    navigator.clipboard.writeText(code);
-    toast.success(`Đã copy mã lớp: ${code}`);
-  };
-
-  const handleTeacherAgentAction = (actionMetadata: any) => {
-    if (!actionMetadata) return;
-
-    // Nếu agent đề xuất mở tài liệu, chuyển sang trang adaptive để mở
-    if (actionMetadata.action_type === 'open_document' && actionMetadata.params?.document_id) {
-      try {
-        localStorage.setItem(`orbit_pending_action_${teacherId}`, JSON.stringify(actionMetadata));
-      } catch {}
-      window.location.href = '/adaptive';
-    }
-    // Nếu agent đề xuất mở tab documents, hỗ trợ sau
-    else if (actionMetadata.action_type === 'open_tab' && actionMetadata.tab_name === 'documents') {
-      window.location.href = '/teacher/documents';
-    }
-  };
-
-  const handleAskTeacherAgent = async (presetMessage?: string) => {
-    const message = (presetMessage || agentPrompt).trim();
-
-    if (!teacherId || !selectedClassId) {
-      toast.error("Vui lòng chọn lớp học trước khi dùng agent");
+  useEffect(() => {
+    if (!filteredClasses.length) {
+      setSelectedClassId(null);
       return;
     }
 
-    if (!message) {
-      toast.error("Vui lòng nhập yêu cầu cho agent");
+    setSelectedClassId((current) => {
+      if (current && filteredClasses.some((item) => item.id === current)) {
+        return current;
+      }
+
+      const storedClassId = Number(localStorage.getItem("currentClassId") || localStorage.getItem("classId"));
+      if (storedClassId && filteredClasses.some((item) => item.id === storedClassId)) {
+        return storedClassId;
+      }
+
+      return filteredClasses[0]?.id ?? null;
+    });
+  }, [filteredClasses]);
+
+  useEffect(() => {
+    if (!selectedClassId) {
+      setDocuments([]);
       return;
     }
 
-    setAgentLoading(true);
+    localStorage.setItem("currentClassId", String(selectedClassId));
+    localStorage.setItem("classId", String(selectedClassId));
+    void loadDocuments(selectedClassId);
+  }, [selectedClassId]);
+
+  const loadOverview = async (id: string) => {
+    setLoadingOverview(true);
     try {
-      const res = await axios.post(`${apiBaseUrl}/api/teacher/assistant`, {
-        teacher_id: Number(teacherId),
-        class_id: selectedClassId,
-        message
-      });
+      const [subjectsRes, classesRes] = await Promise.all([
+        axios.get(`${apiBaseUrl}/api/subjects`),
+        axios.get(`${apiBaseUrl}/api/classroom/teacher/${id}`),
+      ]);
 
-      setAgentReply(res.data?.reply || "");
-      setAgentSuggestions(Array.isArray(res.data?.suggested_actions) ? res.data.suggested_actions : []);
-      if (!presetMessage) {
-        setAgentPrompt("");
-      }
-      toast.success("Agent đã phản hồi");
+      const subjectList = Array.isArray(subjectsRes.data) ? subjectsRes.data : [];
+      const classList = Array.isArray(classesRes.data) ? classesRes.data : [];
 
-      // Xử lý action_metadata nếu có
-      if (res.data?.action_metadata) {
-        handleTeacherAgentAction(res.data.action_metadata);
-      }
-    } catch (error: any) {
-      const errorMsg = error.response?.data?.detail || "Agent giảng viên đang bận hoặc chưa sẵn sàng";
-      toast.error(errorMsg);
+      classList.sort((a: ClassroomItem, b: ClassroomItem) => b.id - a.id);
+
+      setSubjects(subjectList);
+      setAllClasses(classList);
+    } catch {
+      toast.error("Không thể tải dữ liệu tổng quan giảng viên");
+      setSubjects([]);
+      setAllClasses([]);
     } finally {
-      setAgentLoading(false);
+      setLoadingOverview(false);
     }
   };
+
+  const loadDocuments = async (classId: number) => {
+    setLoadingDocuments(true);
+    try {
+      const res = await axios.get(`${apiBaseUrl}/api/upload/documents`, {
+        params: { class_id: classId },
+      });
+      setDocuments(Array.isArray(res.data) ? res.data : []);
+    } catch {
+      setDocuments([]);
+      toast.error("Không thể tải tài liệu của lớp đang chọn");
+    } finally {
+      setLoadingDocuments(false);
+    }
+  };
+
+  const subjectChips = useMemo(
+    () => subjects.slice(0, 3).map((item) => `${item.icon ? `${item.icon} ` : ""}${item.name}`),
+    [subjects]
+  );
+
+  const classChips = useMemo(
+    () => filteredClasses.slice(0, 3).map((item) => item.name),
+    [filteredClasses]
+  );
+
+  const documentChips = useMemo(
+    () =>
+      documents
+        .slice(0, 3)
+        .map((item) => String(item.title || item.filename || `Tài liệu ${item.id}`)),
+    [documents]
+  );
 
   return (
-    <div className="min-h-screen pb-20 app-bg">
-      
-      <nav className="bg-white/80 backdrop-blur-lg border-b border-slate-200 px-8 py-4 flex justify-between items-center sticky top-0 z-50">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white shadow-lg shadow-indigo-100">
-            <LayoutDashboard size={20} />
-          </div>
-          <h1 className="display-font text-lg font-black text-slate-800 uppercase tracking-tight hidden sm:block">Teacher Console</h1>
-        </div>
-        <div className="px-4 py-1 bg-indigo-50 border border-indigo-100 rounded-full">
-          <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">Quản trị viên lớp học</p>
-        </div>
-      </nav>
-
-      <main className="max-w-7xl mx-auto p-4 md:p-8">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
-          
-          <section className="lg:col-span-4 space-y-6">
-            <div className="space-y-1">
-              <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest">Quản lý tổ chức</h2>
-              <h3 className="text-xl font-black text-slate-800">Lớp học của tôi</h3>
-            </div>
-
-            <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-200">
-              
-              <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100 mb-6 space-y-3">
-                <input 
-                  type="text" 
-                  value={newClassName}
-                  onChange={(e) => setNewClassName(e.target.value)}
-                  placeholder="Tên lớp (VD: Lập trình C++ N01)..."
-                  className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-bold text-slate-900 outline-none focus:ring-2 ring-indigo-500 transition-all placeholder:text-slate-400"
-                />
-                <div className="flex gap-2">
-                  <select
-                    value={newClassSubjectId ?? ""}
-                    onChange={(e) => setNewClassSubjectId(e.target.value ? Number(e.target.value) : null)}
-                    className={`flex-1 px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-bold outline-none focus:ring-2 ring-indigo-500 transition-all ${newClassSubjectId ? 'text-slate-800' : 'text-slate-400'}`}
-                  >
-                    <option value="" disabled>-- Chọn môn học --</option>
-                    {subjects.map(sub => <option key={sub.id} value={sub.id}>{sub.name}</option>)}
-                  </select>
-                  <button 
-                    onClick={handleCreateClass}
-                    disabled={createLoading}
-                    className="px-4 py-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-50 transition-transform active:scale-95 shadow-md shadow-indigo-100 flex items-center justify-center min-w-[3rem]"
-                  >
-                    {createLoading ? <Loader2 className="animate-spin" size={20} /> : <Plus size={20} />}
-                  </button>
+    <div className="page-shell app-bg">
+      <div className="page-container space-y-5">
+        <section className="hero-panel overflow-hidden">
+          <div className="grid gap-0 xl:grid-cols-[1.08fr_0.92fr]">
+            <div className="soft-grid border-b border-[rgba(15,23,42,0.08)] p-5 md:p-6 xl:border-b-0 xl:border-r">
+              <div className="flex items-start gap-4">
+                <div className="flex h-12 w-12 items-center justify-center rounded-[1.15rem] bg-[rgba(140,59,46,0.08)] text-[var(--brand)]">
+                  <LayoutDashboard className="h-5 w-5" />
                 </div>
-              </div>
-
-              <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
-                {loadingClasses ? (
-                  <div className="flex justify-center py-8 text-slate-400 animate-pulse font-bold text-xs uppercase tracking-widest">Đang tải...</div>
-                ) : classes.length === 0 ? (
-                  <div className="text-center py-10 border-2 border-dashed border-slate-100 rounded-3xl text-slate-400 text-[10px] font-black uppercase">Chưa có dữ liệu</div>
-                ) : (
-                  classes.map((cls: any) => (
-                    <button 
-                      key={cls.id} 
-                      onClick={() => {
-                        setSelectedClassId(cls.id);
-                        setSelectedClassName(cls.name);
-                        localStorage.setItem("classId", cls.id.toString());
-                      }}
-                      className={`w-full group p-4 rounded-2xl flex items-center justify-between transition-all border-2 text-left
-                        ${selectedClassId === cls.id 
-                          ? 'bg-indigo-50 border-indigo-500 ring-4 ring-indigo-50' 
-                          : 'bg-slate-50 border-transparent hover:border-slate-200'}`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-black text-xs shadow-sm transition-colors shrink-0
-                          ${selectedClassId === cls.id ? 'bg-indigo-600 text-white' : 'bg-white text-indigo-600'}`}>
-                          {cls.name.substring(0, 2).toUpperCase()}
-                        </div>
-                        <div className="min-w-0">
-                          <p className="font-black text-slate-800 text-sm truncate">{cls.name}</p>
-                          <div className="flex items-center gap-1 mt-0.5">
-                            <p className={`text-[10px] font-bold uppercase tracking-tighter ${selectedClassId === cls.id ? 'text-indigo-600' : 'text-slate-400'}`}>
-                              Mã lớp: <span className="font-black">{cls.class_code}</span>
-                            </p>
-                            <div 
-                              onClick={(e) => handleCopyCode(e, cls.class_code)}
-                              className={`p-1 rounded-md transition-colors cursor-pointer flex items-center justify-center
-                                ${selectedClassId === cls.id ? 'text-indigo-500 hover:bg-indigo-100' : 'text-slate-400 hover:bg-slate-200 hover:text-indigo-600'}
-                              `}
-                              title="Click để Copy mã lớp"
-                            >
-                              <Copy size={12} />
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      {/* NÚT XÓA LỚP */}
-                      <div className="flex items-center gap-2">
-                          <div 
-                              onClick={(e) => handleDeleteClass(e, cls.id, cls.name)}
-                              className={`p-2 rounded-lg transition-colors cursor-pointer opacity-0 group-hover:opacity-100
-                                ${selectedClassId === cls.id ? 'text-red-400 hover:bg-red-100 hover:text-red-600' : 'text-slate-400 hover:bg-red-50 hover:text-red-500'}
-                              `}
-                              title="Xóa lớp học này"
-                          >
-                              <Trash2 size={16} />
-                          </div>
-                          <ChevronRight size={16} className={`${selectedClassId === cls.id ? 'text-indigo-600 translate-x-1' : 'text-slate-300'} transition-all`} />
-                      </div>
-                    </button>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <div className="bg-indigo-600 p-6 rounded-[2rem] text-white shadow-xl shadow-indigo-100 relative overflow-hidden group">
-                <GraduationCap className="absolute -right-4 -bottom-4 opacity-10 w-32 h-32 group-hover:scale-110 transition-transform duration-500" />
-                <h4 className="font-black text-sm uppercase mb-2 flex items-center gap-2">
-                  <Info size={16} /> Hướng dẫn nhanh
-                </h4>
-                <p className="text-[11px] font-medium leading-relaxed text-indigo-100 relative z-10">
-                  Chọn lớp tương ứng trước khi tải tài liệu. Nhấn vào biểu tượng Copy để lấy Mã Lớp và gửi cho học sinh tham gia.
-                </p>
-            </div>
-          </section>
-
-          <section className="lg:col-span-8 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-            {!selectedClassId ? (
-              <div className="h-[60vh] flex flex-col items-center justify-center text-center p-10 bg-white rounded-[3rem] border-2 border-dashed border-slate-100">
-                  <BookOpen size={64} className="text-slate-100 mb-4" />
-                  <h3 className="text-xl font-black text-slate-800 uppercase">Hãy chọn lớp học</h3>
-                  <p className="text-slate-400 text-sm mt-2 max-w-xs mx-auto font-medium">
-                    Chọn một lớp học từ danh sách bên trái để bắt đầu quản lý tài liệu và tri thức AI.
+                <div className="max-w-3xl">
+                  <p className="text-[10px] font-black uppercase tracking-[0.26em] text-slate-400">
+                    Tổng quan giảng viên
                   </p>
+                  <h1 className="mt-2 text-2xl font-black text-[#251917] md:text-4xl">
+                    Không gian điều phối học phần
+                  </h1>
+                  <p className="mt-3 text-sm leading-7 text-slate-600">
+                    Trang này tổng hợp các khu vực quản lý môn học, lớp học, học viên,
+                    tài liệu, ngân hàng câu hỏi và sinh đề thi. Các thao tác chi tiết sẽ
+                    mở sang đúng trang chức năng thay vì dồn hết vào một màn hình.
+                  </p>
+                </div>
               </div>
-            ) : (
-              <>
-                <div className="space-y-6">
-                  <div className="flex flex-col">
-                    <span className="text-indigo-600 text-[10px] font-black uppercase tracking-widest mb-1">Đang làm việc tại: {selectedClassName}</span>
-                    <h3 className="text-2xl font-black text-slate-800 uppercase tracking-tight">Cập nhật tri thức lớp học</h3>
-                  </div>
-                  <div className="bg-white p-2 rounded-[2.5rem] shadow-sm border-2 border-indigo-100 ring-8 ring-indigo-50/30 transition-all">
-                     <FileUploader 
-                        key={refreshKey}
-                        onUploadSuccess={handleUploadSuccess} 
-                        teacherId={teacherId} 
-                        classId={selectedClassId} 
-                        externalClasses={classes} // Truyền dữ liệu lớp sang Uploader
-                     />
-                  </div>
-                </div>
 
-                <Link href="/teacher/documents" className="block group">
-                  <div className="bg-white rounded-[2rem] border border-slate-200 shadow-sm p-6 flex items-center justify-between hover:border-indigo-300 hover:shadow-md transition-all">
-                    <div className="flex items-center gap-5">
-                      <div className="w-14 h-14 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center group-hover:bg-indigo-600 group-hover:text-white transition-colors">
-                        <FolderOpen size={28} />
-                      </div>
-                      <div>
-                        <h4 className="text-lg font-black text-slate-800 uppercase tracking-tight group-hover:text-indigo-600 transition-colors">
-                          Mở thư viện tài liệu
-                        </h4>
-                        <p className="text-xs font-medium text-slate-500 mt-0.5">
-                          Xem, lọc và xóa các tài liệu đã tải lên của lớp {selectedClassName}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="h-10 w-10 bg-slate-50 rounded-full flex items-center justify-center group-hover:bg-indigo-100 transition-colors">
-                      <ChevronRight className="text-slate-400 group-hover:text-indigo-600 transition-colors" size={20} />
-                    </div>
-                  </div>
+              <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="metric-panel p-4">
+                  <p className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-400">
+                    Môn học
+                  </p>
+                  <p className="mt-1 text-2xl font-black text-slate-900">
+                    {loadingOverview ? "..." : subjects.length}
+                  </p>
+                </div>
+                <div className="metric-panel p-4">
+                  <p className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-400">
+                    Lớp học
+                  </p>
+                  <p className="mt-1 text-2xl font-black text-slate-900">
+                    {loadingOverview ? "..." : allClasses.length}
+                  </p>
+                </div>
+                <div className="metric-panel p-4">
+                  <p className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-400">
+                    Học viên
+                  </p>
+                  <p className="mt-1 text-2xl font-black text-slate-900">
+                    {loadingOverview ? "..." : totalStudents}
+                  </p>
+                </div>
+                <div className="metric-panel p-4">
+                  <p className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-400">
+                    Tài liệu lớp chọn
+                  </p>
+                  <p className="mt-1 text-2xl font-black text-slate-900">
+                    {selectedClassId ? documents.length : 0}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="section-panel rounded-none border-0 p-5 md:p-6">
+              <p className="text-[10px] font-black uppercase tracking-[0.26em] text-slate-400">
+                Thao tác nhanh
+              </p>
+              <div className="mt-4 grid gap-3">
+                <Link
+                  href="/teacher/subjects?mode=create_subject"
+                  className="flex items-center justify-between rounded-[1.2rem] border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-800 transition-all hover:border-[var(--brand)] hover:text-[var(--brand)]"
+                >
+                  <span className="flex items-center gap-2">
+                    <Plus className="h-4 w-4" />
+                    Tạo môn học mới
+                  </span>
+                  <ArrowRight className="h-4 w-4" />
                 </Link>
+                <Link
+                  href={
+                    selectedSubjectId
+                      ? `/teacher/subjects?subject_id=${selectedSubjectId}&mode=create_class`
+                      : "/teacher/subjects"
+                  }
+                  className="flex items-center justify-between rounded-[1.2rem] border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-800 transition-all hover:border-[var(--brand)] hover:text-[var(--brand)]"
+                >
+                  <span className="flex items-center gap-2">
+                    <GraduationCap className="h-4 w-4" />
+                    Tạo lớp cho môn đang chọn
+                  </span>
+                  <ArrowRight className="h-4 w-4" />
+                </Link>
+                <Link
+                  href="/teacher/documents"
+                  className="flex items-center justify-between rounded-[1.2rem] border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-800 transition-all hover:border-[var(--brand)] hover:text-[var(--brand)]"
+                >
+                  <span className="flex items-center gap-2">
+                    <FolderOpen className="h-4 w-4" />
+                    Mở kho tài liệu
+                  </span>
+                  <ArrowRight className="h-4 w-4" />
+                </Link>
+                <Link
+                  href="/teacher/exam"
+                  className="flex items-center justify-between rounded-[1.2rem] border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-800 transition-all hover:border-[var(--brand)] hover:text-[var(--brand)]"
+                >
+                  <span className="flex items-center gap-2">
+                    <Sparkles className="h-4 w-4" />
+                    Sinh đề thi
+                  </span>
+                  <ArrowRight className="h-4 w-4" />
+                </Link>
+              </div>
+            </div>
+          </div>
+        </section>
 
-                <div className="bg-gradient-to-br from-slate-900 via-indigo-900 to-indigo-700 rounded-[2rem] p-6 text-white shadow-xl shadow-indigo-100 border border-indigo-400/20 relative overflow-hidden">
-                  <div className="absolute -right-8 -top-8 w-32 h-32 rounded-full bg-white/10 blur-2xl"></div>
-                  <div className="flex items-start justify-between gap-4 mb-5">
-                    <div className="flex items-center gap-4">
-                      <div className="w-14 h-14 rounded-2xl bg-white/10 flex items-center justify-center border border-white/10">
-                        <Bot size={28} />
-                      </div>
-                      <div>
-                        <p className="text-[10px] font-black uppercase tracking-[0.35em] text-indigo-200">Teacher Agent</p>
-                        <h4 className="text-xl font-black uppercase tracking-tight">Trợ lý AI cho giảng viên</h4>
-                        <p className="text-xs font-medium text-indigo-100/80 mt-1">
-                          Hỏi agent để tóm tắt lớp, đề xuất câu hỏi, hoặc phân tích tình hình học tập.
-                        </p>
-                      </div>
-                    </div>
-                    <div className="px-3 py-1 rounded-full bg-white/10 border border-white/10 text-[10px] font-black uppercase tracking-widest text-indigo-100">
-                      Ollama
-                    </div>
-                  </div>
+        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+          <TeacherModuleCard
+            title="Quản lý môn học"
+            description="Thêm, sửa, xóa môn học; từ từng môn có thể đi tiếp sang tạo lớp và nạp học liệu."
+            href="/teacher/subjects"
+            icon={<BookOpen className="h-5 w-5 text-sky-700" />}
+            metric={`${subjects.length} môn`}
+            chips={subjectChips}
+            accentClass="bg-sky-50"
+          />
+          <TeacherModuleCard
+            title="Lớp và học viên"
+            description="Theo dõi học viên trong từng lớp, xem thống kê điểm, lịch sử bài thi và xuất báo cáo."
+            href="/teacher/members"
+            icon={<Users className="h-5 w-5 text-emerald-700" />}
+            metric={`${totalStudents} học viên`}
+            chips={classChips}
+            accentClass="bg-emerald-50"
+          />
+          <TeacherModuleCard
+            title="Kho tài liệu"
+            description="Quản lý file tài liệu, bật hiển thị cho sinh viên và kiểm tra nhanh trạng thái từng file."
+            href="/teacher/documents"
+            icon={<FolderOpen className="h-5 w-5 text-amber-700" />}
+            metric={`${documents.length} tài liệu`}
+            chips={documentChips}
+            accentClass="bg-amber-50"
+          />
+          <TeacherModuleCard
+            title="Ngân hàng câu hỏi"
+            description="Xem bộ câu hỏi theo tài liệu, thêm 10 câu mới, chỉnh tay và kiểm tra nội dung đã lưu."
+            href="/teacher/question-bank"
+            icon={<LibraryBig className="h-5 w-5 text-violet-700" />}
+            metric={selectedSubject ? selectedSubject.name : "Chưa chọn môn"}
+            chips={selectedClass ? [selectedClass.name] : []}
+            accentClass="bg-violet-50"
+          />
+          <TeacherModuleCard
+            title="Sinh đề thi"
+            description="Tạo đề Word theo lớp và môn đang dạy, có thể cấu hình mức độ, số câu và số mã đề."
+            href="/teacher/exam"
+            icon={<FileText className="h-5 w-5 text-rose-700" />}
+            metric={allClasses.length ? `${allClasses.length} lớp dùng được` : "Chưa có lớp"}
+            chips={selectedClass ? [selectedClass.subject, selectedClass.name] : []}
+            accentClass="bg-rose-50"
+          />
+        </section>
 
-                  <div className="space-y-3">
-                    <textarea
-                      value={agentPrompt}
-                      onChange={(e) => setAgentPrompt(e.target.value)}
-                      placeholder={`Ví dụ: Tóm tắt tình hình lớp ${selectedClassName} và đề xuất 3 việc cần làm ngay.`}
-                      className="w-full min-h-[120px] resize-none rounded-2xl bg-white/95 text-slate-900 border border-white/10 px-4 py-3 text-sm font-medium outline-none focus:ring-2 focus:ring-white/40 placeholder:text-slate-400"
-                    />
-
-                    <div className="flex flex-wrap gap-2">
-                      {[
-                        "Tóm tắt nhanh lớp học này",
-                        "Đề xuất 5 câu hỏi kiểm tra",
-                        "Phân tích các điểm yếu cần ôn",
-                        "Lập kế hoạch buổi học tiếp theo"
-                      ].map((quickPrompt) => (
-                        <button
-                          key={quickPrompt}
-                          onClick={() => handleAskTeacherAgent(quickPrompt)}
-                          disabled={agentLoading}
-                          className="px-3 py-2 rounded-full bg-white/10 hover:bg-white/20 border border-white/10 text-[11px] font-bold transition-all disabled:opacity-50"
-                        >
-                          {quickPrompt}
-                        </button>
-                      ))}
-                    </div>
-
-                    <button
-                      onClick={() => handleAskTeacherAgent()}
-                      disabled={agentLoading}
-                      className="w-full mt-2 py-3 rounded-2xl bg-white text-indigo-700 font-black uppercase tracking-widest text-xs hover:bg-indigo-50 transition-all flex items-center justify-center gap-2 disabled:opacity-60"
-                    >
-                      {agentLoading ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                          Đang xử lý...
-                        </>
-                      ) : (
-                        <>
-                          <SendHorizontal className="w-4 h-4" />
-                          Gửi cho Teacher Agent
-                        </>
-                      )}
-                    </button>
-
-                    {(agentReply || agentSuggestions.length > 0) && (
-                      <div className="mt-4 bg-white/10 border border-white/10 rounded-2xl p-4 space-y-3">
-                        {agentReply && (
-                          <div>
-                            <div className="flex items-center gap-2 mb-2 text-indigo-100">
-                              <Sparkles className="w-4 h-4" />
-                              <span className="text-[11px] font-black uppercase tracking-widest">Phản hồi</span>
-                            </div>
-                            <p className="text-sm leading-relaxed text-white whitespace-pre-line">
-                              {agentReply}
-                            </p>
-                          </div>
-                        )}
-                        {agentSuggestions.length > 0 && (
-                          <div>
-                            <p className="text-[11px] font-black uppercase tracking-widest text-indigo-200 mb-2">Gợi ý hành động</p>
-                            <div className="flex flex-col gap-2">
-                              {agentSuggestions.map((item, index) => (
-                                <div key={index} className="text-xs font-medium text-indigo-50 bg-white/10 rounded-xl px-3 py-2 border border-white/10">
-                                  {item}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </>
-            )}
-          </section>
-        </div>
-      </main>
+      </div>
     </div>
   );
 }

@@ -114,7 +114,7 @@ class DocumentPublication(Base):
     __tablename__ = "document_publications"
 
     doc_id = Column(Integer, ForeignKey("documents.id"), primary_key=True)
-    is_visible_to_students = Column(Boolean, default=False, nullable=False)
+    is_visible_to_students = Column(Boolean, default=True, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     document = relationship("Document", back_populates="publication")
@@ -380,6 +380,7 @@ class StudentLearningPlanStep(Base):
     class_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True, index=True)
     step_order = Column(Integer, nullable=False, index=True)
     planned_date = Column(Date, nullable=False, index=True)
+    deadline_date = Column(Date, nullable=True, index=True)
     priority_group = Column(String, default="no_score", index=True)
     latest_score = Column(Float, nullable=True)
     reason = Column(Text, nullable=True)
@@ -392,3 +393,17 @@ class StudentLearningPlanStep(Base):
 
     plan = relationship("StudentLearningPlan", back_populates="steps")
     user = relationship("User", back_populates="learning_plan_steps")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    recipient_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    type = Column(String, nullable=False, index=True, default="general")
+    title = Column(String, nullable=False)
+    body = Column(Text, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    is_read = Column(Boolean, default=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

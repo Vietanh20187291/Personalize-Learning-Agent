@@ -2,16 +2,24 @@ import json
 import os
 import random
 import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import func
+from sqlalchemy import event, func
 from sqlalchemy.orm import Session
 
-from db.models import Classroom, Document, OrbitCoachDirective, QuestionBank, StudentDocumentScoreHistory, Subject, User
+from db.models import Classroom, Document, Notification, OrbitCoachDirective, QuestionBank, StudentDocumentScoreHistory, Subject, User
+from db.database import SessionLocal
 from memory import ActionRouter, IntentClassifier, get_conversation_memory
 from services.score_metrics import compute_subject_score_metrics
+from debug_stream import emit_llm_request, emit_llm_response, emit_llm_error
+
+
+DEBUG_PERF = True
 
 
 class TeacherAgent:
@@ -19,6 +27,253 @@ class TeacherAgent:
         self.db = db
         self.classifier = IntentClassifier()
         self.router = ActionRouter()
+        self.intent_cache: Dict[str, Dict[str, Any]] = {}
+        self._intent_cache_max_size = int(os.getenv("TEACHER_AGENT_INTENT_CACHE_SIZE", "500") or 500)
+        self._llm_timeout_seconds = float(os.getenv("TEACHER_AGENT_LLM_TIMEOUT_SECONDS", "2.0") or 2.0)
+        self._analyze_executor = ThreadPoolExecutor(max_workers=2)
+        env_debug = os.getenv("TEACHER_AGENT_DEBUG_PERF")
+        self.debug_perf = DEBUG_PERF if env_debug is None else env_debug.strip().lower() in {"1", "true", "yes", "on"}
+        self._perf_local = threading.local()
+        self._llm_calls_current_request = 0
+        self._setup_sql_timing_hooks()
+
+    def __del__(self):
+        try:
+            self._analyze_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+    def _perf_local_reset(self) -> None:
+        self._perf_local.active = False
+        self._perf_local.db_query_ms = 0.0
+        self._perf_local.db_query_count = 0
+
+    def _setup_sql_timing_hooks(self) -> None:
+        engine = getattr(self.db, "bind", None)
+        if engine is None:
+            return
+        if getattr(engine, "_teacher_agent_perf_hooks", False):
+            return
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+            if not getattr(self._perf_local, "active", False):
+                return
+            conn.info.setdefault("_ta_query_start_stack", []).append(time.perf_counter())
+
+        @event.listens_for(engine, "after_cursor_execute")
+        def _after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+            if not getattr(self._perf_local, "active", False):
+                return
+            stack = conn.info.get("_ta_query_start_stack")
+            if not stack:
+                return
+            start = stack.pop()
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            self._perf_local.db_query_ms = float(getattr(self._perf_local, "db_query_ms", 0.0) or 0.0) + elapsed_ms
+            self._perf_local.db_query_count = int(getattr(self._perf_local, "db_query_count", 0) or 0) + 1
+
+        engine._teacher_agent_perf_hooks = True
+        self._perf_local_reset()
+
+    def _perf_log(self, message: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        if not self.debug_perf:
+            return
+        if payload:
+            pretty = ", ".join([f"{key}={value}" for key, value in payload.items()])
+            print(f"[TeacherAgentPerf] {message}: {pretty}")
+            return
+        print(f"[TeacherAgentPerf] {message}")
+
+    def _cache_get_intent(self, key: str) -> Optional[Dict[str, Any]]:
+        return self.intent_cache.get(key)
+
+    def _cache_set_intent(self, key: str, value: Dict[str, Any]) -> None:
+        if len(self.intent_cache) >= self._intent_cache_max_size:
+            oldest_key = next(iter(self.intent_cache), None)
+            if oldest_key is not None:
+                self.intent_cache.pop(oldest_key, None)
+        self.intent_cache[key] = value
+
+    def _rule_based_analyze(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        start = time.time()
+        clean_msg = self.classifier.clean_text(message)
+        intent_type, confidence, matched_keywords = self.classifier._score_intents(clean_msg)
+        entities = self.classifier.extract_entities(message, context)
+        result = {
+            "intent_type": intent_type,
+            "entities": entities,
+            "confidence": float(confidence),
+            "matched_keywords": matched_keywords,
+            "rewritten_message": self._clean_text(message),
+            "needs_follow_up": bool(entities.get("needs_follow_up")),
+            "_perf": {
+                "cache_hit": False,
+                "fallback_triggered": True,
+                "cache_lookup_s": 0.0,
+                "llm_call_s": 0.0,
+                "analyze_total_s": round(time.time() - start, 6),
+            },
+        }
+        return result
+
+    def _llm_single_pass_analyze(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        self._llm_calls_current_request += 1
+        llm_start = time.perf_counter()
+        self._perf_log("LLM_start", {"message_len": len(message or "")})
+        context_hint = {
+            "last_intent": context.get("last_intent"),
+            "last_subject_name": context.get("last_subject_name"),
+            "last_class_name": context.get("last_class_name"),
+            "last_student_name": context.get("last_student_name"),
+        }
+
+        system_prompt = (
+            "Phân loại intent cho Teacher Agent và trích xuất entities. "
+            "Chỉ trả JSON: intent_type, entities, confidence."
+        )
+        user_prompt = (
+            "Intent hợp lệ: course_info,class_overview,class_analytics,student_info,material,exam_generation,general_question.\n"
+            "Entities có thể gồm: class_name,subject_name,student_name,exam_type,num_questions,num_versions,difficulty,entity_type,operation,document_name.\n"
+            "Context: " + json.dumps(context_hint, ensure_ascii=False) + "\n"
+            "Message: " + message
+        )
+
+        # Emit LLM request event
+        emit_llm_request(prompt=user_prompt, system_prompt=system_prompt)
+
+        try:
+            raw = self.classifier._llm_chat(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.0,
+                max_tokens=260,
+            )
+            llm_call_ms = (time.perf_counter() - llm_start) * 1000.0
+            self._perf_log("LLM_end", {"llm_call_ms": round(llm_call_ms, 3)})
+
+            # Emit LLM response event
+            emit_llm_response(response=raw, duration_ms=llm_call_ms)
+
+            data = self.classifier._extract_json_block(raw)
+            entities = data.get("entities", {}) if isinstance(data.get("entities"), dict) else {}
+
+            try:
+                confidence = float(data.get("confidence", 0.0) or 0.0)
+            except Exception:
+                confidence = 0.0
+            confidence = max(0.0, min(1.0, confidence))
+
+            intent_type = self.classifier._normalize_intent(data.get("intent_type"))
+            if intent_type == self.classifier.GENERAL_QUESTION and context.get("last_intent") in self.classifier.ACTION_TYPES:
+                if len(self._clean_text(message).split()) <= 4:
+                    intent_type = context.get("last_intent")
+
+            fallback_entities = self.classifier.extract_entities(message, context)
+            merged_entities = dict(fallback_entities)
+            merged_entities.update({
+                key: value
+                for key, value in entities.items()
+                if value not in [None, "", [], {}]
+            })
+
+            return {
+                "intent_type": intent_type,
+                "entities": merged_entities,
+                "confidence": confidence,
+                "matched_keywords": [],
+                "rewritten_message": self._clean_text(message),
+                "needs_follow_up": bool(merged_entities.get("needs_follow_up")),
+                "_perf": {
+                    "cache_hit": False,
+                    "fallback_triggered": False,
+                    "llm_call_ms": round(llm_call_ms, 3),
+                },
+            }
+
+        except Exception as e:
+            llm_call_ms = (time.perf_counter() - llm_start) * 1000.0
+            self._perf_log("LLM_error", {"error": str(e), "llm_call_ms": round(llm_call_ms, 3)})
+            emit_llm_error(error_message=str(e), duration_ms=llm_call_ms)
+            # Return rule-based analysis as fallback
+            return self._rule_based_analyze(message, context)
+
+    def analyze(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        analyze_start = time.perf_counter()
+        normalized_message = self.classifier.clean_text(message)
+        if not normalized_message:
+            self._perf_log("analyze_empty_message")
+            return self._rule_based_analyze(message, context)
+
+        cache_key = normalized_message
+        cache_lookup_start = time.perf_counter()
+        cached = self._cache_get_intent(cache_key)
+        cache_lookup_s = round(time.perf_counter() - cache_lookup_start, 6)
+        if cached is not None:
+            cached_result = dict(cached)
+            perf = dict(cached_result.get("_perf") or {})
+            perf.update({
+                "cache_hit": True,
+                "fallback_triggered": False,
+                "cache_lookup_s": cache_lookup_s,
+                "analyze_total_s": round(time.perf_counter() - analyze_start, 6),
+            })
+            cached_result["_perf"] = perf
+            self._perf_log("analyze_cache_hit", {
+                "cache_lookup_ms": round(float(perf.get("cache_lookup_s", 0.0) or 0.0) * 1000.0, 3),
+                "analyze_total_ms": round(float(perf.get("analyze_total_s", 0.0) or 0.0) * 1000.0, 3),
+            })
+            return cached_result
+
+        self._perf_log("analyze_cache_miss", {
+            "cache_lookup_ms": round(cache_lookup_s * 1000.0, 3),
+        })
+
+        fallback_triggered = False
+        future = self._analyze_executor.submit(self._llm_single_pass_analyze, message, context)
+        llm_wait_start = time.perf_counter()
+        try:
+            result = future.result(timeout=self._llm_timeout_seconds)
+            llm_wait_s = round(time.perf_counter() - llm_wait_start, 6)
+            self._perf_log("analyze_llm_result", {"wait_ms": round(llm_wait_s * 1000.0, 3)})
+        except FutureTimeoutError:
+            fallback_triggered = True
+            future.cancel()
+            llm_wait_s = round(time.perf_counter() - llm_wait_start, 6)
+            self._perf_log("analyze_timeout", {
+                "wait_ms": round(llm_wait_s * 1000.0, 3),
+                "timeout_s": self._llm_timeout_seconds,
+            })
+            result = self._rule_based_analyze(message, context)
+        except Exception:
+            fallback_triggered = True
+            future.cancel()
+            llm_wait_s = round(time.perf_counter() - llm_wait_start, 6)
+            self._perf_log("analyze_exception_fallback", {"wait_ms": round(llm_wait_s * 1000.0, 3)})
+            result = self._rule_based_analyze(message, context)
+
+        perf = dict(result.get("_perf") or {})
+        perf.update({
+            "cache_hit": False,
+            "fallback_triggered": fallback_triggered,
+            "cache_lookup_s": cache_lookup_s,
+            "llm_call_s": perf.get("llm_call_s", 0.0),
+            "analyze_total_s": round(time.perf_counter() - analyze_start, 6),
+        })
+        result["_perf"] = perf
+
+        self._perf_log("analyze", {
+            "cache_hit": perf.get("cache_hit", False),
+            "fallback_triggered": perf.get("fallback_triggered", False),
+            "cache_lookup_ms": round(float(perf.get("cache_lookup_s", 0.0) or 0.0) * 1000.0, 3),
+            "llm_call_ms": round(float(perf.get("llm_call_s", 0.0) or 0.0) * 1000.0, 3),
+            "analyze_total_ms": round(float(perf.get("analyze_total_s", 0.0) or 0.0) * 1000.0, 3),
+        })
+
+        self._cache_set_intent(cache_key, dict(result))
+        return result
 
     def _clean_text(self, text: str) -> str:
         return re.sub(r"\s+", " ", (text or "")).strip()
@@ -45,7 +300,15 @@ class TeacherAgent:
         cleaned = re.split(r"\b(?:cho|thuộc|thuoc|của|cua|trong)\s+ngành\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
         return self._clean_text(cleaned).strip(" .,:;-\"")
 
-    def _has_crud_signal(self, message: str) -> bool:
+    def _has_crud_signal(self, message: str, entities: Optional[Dict[str, Any]] = None, intent_type: Optional[str] = None) -> bool:
+        entities = entities or {}
+        if str(intent_type or "").startswith("crud_"):
+            return True
+        if entities.get("operation") in {"create", "update", "delete"}:
+            return True
+        if entities.get("entity_type") in {"subject", "class", "document"} and entities.get("operation"):
+            return True
+
         normalized = self._normalize(message)
         return any(token in normalized for token in [
             "thêm", "them", "tạo", "tao", "xóa", "xoá", "xoa", "sửa", "sua", "cập nhật", "cap nhat", "update", "delete", "create", "add", "upload", "nạp", "nap"
@@ -108,7 +371,7 @@ class TeacherAgent:
                 return classroom.name
         return ""
 
-    def _detect_management_action(self, message: str, entities: Dict[str, Any], context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _detect_management_action(self, message: str, entities: Dict[str, Any], context: Dict[str, Any], intent_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
         normalized = self._normalize(message)
         if not normalized:
             return None
@@ -116,24 +379,30 @@ class TeacherAgent:
         if "thiếu tài liệu" in normalized or "thieu tai lieu" in normalized:
             return None
 
-        operation = None
-        if any(token in normalized for token in ["xóa", "xoá", "xoa", "delete", "remove", "hủy", "huy"]):
-            operation = "delete"
-        elif any(token in normalized for token in ["cập nhật", "cap nhat", "chỉnh sửa", "chinh sua", "sửa", "sua", "update", "đổi tên", "doi ten", "rename"]):
-            operation = "update"
-        elif any(token in normalized for token in ["thêm", "them", "tạo", "tao", "mới", "moi", "add", "create", "upload", "nạp", "nap"]):
-            operation = "create"
+        operation = entities.get("operation")
+        if operation not in {"create", "update", "delete"}:
+            operation = None
+        if operation is None:
+            if any(token in normalized for token in ["xóa", "xoá", "xoa", "delete", "remove", "hủy", "huy"]):
+                operation = "delete"
+            elif any(token in normalized for token in ["cập nhật", "cap nhat", "chỉnh sửa", "chinh sua", "sửa", "sua", "update", "đổi tên", "doi ten", "rename"]):
+                operation = "update"
+            elif any(token in normalized for token in ["thêm", "them", "tạo", "tao", "mới", "moi", "add", "create", "upload", "nạp", "nap"]):
+                operation = "create"
 
         if not operation:
             return None
 
-        entity_type = None
-        if any(token in normalized for token in ["tài liệu", "tai lieu", "học liệu", "hoc lieu", "document", "file"]):
-            entity_type = "document"
-        elif any(token in normalized for token in ["lớp", "lop", "class"]):
-            entity_type = "class"
-        elif any(token in normalized for token in ["môn học", "mon hoc", "môn", "mon", "subject", "course"]):
-            entity_type = "subject"
+        entity_type = entities.get("entity_type")
+        if entity_type not in {"subject", "class", "document"}:
+            entity_type = None
+        if entity_type is None:
+            if any(token in normalized for token in ["tài liệu", "tai lieu", "học liệu", "hoc lieu", "document", "file"]):
+                entity_type = "document"
+            elif any(token in normalized for token in ["lớp", "lop", "class"]):
+                entity_type = "class"
+            elif any(token in normalized for token in ["môn học", "mon hoc", "môn", "mon", "subject", "course"]):
+                entity_type = "subject"
 
         if entity_type is None:
             return None
@@ -141,8 +410,8 @@ class TeacherAgent:
         subject_name = entities.get("subject_name") or ""
         class_name = entities.get("class_name") or ""
         document_name = entities.get("document_name") or ""
-        subject_obj = self._find_subject_in_message(message)
-        classroom_obj = self._find_classroom_in_message(message, subject_obj)
+        subject_obj = self._find_subject_in_message(message, entities=entities)
+        classroom_obj = self._find_classroom_in_message(message, subject_obj, entities=entities)
 
         extracted_subject = self._extract_management_target(message, "subject")
         extracted_class = self._extract_management_target(message, "class")
@@ -253,16 +522,32 @@ class TeacherAgent:
             },
         }
 
-    def _find_subject_in_message(self, message: str) -> Optional[Subject]:
+    def _find_subject_in_message(self, message: str, entities: Optional[Dict[str, Any]] = None) -> Optional[Subject]:
+        entities = entities or {}
+        entity_subject_name = self._clean_text(entities.get("subject_name") or "")
+        if entity_subject_name:
+            normalized_entity = self._normalize(entity_subject_name)
+            exact = self.db.query(Subject).filter(func.lower(Subject.name) == normalized_entity).first()
+            if exact:
+                return exact
+
         normalized_message = self._normalize(message)
         subjects = sorted(self._subject_candidates(), key=lambda item: len(self._normalize(item.name or "")), reverse=True)
         for subject in subjects:
             candidate = self._normalize(subject.name or "")
             if candidate and candidate in normalized_message:
                 return subject
+
+        if entity_subject_name:
+            for subject in subjects:
+                candidate = self._normalize(subject.name or "")
+                if normalized_entity in candidate or candidate in normalized_entity:
+                    return subject
         return None
 
-    def _find_classroom_in_message(self, message: str, subject: Optional[Subject] = None) -> Optional[Classroom]:
+    def _find_classroom_in_message(self, message: str, subject: Optional[Subject] = None, entities: Optional[Dict[str, Any]] = None) -> Optional[Classroom]:
+        entities = entities or {}
+        entity_class_name = self._clean_text(entities.get("class_name") or "")
         normalized_message = self._normalize(message)
         classrooms = self._classroom_candidates()
         if subject is not None:
@@ -271,6 +556,17 @@ class TeacherAgent:
                 for item in classrooms
                 if item.subject_id == subject.id or self._normalize(item.subject or "") == self._normalize(subject.name)
             ]
+
+        if entity_class_name:
+            normalized_entity = self._normalize(entity_class_name)
+            for classroom in classrooms:
+                candidate_names = [self._normalize(classroom.name), self._normalize(classroom.class_code or "")]
+                if normalized_entity in candidate_names or any(
+                    normalized_entity == candidate or normalized_entity in candidate or candidate in normalized_entity
+                    for candidate in candidate_names
+                    if candidate
+                ):
+                    return classroom
 
         # Prefer longer/more specific class names first.
         classrooms = sorted(classrooms, key=lambda item: len(self._normalize(item.name or "")), reverse=True)
@@ -889,7 +1185,6 @@ class TeacherAgent:
             is_active=True,
         )
         self.db.add(directive)
-        self.db.commit()
 
         student_name = self._clean_text(student.full_name or student.username or f"SV {student.id}")
         parts = []
@@ -903,6 +1198,37 @@ class TeacherAgent:
             f"Đã giao chỉ tiêu tuần này cho Orbit của sinh viên {student_name}: {target_text}. "
             f"Orbit sẽ đốc thúc sát tiến độ, nhắc học nếu chậm, và ghi nhận khen ngợi khi sinh viên cải thiện."
         )
+
+        self.db.add(Notification(
+            recipient_user_id=student.id,
+            actor_user_id=teacher_id,
+            type="teacher_assignment",
+            title="Giảng viên giao thêm nhiệm vụ học tập",
+            body=f"Tuần này bạn được giao: {target_text}.",
+            metadata_json={
+                "directive_id": directive.id,
+                "student_id": student.id,
+                "classroom_id": classroom.id if classroom else None,
+                "subject_id": subject.id if subject else None,
+                "target_tests": target_tests,
+                "target_chapters": target_chapters,
+            },
+            is_read=False,
+        ))
+        self.db.add(Notification(
+            recipient_user_id=teacher_id,
+            actor_user_id=teacher_id,
+            type="teacher_assignment_created",
+            title="Đã giao chỉ tiêu cho sinh viên",
+            body=f"{student_name}: {target_text}.",
+            metadata_json={
+                "directive_id": directive.id,
+                "student_id": student.id,
+                "classroom_id": classroom.id if classroom else None,
+            },
+            is_read=False,
+        ))
+        self.db.commit()
 
         return {
             "reply": reply,
@@ -929,10 +1255,57 @@ class TeacherAgent:
             },
         }
 
+    def _emit_respond_breakdown(
+        self,
+        total_start: float,
+        before_analyze_ms: float,
+        analyze_ms: float,
+        preprocess_ms: float,
+        business_ms: float,
+        postprocess_ms: float,
+        analysis: Dict[str, Any],
+    ) -> None:
+        total_ms = (time.perf_counter() - total_start) * 1000.0
+        analyze_perf = analysis.get("_perf") or {}
+        db_query_ms = float(getattr(self._perf_local, "db_query_ms", 0.0) or 0.0)
+        db_query_count = int(getattr(self._perf_local, "db_query_count", 0) or 0)
+
+        self._perf_log("respond_breakdown", {
+            "total_ms": round(total_ms, 3),
+            "before_analyze_ms": round(before_analyze_ms, 3),
+            "analyze_ms": round(analyze_ms, 3),
+            "preprocess_ms": round(preprocess_ms, 3),
+            "business_ms": round(business_ms, 3),
+            "postprocess_ms": round(postprocess_ms, 3),
+            "db_query_ms": round(db_query_ms, 3),
+            "db_query_count": db_query_count,
+            "cache_lookup_ms": round(float(analyze_perf.get("cache_lookup_s", 0.0) or 0.0) * 1000.0, 3),
+            "llm_call_ms": round(float(analyze_perf.get("llm_call_s", 0.0) or 0.0) * 1000.0, 3),
+            "cache_hit": analyze_perf.get("cache_hit", False),
+            "fallback_triggered": analyze_perf.get("fallback_triggered", False),
+            "llm_calls_per_request": self._llm_calls_current_request,
+        })
+
     def respond(self, teacher_id: int, class_id: int, message: str):
+        self._llm_calls_current_request = 0
+        self._perf_local.active = True
+        self._perf_local.db_query_ms = 0.0
+        self._perf_local.db_query_count = 0
+
+        total_start = time.perf_counter()
+        self._perf_log("Start_request", {"teacher_id": teacher_id, "class_id": class_id})
+
+        t_before_analyze = time.perf_counter()
         memory = get_conversation_memory()
         context = memory.get_context(teacher_id, class_id)
-        analysis = self.classifier.classify_request(message, context)
+        before_analyze_ms = (time.perf_counter() - t_before_analyze) * 1000.0
+
+        t_analyze = time.perf_counter()
+        analysis = self.analyze(message, context)
+        analyze_ms = (time.perf_counter() - t_analyze) * 1000.0
+
+        t_preprocess = time.perf_counter()
+        canonical_message = self._clean_text(analysis.get("rewritten_message") or message)
         pending_request = memory.get_pending_request(teacher_id, class_id)
 
         intent_type = analysis["intent_type"]
@@ -941,13 +1314,13 @@ class TeacherAgent:
             intent_type = pending_request.get("intent_type", intent_type)
             entities = self._merge_pending_entities(pending_request, entities)
 
-        explicit_subject = self._find_subject_in_message(message)
+        explicit_subject = self._find_subject_in_message(canonical_message, entities=entities)
         subject = explicit_subject or self._resolve_subject(entities, context)
 
-        explicit_classroom = self._find_classroom_in_message(message, subject)
+        explicit_classroom = self._find_classroom_in_message(canonical_message, subject, entities=entities)
         classroom = explicit_classroom or self._resolve_classroom(entities, context, subject)
 
-        management_action = self._detect_management_action(message, entities, context)
+        management_action = self._detect_management_action(canonical_message, entities, context, intent_type=intent_type)
         if management_action:
             memory.clear_pending_request(teacher_id, class_id)
             memory.add_message(
@@ -979,9 +1352,11 @@ class TeacherAgent:
                     None,
                 ),
             )
+            self._emit_respond_breakdown(total_start, before_analyze_ms, analyze_ms, (time.perf_counter() - t_preprocess) * 1000.0, 0.0, 0.0, analysis)
+            self._perf_local.active = False
             return management_action
 
-        if self._has_crud_signal(message):
+        if self._has_crud_signal(canonical_message, entities=entities, intent_type=intent_type):
             clarification = self._crud_clarification_response()
             memory.set_pending_request(
                 teacher_id,
@@ -1008,12 +1383,14 @@ class TeacherAgent:
                 clarification["reply"],
                 {"needs_more_info": True, "missing_fields": clarification["missing_fields"]},
             )
+            self._emit_respond_breakdown(total_start, before_analyze_ms, analyze_ms, (time.perf_counter() - t_preprocess) * 1000.0, 0.0, 0.0, analysis)
+            self._perf_local.active = False
             return clarification
 
         student = self._resolve_student(entities, context, classroom)
 
-        if self._is_orbit_directive_request(message):
-            orbit_action = self._create_orbit_directive_action(teacher_id, message, student, classroom, subject)
+        if self._is_orbit_directive_request(canonical_message):
+            orbit_action = self._create_orbit_directive_action(teacher_id, canonical_message, student, classroom, subject)
             memory.clear_pending_request(teacher_id, class_id)
             memory.add_message(
                 teacher_id,
@@ -1040,6 +1417,8 @@ class TeacherAgent:
                 classroom,
                 student,
             ))
+            self._emit_respond_breakdown(total_start, before_analyze_ms, analyze_ms, (time.perf_counter() - t_preprocess) * 1000.0, 0.0, 0.0, analysis)
+            self._perf_local.active = False
             return orbit_action
 
         # If the user just provided a follow-up, try to reuse the previous subject/class/student.
@@ -1095,7 +1474,7 @@ class TeacherAgent:
                 follow_up,
                 {"needs_more_info": True, "missing_fields": missing_fields},
             )
-            return {
+            payload = {
                 "reply": follow_up,
                 "suggested_actions": ["Bổ sung thông tin còn thiếu", "Ví dụ: Môn Cơ sở Hệ điều hành", "Ví dụ: Lớp IT1"],
                 "class_name": classroom.name if classroom else "",
@@ -1106,10 +1485,15 @@ class TeacherAgent:
                 "missing_fields": missing_fields,
                 "action_metadata": self.router.route_action(intent_type, context=context, class_id=class_id, student_name=getattr(student, "full_name", None), subject_name=getattr(subject, "name", None)),
             }
+            self._emit_respond_breakdown(total_start, before_analyze_ms, analyze_ms, (time.perf_counter() - t_preprocess) * 1000.0, 0.0, 0.0, analysis)
+            self._perf_local.active = False
+            return payload
 
         memory.clear_pending_request(teacher_id, class_id)
+        preprocess_ms = (time.perf_counter() - t_preprocess) * 1000.0
 
         # Build the final response.
+        business_start = time.perf_counter()
         if intent_type == IntentClassifier.COURSE_INFO and subject is not None:
             result = self._course_info_reply(subject)
         elif intent_type == IntentClassifier.CLASS_OVERVIEW:
@@ -1128,7 +1512,7 @@ class TeacherAgent:
         elif intent_type == IntentClassifier.STUDENT_INFO and student is not None:
             result = self._student_overview_reply(student)
         elif intent_type == IntentClassifier.MATERIAL:
-            result = self._material_reply(subject, classroom, message)
+            result = self._material_reply(subject, classroom, canonical_message)
         elif intent_type == IntentClassifier.EXAM_GENERATION and subject is not None:
             exam_type = entities.get("exam_type") or "multiple_choice"
             num_questions = int(entities.get("num_questions") or 0)
@@ -1138,10 +1522,13 @@ class TeacherAgent:
         else:
             result = self._build_general_reply(subject, classroom)
 
+        business_ms = (time.perf_counter() - business_start) * 1000.0
+
         response_intent = intent_type
         if not result.get("reply"):
             result["reply"] = "Tôi chưa xử lý được yêu cầu này."
 
+        postprocess_start = time.perf_counter()
         result["class_name"] = classroom.name if classroom else result.get("class_name", "")
         result["subject"] = subject.name if subject else result.get("subject", "")
         result["intent_type"] = response_intent
@@ -1187,4 +1574,64 @@ class TeacherAgent:
                 }
             })
 
+        postprocess_ms = (time.perf_counter() - postprocess_start) * 1000.0
+        self._emit_respond_breakdown(
+            total_start,
+            before_analyze_ms,
+            analyze_ms,
+            preprocess_ms,
+            business_ms,
+            postprocess_ms,
+            analysis,
+        )
+        self._perf_local.active = False
+
         return result
+
+
+def run_teacher_agent_perf_harness(rounds: int = 3):
+    db = SessionLocal()
+    try:
+        teacher = db.query(User).filter(User.role == "teacher").order_by(User.id.asc()).first()
+        classroom = db.query(Classroom).order_by(Classroom.id.asc()).first()
+        if teacher is None or classroom is None:
+            print("[TeacherAgentPerfHarness] Missing teacher or classroom in database; skip benchmark.")
+            return
+
+        agent = TeacherAgent(db)
+        test_messages = [
+            "Tình hình lớp IT1 thế nào",
+            "lớp IT1 học thế nào",
+            "cho tôi biết tiến độ lớp IT1",
+        ]
+
+        all_first: List[float] = []
+        all_cached: List[float] = []
+
+        print("[TeacherAgentPerfHarness] Starting benchmark")
+        print(f"[TeacherAgentPerfHarness] teacher_id={teacher.id}, class_id={classroom.id}, rounds={rounds}")
+
+        for _ in range(rounds):
+            for msg in test_messages:
+                t1 = time.perf_counter()
+                agent.respond(teacher.id, classroom.id, msg)
+                d1 = time.perf_counter() - t1
+
+                t2 = time.perf_counter()
+                agent.respond(teacher.id, classroom.id, msg)
+                d2 = time.perf_counter() - t2
+
+                all_first.append(d1)
+                all_cached.append(d2)
+                print(f"[TeacherAgentPerfHarness] msg='{msg}' first={d1:.4f}s cached={d2:.4f}s")
+
+        avg_first = sum(all_first) / len(all_first) if all_first else 0.0
+        avg_cached = sum(all_cached) / len(all_cached) if all_cached else 0.0
+        print(f"[TeacherAgentPerfHarness] avg_first={avg_first:.4f}s ({avg_first * 1000:.2f}ms) avg_cached={avg_cached:.4f}s ({avg_cached * 1000:.2f}ms)")
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    rounds = int(os.getenv("TEACHER_AGENT_PERF_ROUNDS", "2") or 2)
+    run_teacher_agent_perf_harness(rounds=rounds)

@@ -1,72 +1,120 @@
-import axios from 'axios';
+import axios, { AxiosRequestConfig } from 'axios';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
-const API_URL = `${API_BASE_URL}/api`;
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8010';
+export const API_URL = `${API_BASE_URL}/api`;
+
+export const apiClient = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 0,
+});
+
+export const longRequestConfig: AxiosRequestConfig = {
+  timeout: 0,
+};
+
+const extractRequestId = (payload: unknown): string => {
+  if (!payload || typeof payload !== 'object') return '';
+  const requestId = (payload as Record<string, unknown>).request_id;
+  return typeof requestId === 'string' ? requestId.trim() : '';
+};
+
+export const normalizeApiError = (error: unknown, fallback = 'Không thể hoàn tất yêu cầu lúc này.'): string => {
+  if (axios.isAxiosError(error)) {
+    const payload = error.response?.data;
+    const detail =
+      typeof payload?.detail === 'string'
+        ? payload.detail.trim()
+        : typeof error.message === 'string' && error.message.trim()
+          ? error.message.trim()
+          : fallback;
+
+    const requestId = extractRequestId(payload);
+    if (requestId) {
+      return `${detail} (Mã yêu cầu: ${requestId})`;
+    }
+    return detail || fallback;
+  }
+
+  if (error instanceof Error) {
+    const detail = error.message?.trim() || fallback;
+    return detail;
+  }
+
+  return fallback;
+};
+
+export async function runLongRequest<T>(
+  requestFactory: () => Promise<T>,
+  options?: {
+    onSlowStateChange?: (isSlow: boolean) => void;
+    slowDelayMs?: number;
+  }
+): Promise<T> {
+  const slowDelayMs = Math.max(1000, options?.slowDelayMs ?? 4500);
+  let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    options?.onSlowStateChange?.(true);
+  }, slowDelayMs);
+
+  try {
+    return await requestFactory();
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    options?.onSlowStateChange?.(false);
+  }
+}
 
 export const api = {
-  // --- 1. CONTENT AGENT: Xử lý tri thức ---
-  
-  // Phân tích nhanh gợi ý môn học
   analyzeSubject: async (formData: FormData) => {
-    return axios.post(`${API_URL}/upload/analyze-subject`, formData, {
-      headers: { "Content-Type": "multipart/form-data" }
+    return apiClient.post(`${API_URL}/upload/analyze-subject`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
     });
   },
 
-  // Nạp tài liệu chính thức vào kho lưu trữ RAG
   uploadFile: async (formData: FormData, onProgress?: (percent: number) => void) => {
-    return axios.post(`${API_URL}/upload/upload`, formData, {
-      headers: { "Content-Type": "multipart/form-data" },
+    return apiClient.post(`${API_URL}/upload/upload`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: (progressEvent) => {
         if (onProgress && progressEvent.total) {
           const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
           onProgress(percent);
         }
-      }
+      },
     });
   },
 
-  // --- 2. ASSESSMENT, EVALUATION & PROFILING AGENT: Kiểm tra & Đánh giá ---
-  
-  // Sinh đề thi cá nhân hóa từ RAG (Assessment Agent)
   generateAssessment: async (subject: string) => {
-    const response = await axios.post(`${API_URL}/assessment/generate`, { subject });
+    const response = await apiClient.post(`${API_URL}/assessment/generate`, { subject });
     return response.data;
   },
 
-  // Nộp bài để Chấm điểm (Evaluation Agent) & Xếp loại (Profiling Agent)
   submitAssessment: async (submissionData: {
     subject: string,
     answers: { question_id: number, selected_option: string }[],
     duration_seconds: number
   }) => {
-    // Backend sẽ tự gọi Evaluation & Profiling Agent để trả về dữ liệu đa chiều
-    const response = await axios.post(`${API_URL}/assessment/submit`, submissionData);
+    const response = await apiClient.post(`${API_URL}/assessment/submit`, submissionData);
     return response.data;
   },
 
-  // Lấy lịch sử học tập tổng hợp từ Dashboard
   getLearningStats: async () => {
-    // Endpoint này tổng hợp dữ liệu từ Profiling (Level) và Evaluation (Effort)
-    const response = await axios.get(`${API_URL}/assessment/history/all`);
+    const response = await apiClient.get(`${API_URL}/assessment/history/all`);
     return response.data;
   },
 
-  // --- 3. ADAPTIVE AGENT: Lộ trình & Gia sư AI ---
-
-  // Lấy lộ trình "Vá lỗ hổng" (Adaptive Agent sử dụng GROQ_KEY_ADAPTIVE)
   getAdaptiveRoadmap: async (subject: string) => {
-    const response = await axios.get(`${API_URL}/adaptive/recommend/${subject}`);
+    const response = await apiClient.get(`${API_URL}/adaptive/recommend/${subject}`);
     return response.data;
   },
 
-  // Chat trực tiếp với Gia sư AI có ngữ cảnh lộ trình
   chatWithTutor: async (chatData: {
     subject: string,
     message: string,
     roadmap_context: string
   }) => {
-    const response = await axios.post(`${API_URL}/adaptive/chat`, chatData);
+    const response = await apiClient.post(`${API_URL}/adaptive/chat`, chatData);
     return response.data;
   }
 };

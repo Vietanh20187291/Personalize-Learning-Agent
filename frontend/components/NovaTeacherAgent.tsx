@@ -1,13 +1,21 @@
 "use client";
 
-import { useMemo, useState, useRef, useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { MessageCircle, Minimize2, Sparkles, Send, Loader, AlertCircle } from "lucide-react";
+import {
+  AlertCircle,
+  Bot,
+  ChevronRight,
+  Loader,
+  Minimize2,
+  Send,
+  Sparkles,
+  WandSparkles,
+} from "lucide-react";
 
-const NOVA_AGENT_IMAGES = [
-  "https://cdn-icons-png.flaticon.com/512/4712/4712109.png",
-  "https://api.dicebear.com/9.x/bottts-neutral/png?seed=Nova&backgroundColor=b6e3f4,c0aede,d1d4f9",
-];
+import { apiClient, longRequestConfig, normalizeApiError, runLongRequest } from "../services/api";
+
+const NOVA_AGENT_IMAGE = "https://cdn-icons-png.flaticon.com/512/4712/4712109.png";
 
 interface Message {
   role: "user" | "agent";
@@ -19,126 +27,186 @@ interface ActionMetadata {
   action_type: string;
   target: string;
   tab_name?: string;
-  params?: Record<string, any>;
+  params?: Record<string, unknown>;
   message?: string;
   should_auto_execute?: boolean;
 }
 
+function NovaAvatar({
+  imageUrl,
+  compact = false,
+}: {
+  imageUrl: string;
+  compact?: boolean;
+}) {
+  const [failed, setFailed] = useState(false);
+  const frameClass = compact ? "h-10 w-10" : "h-14 w-14";
+  const innerClass = compact ? "h-8 w-8" : "h-11 w-11";
+
+  return (
+    <div
+      className={`relative ${frameClass} overflow-hidden rounded-[1.1rem] border border-cyan-300/30 bg-[radial-gradient(circle_at_30%_20%,rgba(34,211,238,0.32),rgba(2,6,23,0.96)_70%)] shadow-[0_0_28px_rgba(34,211,238,0.18)]`}
+    >
+      <span className="absolute inset-[1px] rounded-[1rem] border border-cyan-200/10" />
+      <span className="absolute inset-x-[-40%] top-0 h-full rotate-[28deg] bg-[linear-gradient(90deg,transparent,rgba(255,255,255,0.4),transparent)] opacity-80 animate-[nova-shimmer_3.2s_linear_infinite]" />
+      <div className="relative z-10 flex h-full items-center justify-center">
+        {failed ? (
+          <div
+            className={`flex ${innerClass} items-center justify-center rounded-[0.9rem] bg-[linear-gradient(135deg,#0f766e,#2563eb)] text-sm font-black text-white`}
+          >
+            N
+          </div>
+        ) : (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={imageUrl}
+            alt="Nova AI"
+            className={`${innerClass} rounded-[0.9rem] object-cover`}
+            onError={() => setFailed(true)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatTime(value: Date) {
+  return value.toLocaleTimeString("vi-VN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export default function NovaTeacherAgent() {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8010";
   const pathname = usePathname();
   const router = useRouter();
   const isTeacherZone = useMemo(() => pathname?.startsWith("/teacher"), [pathname]);
 
+  const [bootstrapped, setBootstrapped] = useState(false);
   const [open, setOpen] = useState(true);
-  const [imageIdx, setImageIdx] = useState(0);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [loading, setLoading] = useState(false);
+  const [slowNotice, setSlowNotice] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sessionId, setSessionId] = useState<string>("");
+  const [sessionId, setSessionId] = useState("");
+  const [teacherId, setTeacherId] = useState<number | null>(null);
+  const [classId, setClassId] = useState<number | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const suggestedQuestions = [
-    "Tóm tắt tình hình lớp IT1",
+    "Tóm tắt nhanh tình hình lớp IT1",
     "Tình hình học tập sinh viên ABX thế nào",
-    "Môn học Giải tích có những lớp nào",
-    "Xuất đề thi trắc nghiệm cơ sở hệ điều hành 20 câu 2 mã đề",
+    "Môn Lập trình hướng đối tượng hiện có những lớp nào",
+    "Xuất đề trắc nghiệm 20 câu cho môn Lập trình hướng đối tượng",
   ];
 
-  // Extract class_id and teacher_id from localStorage or URL
-  const [teacherId, setTeacherId] = useState<number | null>(null);
-  const [classId, setClassId] = useState<number | null>(null);
-
   useEffect(() => {
-    // Get teacher_id from localStorage
-    const userId = localStorage.getItem("userId");
-    setTeacherId(userId ? parseInt(userId) : null);
+    setBootstrapped(false);
 
-    // Try to get class_id from multiple sources:
-    // 1. URL path (e.g., /teacher/classrooms/1)
-    let cid: number | null = null;
+    if (!isTeacherZone) {
+      setTeacherId(null);
+      setClassId(null);
+      setBootstrapped(true);
+      return;
+    }
+
+    const userIdRaw = localStorage.getItem("userId");
+    const parsedUserId = userIdRaw ? Number(userIdRaw) : Number.NaN;
+    const userId = Number.isFinite(parsedUserId) && parsedUserId > 0 ? parsedUserId : null;
+    setTeacherId(userId);
+
+    let resolvedClassId: number | null = null;
     const pathParts = pathname?.split("/").filter(Boolean) || [];
-    
-    // Check if classId is in URL (typically at last position if numeric)
     if (pathParts.length > 2) {
       const potentialId = pathParts[pathParts.length - 1];
-      if (!isNaN(Number(potentialId))) {
-        cid = parseInt(potentialId);
+      if (!Number.isNaN(Number(potentialId))) {
+        resolvedClassId = Number(potentialId);
       }
     }
-    
-    // 2. Fallback to localStorage if not in URL
-    if (!cid) {
+
+    if (!resolvedClassId) {
       const storedClassId = localStorage.getItem("currentClassId");
       if (storedClassId) {
-        cid = parseInt(storedClassId);
+        resolvedClassId = Number(storedClassId);
       }
     }
-    
-    setClassId(cid);
 
-    // 3. If still no classId and we have userId, fetch first class from API
-    if (!cid && userId) {
-      fetch(`${apiBaseUrl}/api/classroom/teacher/${userId}`)
-        .then((r) => r.json())
+    setClassId(resolvedClassId);
+
+    if (!resolvedClassId && userId) {
+      const controller = new AbortController();
+      fetch(`${apiBaseUrl}/api/classroom/teacher/${encodeURIComponent(String(userId))}`, {
+        signal: controller.signal,
+      })
+        .then(async (response) => {
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text.slice(0, 120));
+          }
+          return response.json();
+        })
         .then((classes) => {
-          if (classes && classes.length > 0) {
-            const firstClassId = classes[0].id;
+          if (Array.isArray(classes) && classes.length > 0 && Number(classes[0]?.id) > 0) {
+            const firstClassId = Number(classes[0].id);
             setClassId(firstClassId);
             localStorage.setItem("currentClassId", firstClassId.toString());
           }
         })
-        .catch((err) => console.error("Failed to fetch classes:", err));
-    }
-  }, [apiBaseUrl, pathname, teacherId]);
+        .catch((err) => {
+          if (err?.name !== "AbortError") {
+            console.error("Không thể lấy lớp cho Nova:", err);
+          }
+        })
+        .finally(() => {
+          setBootstrapped(true);
+        });
 
-  // Auto scroll to bottom
+      return () => controller.abort();
+    }
+
+    setBootstrapped(true);
+  }, [apiBaseUrl, isTeacherZone, pathname]);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, loading]);
 
-  // Initialize and persist sessionId
   useEffect(() => {
-    let sid = localStorage.getItem("nova_session_id");
-    if (!sid) {
-      sid = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      localStorage.setItem("nova_session_id", sid);
+    let storedSessionId = localStorage.getItem("nova_session_id");
+    if (!storedSessionId) {
+      storedSessionId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      localStorage.setItem("nova_session_id", storedSessionId);
     }
-    setSessionId(sid);
+    setSessionId(storedSessionId);
   }, []);
 
-  // Load messages from localStorage on mount
   useEffect(() => {
-    if (sessionId) {
-      const key = `nova_messages_${sessionId}`;
-      const stored = localStorage.getItem(key);
-      if (stored) {
-        try {
-          const parsed = JSON.parse(stored) as Message[];
-          // Convert timestamp strings back to Date objects
-          const messagesWithDates = parsed.map(msg => ({
-            ...msg,
-            timestamp: new Date(msg.timestamp)
-          }));
-          setMessages(messagesWithDates);
-        } catch (e) {
-          console.error("Failed to parse stored messages:", e);
-        }
-      }
+    if (!sessionId) return;
+    const stored = localStorage.getItem(`nova_messages_${sessionId}`);
+    if (!stored) return;
+
+    try {
+      const parsed = JSON.parse(stored) as Array<Omit<Message, "timestamp"> & { timestamp: string }>;
+      setMessages(
+        parsed.map((item) => ({
+          ...item,
+          timestamp: new Date(item.timestamp),
+        })),
+      );
+    } catch (err) {
+      console.error("Không thể đọc lịch sử Nova:", err);
     }
   }, [sessionId]);
 
-  // Persist messages to localStorage whenever they change
   useEffect(() => {
-    if (sessionId && messages.length > 0) {
-      const key = `nova_messages_${sessionId}`;
-      localStorage.setItem(key, JSON.stringify(messages));
-    }
+    if (!sessionId || messages.length === 0) return;
+    localStorage.setItem(`nova_messages_${sessionId}`, JSON.stringify(messages));
   }, [messages, sessionId]);
 
-  // Handle navigation based on action_metadata
   const handleNavigation = (action: ActionMetadata) => {
     if (action.action_type !== "open_tab") return;
 
@@ -147,25 +215,16 @@ export default function NovaTeacherAgent() {
 
     switch (action.target) {
       case "learning_results":
-        if (action.tab_name === "class_analytics") {
-          if (resolvedClassId) {
-            localStorage.setItem("currentClassId", resolvedClassId.toString());
-          }
-          router.push("/teacher/members");
-        } else if (action.tab_name === "student_detailed") {
-          if (resolvedClassId) {
-            localStorage.setItem("currentClassId", resolvedClassId.toString());
-          }
-          router.push("/teacher/members");
+        if (resolvedClassId) {
+          localStorage.setItem("currentClassId", resolvedClassId.toString());
         }
+        router.push("/teacher/members");
         break;
-
       case "admin":
         if (action.tab_name === "subjects") {
           router.push("/admin/subjects");
         }
         break;
-
       case "teacher":
         if (action.tab_name === "subjects") {
           const subjectName = String(action.params?.subject_name || "").trim();
@@ -175,24 +234,12 @@ export default function NovaTeacherAgent() {
           const subjectId = Number(action.params?.subject_id);
           const classroomId = Number(action.params?.classroom_id);
 
-          if (subjectName) {
-            localStorage.setItem("novaTargetSubject", subjectName);
-          }
-          if (className) {
-            localStorage.setItem("novaTargetClass", className);
-          }
-          if (documentName) {
-            localStorage.setItem("novaTargetDocument", documentName);
-          }
-          if (Number.isFinite(subjectId) && subjectId > 0) {
-            localStorage.setItem("novaTargetSubjectId", subjectId.toString());
-          }
-          if (Number.isFinite(classroomId) && classroomId > 0) {
-            localStorage.setItem("novaTargetClassId", classroomId.toString());
-          }
-          if (mode) {
-            localStorage.setItem("novaManagementMode", mode);
-          }
+          if (subjectName) localStorage.setItem("novaTargetSubject", subjectName);
+          if (className) localStorage.setItem("novaTargetClass", className);
+          if (documentName) localStorage.setItem("novaTargetDocument", documentName);
+          if (Number.isFinite(subjectId) && subjectId > 0) localStorage.setItem("novaTargetSubjectId", subjectId.toString());
+          if (Number.isFinite(classroomId) && classroomId > 0) localStorage.setItem("novaTargetClassId", classroomId.toString());
+          if (mode) localStorage.setItem("novaManagementMode", mode);
 
           const query = new URLSearchParams();
           if (subjectName) query.set("subject", subjectName);
@@ -203,14 +250,12 @@ export default function NovaTeacherAgent() {
           if (mode) query.set("mode", mode);
 
           router.push(query.toString() ? `/teacher/subjects?${query.toString()}` : "/teacher/subjects");
-        } else
-        if (action.tab_name === "exam") {
-          router.push(`/teacher/exam`);
+        } else if (action.tab_name === "exam") {
+          router.push("/teacher/exam");
         } else if (action.tab_name === "documents") {
-          router.push(`/teacher/documents`);
+          router.push("/teacher/documents");
         }
         break;
-
       default:
         break;
     }
@@ -218,82 +263,56 @@ export default function NovaTeacherAgent() {
 
   const handleSendMessage = async () => {
     if (!inputValue.trim()) {
-      setError("Vui lòng nhập tin nhắn");
+      setError("Vui lòng nhập tin nhắn.");
       return;
     }
-
     if (!teacherId) {
-      setError("Vui lòng đăng nhập lại");
+      setError("Vui lòng đăng nhập lại.");
       return;
     }
-
     if (!classId) {
-      setError("Vui lòng chọn một lớp học trước. Truy cập tab 'Quản lý thành viên' để chọn lớp.");
+      setError("Vui lòng chọn một lớp học trước khi dùng Nova.");
       return;
     }
 
     const userMessage = inputValue.trim();
     setInputValue("");
     setError(null);
-
-    // Add user message to conversation
-    const newUserMessage: Message = {
-      role: "user",
-      content: userMessage,
-      timestamp: new Date(),
-    };
-    setMessages((prev) => [...prev, newUserMessage]);
+    setMessages((prev) => [...prev, { role: "user", content: userMessage, timestamp: new Date() }]);
     setLoading(true);
 
     try {
-      // Call the Nova interactive API
-      const response = await fetch(`${apiBaseUrl}/api/teacher/nova-interactive`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const response = await runLongRequest(
+        () =>
+          apiClient.post(
+            "/api/teacher/nova-interactive",
+            {
+              teacher_id: teacherId,
+              class_id: classId,
+              message: userMessage,
+              session_id: sessionId,
+            },
+            {
+              ...longRequestConfig,
+              baseURL: apiBaseUrl,
+            },
+          ),
+        {
+          onSlowStateChange: setSlowNotice,
+          slowDelayMs: 4500,
         },
-        body: JSON.stringify({
-          teacher_id: teacherId,
-          class_id: classId,
-          message: userMessage,
-          session_id: sessionId,
-        }),
-      });
+      );
 
-      if (!response.ok) {
-        const contentType = response.headers.get("content-type") || "";
-        if (contentType.includes("application/json")) {
-          const error = await response.json();
-          throw new Error(error.detail || "Lỗi từ Nova Agent");
-        }
-        const text = await response.text();
-        throw new Error(`Lỗi từ Nova Agent (${response.status}): ${text.slice(0, 120)}`);
-      }
+      const data = response.data;
+      setMessages((prev) => [...prev, { role: "agent", content: String(data.reply || ""), timestamp: new Date() }]);
 
-      const contentType = response.headers.get("content-type") || "";
-      if (!contentType.includes("application/json")) {
-        const text = await response.text();
-        throw new Error(`Nova trả về định dạng không hợp lệ: ${text.slice(0, 120)}`);
-      }
-
-      const data = await response.json();
-
-      // Add agent message to conversation
-      const agentMessage: Message = {
-        role: "agent",
-        content: data.reply,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, agentMessage]);
-
-      // Handle navigation if needed
       if (data.action_metadata) {
-        handleNavigation(data.action_metadata);
+        handleNavigation(data.action_metadata as ActionMetadata);
       }
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : "Lỗi kết nối";
-      setError(errorMsg);
-      console.error("Nova error:", err);
+      const message = normalizeApiError(err, "Nova tạm thời chưa thể phản hồi.");
+      setError(message);
+      console.error("Nova lỗi:", err);
     } finally {
       setLoading(false);
     }
@@ -305,123 +324,152 @@ export default function NovaTeacherAgent() {
     inputRef.current?.focus();
   };
 
-  if (!isTeacherZone) return null;
+  if (!isTeacherZone || !bootstrapped) return null;
 
   if (!open) {
     return (
       <button
         onClick={() => setOpen(true)}
-        className="nova-launcher fixed bottom-5 right-5 z-[80]"
+        className="fixed bottom-5 right-5 z-[80] flex h-[74px] w-[74px] items-center justify-center rounded-full border border-cyan-300/28 bg-[radial-gradient(circle_at_28%_22%,rgba(34,211,238,0.42),rgba(8,15,32,0.98)_60%)] shadow-[0_0_0_1px_rgba(103,232,249,0.14),0_26px_72px_rgba(2,8,23,0.55)]"
         aria-label="Mở Nova"
         title="Mở Nova"
       >
-        <span className="nova-launcher-glow" />
-        <img
-          src={NOVA_AGENT_IMAGES[imageIdx]}
-          alt="Nova"
-          className="h-11 w-11 rounded-full object-cover border border-white/70"
-          onError={() => setImageIdx((i) => (i + 1) % NOVA_AGENT_IMAGES.length)}
-        />
-        <span className="ml-2 font-extrabold tracking-wide">Nova</span>
+        <span className="absolute inset-0 rounded-full border border-cyan-300/20" />
+        <span className="absolute inset-[7px] rounded-full border border-cyan-200/12 bg-slate-950/90" />
+        <span className="absolute inset-y-[18px] left-0 right-0 bg-[linear-gradient(90deg,transparent,rgba(255,255,255,0.92),transparent)] opacity-90 blur-[0.5px] animate-[agent-scan_2.25s_linear_infinite]" />
+        <span className="absolute inset-0 rounded-full bg-[conic-gradient(from_180deg_at_50%_50%,rgba(34,211,238,0)_0deg,rgba(34,211,238,0.82)_58deg,rgba(59,130,246,0.14)_118deg,rgba(34,211,238,0)_220deg,rgba(34,211,238,0.58)_318deg,rgba(34,211,238,0)_360deg)] animate-[spin_4.8s_linear_infinite]" />
+        <span className="absolute right-3 top-3 rounded-full border border-cyan-200/20 bg-cyan-400/18 p-1 text-cyan-100">
+          <Sparkles size={10} />
+        </span>
+        <div className="relative z-10">
+          <NovaAvatar imageUrl={NOVA_AGENT_IMAGE} compact />
+        </div>
       </button>
     );
   }
 
   return (
     <section
-      className="nova-panel fixed bottom-5 right-5 z-[80] w-[420px] max-w-[92vw] flex flex-col max-h-[80vh]"
+      className="fixed bottom-5 right-5 z-[80] flex max-h-[82vh] w-[420px] max-w-[94vw] flex-col overflow-hidden rounded-[2rem] border border-cyan-300/18 bg-[linear-gradient(180deg,rgba(5,10,24,0.98),rgba(7,18,39,0.98))] shadow-[0_36px_96px_rgba(2,8,23,0.62)] backdrop-blur-2xl"
       aria-label="Nova Agent"
     >
-      {/* Header */}
-      <header className="flex items-center justify-between border-b border-white/25 px-4 py-3 flex-shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="relative">
-            <span className="nova-avatar-ring" />
-            <img
-              src={NOVA_AGENT_IMAGES[imageIdx]}
-              alt="Nova AI"
-              className="relative h-12 w-12 rounded-full object-cover border border-white/70"
-              onError={() => setImageIdx((i) => (i + 1) % NOVA_AGENT_IMAGES.length)}
-            />
-          </div>
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-100/90">Teacher Copilot</p>
-            <h3 className="text-lg font-black leading-none text-white">Nova</h3>
-          </div>
-        </div>
-        <button
-          className="rounded-lg border border-white/20 bg-white/10 p-2 text-white hover:bg-white/20"
-          onClick={() => setOpen(false)}
-          aria-label="Thu gọn Nova"
-          title="Thu gọn"
-        >
-          <Minimize2 size={16} />
-        </button>
-      </header>
-
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3 min-h-[300px]">
-        {messages.length === 0 && (
-          <div className="rounded-2xl border border-cyan-200/30 bg-white/10 p-3 backdrop-blur-sm mb-4">
-            <p className="text-sm leading-relaxed text-cyan-50">
-              <Sparkles size={14} className="inline mr-2 text-cyan-400" />
-              Chào bạn! Tôi là Nova, trợ lý thông minh của giảng viên. Bạn có thể:
-            </p>
-            <ul className="text-xs text-cyan-100 mt-2 space-y-1 ml-6">
-              <li>• Yêu cầu tóm tắt tình hình lớp học</li>
-              <li>• Hỏi về tiến độ học tập của sinh viên cụ thể</li>
-              <li>• Quản lý môn học, tài liệu</li>
-              <li>• Tạo hoặc xuất đề thi</li>
-            </ul>
-          </div>
-        )}
-
-        {error && (
-          <div className="rounded-lg border border-red-400/50 bg-red-500/20 p-3 flex gap-2">
-            <AlertCircle size={16} className="text-red-300 flex-shrink-0 mt-0.5" />
-            <p className="text-sm text-red-100">{error}</p>
-          </div>
-        )}
-
-        {messages.map((msg, idx) => (
-          <div
-            key={idx}
-            className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-          >
-            <div
-              className={`max-w-xs px-3 py-2 rounded-lg text-sm ${
-                msg.role === "user"
-                  ? "bg-cyan-500/70 text-white rounded-br-none"
-                  : "bg-white/20 text-cyan-50 rounded-bl-none border border-white/30"
-              }`}
-            >
-              {msg.content}
-            </div>
-          </div>
-        ))}
-
-        {loading && (
-          <div className="flex justify-start">
-            <div className="bg-white/20 text-cyan-50 border border-white/30 rounded-lg rounded-bl-none px-3 py-2 flex gap-2">
-              <Loader size={14} className="animate-spin" />
-              <span className="text-sm">Nova đang suy nghĩ...</span>
-            </div>
-          </div>
-        )}
-
-        <div ref={messagesEndRef} />
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.16),transparent_26%),radial-gradient(circle_at_top_right,rgba(37,99,235,0.18),transparent_28%)]" />
+        <div className="absolute inset-0 opacity-45 [background-image:linear-gradient(rgba(255,255,255,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.03)_1px,transparent_1px)] [background-size:26px_26px]" />
+        <div className="absolute left-0 top-0 h-full w-[90px] bg-[linear-gradient(180deg,rgba(34,211,238,0.08),transparent_70%)]" />
       </div>
 
-      {/* Input Area */}
-      <div className="border-t border-white/25 px-4 py-3 flex-shrink-0">
-        <div className="mb-2 flex flex-wrap gap-2">
+      <header className="relative border-b border-cyan-300/12 px-4 pb-4 pt-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex min-w-0 gap-3">
+            <NovaAvatar imageUrl={NOVA_AGENT_IMAGE} />
+            <div className="min-w-0">
+              <div className="inline-flex items-center gap-1 rounded-full border border-cyan-300/16 bg-cyan-400/10 px-2.5 py-1 text-[9px] font-black uppercase tracking-[0.24em] text-cyan-100/85">
+                <WandSparkles size={10} />
+                Nova Console
+              </div>
+              <h3 className="mt-2 text-[16px] font-black tracking-[-0.03em] text-white">Nova Teacher Agent</h3>
+            </div>
+          </div>
+
+          <button
+            className="inline-flex h-10 w-10 items-center justify-center rounded-[1rem] border border-cyan-300/16 bg-white/8 text-cyan-100 shadow-[0_0_20px_rgba(34,211,238,0.12)] transition-colors hover:bg-white/12"
+            onClick={() => setOpen(false)}
+            aria-label="Thu gọn Nova"
+            title="Thu gọn"
+          >
+            <Minimize2 size={16} />
+          </button>
+        </div>
+      </header>
+
+      <div className="relative flex-1 overflow-hidden">
+        <div className="absolute inset-y-0 left-0 w-[3px] bg-[linear-gradient(180deg,rgba(34,211,238,0.9),rgba(59,130,246,0.14),transparent)]" />
+
+        <div className="h-full space-y-3 overflow-y-auto px-4 py-4">
+          {messages.length === 0 ? (
+            <div className="rounded-[1.6rem] border border-cyan-300/14 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.04))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
+              <div className="flex items-center gap-2 text-cyan-50">
+                <Bot size={16} className="text-cyan-300" />
+                <p className="nova-copy-compact text-[12px] font-semibold leading-6">
+                  Nova đang đứng trong ngữ cảnh lớp hiện tại và chỉ chờ yêu cầu từ giảng viên.
+                </p>
+              </div>
+              <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                {suggestedQuestions.map((question) => (
+                  <button
+                    key={question}
+                    type="button"
+                    onClick={() => handleSelectSuggestedQuestion(question)}
+                    className="group rounded-[1.15rem] border border-cyan-300/12 bg-slate-950/42 px-3 py-3 text-left transition hover:border-cyan-300/22 hover:bg-slate-900/60"
+                  >
+                    <span className="flex items-start justify-between gap-3">
+                      <span className="nova-copy-compact text-[11px] font-semibold leading-5 text-cyan-50">{question}</span>
+                      <ChevronRight size={14} className="mt-0.5 shrink-0 text-cyan-300/62 transition-transform group-hover:translate-x-0.5" />
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {error ? (
+            <div className="flex gap-2 rounded-[1.2rem] border border-red-400/40 bg-red-500/14 p-3">
+              <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-300" />
+              <p className="nova-copy-compact text-[12px] leading-6 text-red-100">{error}</p>
+            </div>
+          ) : null}
+
+          {messages.map((msg, idx) => {
+            const isUser = msg.role === "user";
+            return (
+              <div key={idx} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+                <div className={`max-w-[88%] ${isUser ? "items-end" : "items-start"} flex flex-col gap-1.5`}>
+                  <span className="px-1 text-[9px] font-bold uppercase tracking-[0.16em] text-cyan-100/38">
+                    {isUser ? "Giảng viên" : "Nova"}
+                  </span>
+                  <div
+                    className={`rounded-[1.3rem] px-3.5 py-3 text-[13px] leading-6 ${
+                      isUser
+                        ? "rounded-br-sm bg-[linear-gradient(135deg,rgba(6,182,212,0.92),rgba(37,99,235,0.88))] text-white shadow-[0_16px_34px_rgba(6,182,212,0.2)]"
+                        : "rounded-bl-sm border border-cyan-300/14 bg-white/8 font-medium text-cyan-50"
+                    }`}
+                  >
+                    {msg.content}
+                  </div>
+                  <span className="px-1 text-[9px] font-medium text-cyan-100/30">{formatTime(msg.timestamp)}</span>
+                </div>
+              </div>
+            );
+          })}
+
+          {loading ? (
+            <div className="flex flex-col items-start gap-2">
+              <div className="flex items-center gap-2 rounded-[1.2rem] border border-cyan-300/14 bg-white/8 px-3 py-2.5 text-cyan-50">
+                <Loader size={14} className="animate-spin" />
+                <span className="nova-copy-compact text-[12px] font-medium">Nova đang xử lý yêu cầu...</span>
+              </div>
+              {slowNotice ? (
+                <div className="nova-copy-compact rounded-[1rem] border border-cyan-300/14 bg-white/8 px-3 py-2 text-[11px] font-semibold text-cyan-50">
+                  Yêu cầu vẫn đang được xử lý. Nova chưa mất kết nối, vui lòng đợi thêm một chút.
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div ref={messagesEndRef} />
+        </div>
+      </div>
+
+      <footer className="relative border-t border-cyan-300/12 px-4 py-4">
+        <div className="mb-3 flex flex-wrap gap-2">
           {suggestedQuestions.map((question) => (
             <button
               key={question}
               type="button"
               onClick={() => handleSelectSuggestedQuestion(question)}
               disabled={loading}
-              className="rounded-full border border-cyan-200/40 bg-white/10 px-3 py-1 text-xs text-cyan-100 hover:bg-white/20 disabled:opacity-50"
+              className="nova-chip-compact rounded-full border border-cyan-300/16 bg-white/7 px-2.5 py-1.5 text-[9.5px] font-semibold leading-4 text-cyan-100 transition-colors hover:bg-white/12 disabled:opacity-50"
               title={question}
             >
               {question}
@@ -429,27 +477,33 @@ export default function NovaTeacherAgent() {
           ))}
         </div>
 
-        <div className="flex gap-2">
-          <input
-            ref={inputRef}
-            type="text"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyPress={(e) => e.key === "Enter" && handleSendMessage()}
-            placeholder="Nhập yêu cầu..."
-            className="flex-1 rounded-lg border border-white/30 bg-white/10 px-3 py-2 text-sm text-white placeholder-white/50 focus:outline-none focus:border-cyan-400"
-            disabled={loading}
-          />
-          <button
-            onClick={handleSendMessage}
-            disabled={loading || !inputValue.trim()}
-            className="rounded-lg bg-cyan-500/70 hover:bg-cyan-500/90 text-white p-2 transition-colors disabled:opacity-50"
-            title="Gửi"
-          >
-            <Send size={16} />
-          </button>
+        <div className="rounded-[1.6rem] border border-cyan-300/14 bg-[linear-gradient(180deg,rgba(2,6,23,0.82),rgba(15,23,42,0.74))] p-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+          <div className="flex items-end gap-2">
+            <input
+              ref={inputRef}
+              type="text"
+              value={inputValue}
+              onChange={(event) => setInputValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  void handleSendMessage();
+                }
+              }}
+              placeholder="Nhập yêu cầu cho Nova..."
+              className="nova-input-compact flex-1 rounded-[1.1rem] border border-transparent bg-transparent px-3 py-3 text-[11px] font-medium text-white outline-none placeholder:text-[10px] placeholder:font-medium placeholder:text-cyan-100/42"
+              disabled={loading}
+            />
+            <button
+              onClick={() => void handleSendMessage()}
+              disabled={loading || !inputValue.trim()}
+              className="inline-flex h-11 w-11 items-center justify-center rounded-[1.15rem] bg-[linear-gradient(135deg,rgba(34,211,238,0.94),rgba(37,99,235,0.9))] text-white shadow-[0_16px_34px_rgba(34,211,238,0.24)] transition hover:brightness-110 disabled:opacity-50"
+              title="Gửi"
+            >
+              <Send size={16} />
+            </button>
+          </div>
         </div>
-      </div>
+      </footer>
     </section>
   );
 }

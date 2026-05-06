@@ -4,6 +4,9 @@ import axios from 'axios';
 import toast from 'react-hot-toast';
 import { Bot, ChevronRight, GraduationCap, LockKeyhole } from 'lucide-react';
 
+import { apiClient, longRequestConfig, normalizeApiError, runLongRequest } from '../services/api';
+import { confirmAlert } from '../services/alerts';
+
 const SUBJECT_ICON_MAP: Record<string, string> = {
   "Vật lý": "⚛️",
   "Đại số tuyến tính": "📐",
@@ -41,7 +44,10 @@ interface AssessmentDocumentItem {
 
 const AssessmentForm = () => {
   const [step, setStep] = useState<'select_subject' | 'quiz' | 'result'>('select_subject');
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8010';
+  const shortTimeoutMs = 15000;
+  const quizTimeoutMs = 45000;
+  const submitTimeoutMs = 30000;
   const [subject, setSubject] = useState("");
   const [sessionTopic, setSessionTopic] = useState(""); 
   const [sessionNumber, setSessionNumber] = useState<number | null>(null);
@@ -66,10 +72,12 @@ const AssessmentForm = () => {
     return id ? parseInt(id) : null;
   };
 
-  const getCleanErrorMessage = (error: any) => {
-    const raw = error.response?.data?.detail;
-    if (typeof raw === 'object') return raw[0]?.msg || raw.msg || "Lỗi dữ liệu";
-    return raw || "Lỗi hệ thống";
+  const getCleanErrorMessage = (error: unknown) => {
+    if (axios.isAxiosError(error)) {
+      const raw = error.response?.data?.detail;
+      if (typeof raw === 'object') return raw[0]?.msg || raw.msg || "Lỗi dữ liệu";
+    }
+    return normalizeApiError(error, "Lỗi hệ thống");
   };
 
   useEffect(() => {
@@ -80,12 +88,16 @@ const AssessmentForm = () => {
         return;
       }
       try {
-        const res = await axios.get(`${apiBaseUrl}/api/auth/me/${userId}`);
+        const res = await axios.get(`${apiBaseUrl}/api/auth/me/${userId}`, {
+          timeout: shortTimeoutMs,
+        });
         const classes = (res.data.enrolled_classes || []) as EnrolledClassInfo[];
 
         const classDocumentResponses = await Promise.all(
           classes.map(async (classInfo) => {
-            const docsRes = await axios.get(`${apiBaseUrl}/api/documents/class-documents/${classInfo.id}`);
+            const docsRes = await axios.get(`${apiBaseUrl}/api/documents/class-documents/${classInfo.id}`, {
+              timeout: shortTimeoutMs,
+            });
             return {
               classInfo,
               docs: Array.isArray(docsRes.data) ? docsRes.data : [],
@@ -127,7 +139,9 @@ const AssessmentForm = () => {
     const userId = getUserId();
     if (!userId) return;
     try {
-      const res = await axios.get(`${apiBaseUrl}/api/assessment/roadmap/${selectedSub}?user_id=${userId}`);
+      const res = await axios.get(`${apiBaseUrl}/api/assessment/roadmap/${selectedSub}?user_id=${userId}`, {
+        timeout: shortTimeoutMs,
+      });
       if (res.data.has_roadmap) {
         setRoadmap(res.data);
       }
@@ -227,8 +241,15 @@ const AssessmentForm = () => {
       window.addEventListener('beforeunload', handleBeforeUnload);
 
       window.history.pushState(null, "", window.location.href);
-      const handlePopState = () => {
-        if (window.confirm("⚠️ CẢNH BÁO: Bạn đang làm bài thi. Nếu thoát, bài làm sẽ bị xóa.")) {
+      const handlePopState = async () => {
+        const confirmed = await confirmAlert({
+          title: "Thoát bài kiểm tra",
+          message: "Bạn đang làm bài thi. Nếu thoát, bài làm sẽ bị xóa.",
+          confirmText: "Thoát bài",
+          cancelText: "Tiếp tục làm",
+          tone: "danger",
+        });
+        if (confirmed) {
           localStorage.removeItem(STORAGE_KEY);
           window.history.replaceState(null, "", window.location.pathname);
           setStep('select_subject');
@@ -252,9 +273,16 @@ const AssessmentForm = () => {
     return `${m}:${sec < 10 ? '0' : ''}${sec}`;
   };
 
-  const handleSafeExit = () => {
+  const handleSafeExit = async () => {
     if (Object.keys(answers).length > 0) {
-      if (window.confirm("⚠️ Thoát bây giờ bài làm sẽ bị xóa. Xác nhận thoát?")) {
+      const confirmed = await confirmAlert({
+        title: "Xác nhận thoát",
+        message: "Thoát bây giờ bài làm sẽ bị xóa. Xác nhận thoát?",
+        confirmText: "Thoát ngay",
+        cancelText: "Ở lại",
+        tone: "danger",
+      });
+      if (confirmed) {
         localStorage.removeItem(STORAGE_KEY);
         window.history.replaceState(null, "", window.location.pathname);
         setStep('select_subject');
@@ -302,13 +330,24 @@ const AssessmentForm = () => {
     localStorage.removeItem(STORAGE_KEY);
 
     try {
-      const res = await axios.post(`${apiBaseUrl}/api/assessment/generate-chapter-quiz`, {
-        subject: docSubject,
-        user_id: userId,
-        session_topic: topic || docFilename,
-        level: level || 'Intermediate',
-        source_file: docFilename,
-      });
+      const res = await runLongRequest(
+        () =>
+          apiClient.post(
+            '/api/assessment/generate-chapter-quiz',
+            {
+              subject: docSubject,
+              user_id: userId,
+              session_topic: topic || docFilename,
+              level: level || 'Intermediate',
+              source_file: docFilename,
+            },
+            {
+              ...longRequestConfig,
+              baseURL: apiBaseUrl,
+            }
+          ),
+        { slowDelayMs: 4500 }
+      );
 
       if (res.data.questions && res.data.questions.length > 0) {
         setQuestions(res.data.questions);
@@ -353,13 +392,24 @@ const AssessmentForm = () => {
     localStorage.removeItem(STORAGE_KEY);
 
     try {
-      const res = await axios.post(`${apiBaseUrl}/api/assessment/generate-session`, {
-        subject: urlSubject,
-        user_id: userId,
-        session_topic: urlTopic,
-        level: urlLevel,
-        source_file: urlSourceFile || null,
-      });
+      const res = await runLongRequest(
+        () =>
+          apiClient.post(
+            '/api/assessment/generate-session',
+            {
+              subject: urlSubject,
+              user_id: userId,
+              session_topic: urlTopic,
+              level: urlLevel,
+              source_file: urlSourceFile || null,
+            },
+            {
+              ...longRequestConfig,
+              baseURL: apiBaseUrl,
+            }
+          ),
+        { slowDelayMs: 4500 }
+      );
       
       if (res.data.questions && res.data.questions.length > 0) {
         setQuestions(res.data.questions);
@@ -396,9 +446,9 @@ const AssessmentForm = () => {
     const submissionData = {
       subject,
       user_id: userId,
-      answers: Object.entries(answers).map(([qid, opt]) => ({
-        question_id: Number(qid),
-        selected_option: opt
+      answers: questions.map((question) => ({
+        question_id: Number(question.id),
+        selected_option: answers[question.id] || ""
       })),
       duration_seconds: timer,
       is_session_quiz: hasTopic || isDocumentQuiz,
@@ -409,7 +459,14 @@ const AssessmentForm = () => {
     };
 
     try {
-      const res = await axios.post(`${apiBaseUrl}/api/assessment/submit`, submissionData);
+      const res = await runLongRequest(
+        () =>
+          apiClient.post('/api/assessment/submit', submissionData, {
+            ...longRequestConfig,
+            baseURL: apiBaseUrl,
+          }),
+        { slowDelayMs: 4500 }
+      );
       setResultData(res.data);
       // Fetch lại roadmap để xem đã Tốt nghiệp hay đã Thăng cấp chưa
       await fetchRoadmap(subject); 
@@ -424,13 +481,19 @@ const AssessmentForm = () => {
     }
   };
 
-  const handleCheckAndSubmit = () => {
+  const handleCheckAndSubmit = async () => {
     const missingIndexes = questions.map((q, idx) => (answers[q.id] ? null : idx + 1)).filter((idx) => idx !== null);
-    if (missingIndexes.length > 0) {
-      toast.error(`🛑 Bạn chưa làm câu: ${missingIndexes.join(", ")}`);
-      return; 
-    }
-    if (window.confirm("✅ Xác nhận nộp bài?")) handleSubmit();
+    const confirmMessage = missingIndexes.length > 0
+      ? `Bạn còn ${missingIndexes.length} câu chưa trả lời (${missingIndexes.join(', ')}). Vẫn nộp bài chứ?`
+      : "✅ Xác nhận nộp bài?";
+    const confirmed = await confirmAlert({
+      title: "Nộp bài",
+      message: confirmMessage,
+      confirmText: "Nộp bài",
+      cancelText: "Xem lại",
+      tone: "default",
+    });
+    if (confirmed) handleSubmit();
   };
 
   const handleGoToAdaptive = () => {
@@ -442,6 +505,8 @@ const AssessmentForm = () => {
   const safeOptions = currentQ && Array.isArray(currentQ.options) ? currentQ.options : [];
   
   const progress = questions.length > 0 ? ((currentIndex + 1) / questions.length) * 100 : 0;
+  const answeredCount = questions.filter((q) => Boolean(answers[q.id])).length;
+  const unansweredCount = Math.max(0, questions.length - answeredCount);
   const isPassed = resultData?.is_passed !== false;
   const progressVal = Number(roadmap?.progress_percent);
   const displayProgress = isNaN(progressVal) ? 0 : Math.round(progressVal);
@@ -652,8 +717,8 @@ const AssessmentForm = () => {
       )}
 
       {((step === 'quiz') || (step === 'result' && reviewMode)) && currentQ && (
-        <div className="flex items-center justify-center min-h-[60vh] py-8">
-          <div className="w-full max-w-3xl hero-panel overflow-hidden flex flex-col transition-all duration-300">
+        <div className="max-w-6xl mx-auto min-h-[60vh] py-8 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_260px] gap-6 items-start">
+          <div className="w-full hero-panel overflow-hidden flex flex-col transition-all duration-300">
             <div className="px-6 py-4 border-b border-gray-50 flex justify-between items-center hero-panel">
                 <div>
                    <span className="text-[10px] font-black text-indigo-600 uppercase tracking-widest block mb-1">
@@ -743,6 +808,61 @@ const AssessmentForm = () => {
                 )}
              </div>
           </div>
+
+          <aside className="hero-panel p-5 xl:sticky xl:top-24">
+            <div className="flex items-center justify-between gap-3 mb-4">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-400">Question map</p>
+                <h3 className="text-sm font-black text-slate-800 mt-1">Điều hướng câu hỏi</h3>
+              </div>
+              {!reviewMode ? (
+                <div className="text-right">
+                  <p className="text-xs font-black text-indigo-600">{answeredCount}/{questions.length}</p>
+                  <p className="text-[10px] text-slate-400 uppercase">Đã làm</p>
+                </div>
+              ) : null}
+            </div>
+
+            {!reviewMode ? (
+              <div className="mb-4 grid grid-cols-3 gap-2 text-[10px] font-semibold text-slate-500">
+                <div className="rounded-xl bg-indigo-50 px-2 py-2 text-center text-indigo-700">Hiện tại</div>
+                <div className="rounded-xl bg-emerald-50 px-2 py-2 text-center text-emerald-700">Đã làm</div>
+                <div className="rounded-xl bg-slate-100 px-2 py-2 text-center text-slate-500">Chưa làm</div>
+              </div>
+            ) : null}
+
+            {!reviewMode ? (
+              <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3">
+                <p className="text-xs font-semibold text-slate-600">Còn {unansweredCount} câu chưa trả lời.</p>
+              </div>
+            ) : null}
+
+            <div className="grid grid-cols-5 gap-2">
+              {questions.map((question, idx) => {
+                const isCurrent = idx === currentIndex;
+                const isAnswered = Boolean(answers[question.id]);
+                const baseClass = reviewMode
+                  ? isCurrent
+                    ? 'bg-slate-900 text-white ring-2 ring-slate-900'
+                    : 'bg-white text-slate-600 border border-slate-200'
+                  : isCurrent
+                    ? 'bg-indigo-600 text-white ring-2 ring-indigo-200'
+                    : isAnswered
+                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                      : 'bg-slate-100 text-slate-500 border border-slate-200';
+                return (
+                  <button
+                    key={question.id}
+                    type="button"
+                    onClick={() => setCurrentIndex(idx)}
+                    className={`h-10 rounded-xl text-xs font-black transition-all hover:scale-[1.03] ${baseClass}`}
+                  >
+                    {idx + 1}
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
         </div>
       )}
     </div>

@@ -3,9 +3,9 @@ import re
 from groq import Groq
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
-from langchain.schema import Document 
-from pptx import Presentation 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pptx import Presentation
 from rag.vector_store import get_vector_store
 
 # Tải biến môi trường
@@ -176,10 +176,13 @@ class ContentAgent:
             chunks = self.text_splitter.split_documents(raw_documents)
             
             if chunks:
-                if self.vector_store is None:
-                    self.vector_store = get_vector_store()
-                self.vector_store.add_documents(chunks)
-                print(f"✅ Content Agent: Đã nạp {len(chunks)} đoạn vào môn {detected_subject}")
+                try:
+                    if self.vector_store is None:
+                        self.vector_store = get_vector_store()
+                    self.vector_store.add_documents(chunks)
+                    print(f"✅ Content Agent: Đã nạp {len(chunks)} đoạn vào môn {detected_subject}")
+                except Exception as rag_exc:
+                    print(f"⚠️ Content Agent chạy fallback không vector store: {rag_exc}")
                 return {"success": True, "subject": detected_subject}
             return False
 

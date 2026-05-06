@@ -1,26 +1,50 @@
-# backend/rag/embedder.py
-from typing import Optional
+import logging
+import threading
+from typing import Any, Optional
 
-from langchain_community.embeddings import HuggingFaceEmbeddings
-
-_embeddings: Optional[HuggingFaceEmbeddings] = None
-
-
-def get_embeddings() -> Optional[HuggingFaceEmbeddings]:
-	"""Khởi tạo embedding theo kiểu lazy để tránh treo backend lúc startup."""
-	global _embeddings
-	if _embeddings is not None:
-		return _embeddings
-
-	try:
-		_embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-	except Exception as exc:
-		# Không chặn startup/login khi model embedding chưa tải được.
-		print(f"⚠️ Không khởi tạo được embedding model: {exc}")
-		_embeddings = None
-
-	return _embeddings
+from config import settings
 
 
-# Backward-compatible alias (có thể là None trước lần gọi đầu tiên).
+logger = logging.getLogger("app.rag.embedder")
+
+_embeddings: Optional[Any] = None
+_embeddings_lock = threading.Lock()
+_disabled_warning_logged = False
+
+
+def get_embeddings() -> Optional[Any]:
+    """Lazy-init the embedding model once to avoid blocking bursts."""
+    global _embeddings, _disabled_warning_logged
+    if _embeddings is not None:
+        return _embeddings
+
+    if not getattr(settings, "RAG_EMBEDDINGS_ENABLED", True):
+        if not _disabled_warning_logged:
+            logger.warning(
+                "RAG embeddings are disabled on this runtime. Falling back to non-vector behavior to keep the backend stable."
+            )
+            _disabled_warning_logged = True
+        return None
+
+    with _embeddings_lock:
+        if _embeddings is not None:
+            return _embeddings
+
+        try:
+            from langchain_community.embeddings import HuggingFaceEmbeddings
+
+            _embeddings = HuggingFaceEmbeddings(
+                model_name="all-MiniLM-L6-v2",
+                model_kwargs={"device": "cpu"},
+                encode_kwargs={"normalize_embeddings": False},
+            )
+            logger.info("Embedding model initialized successfully.")
+        except Exception as exc:
+            logger.exception("Failed to initialize embedding model: %s", exc)
+            _embeddings = None
+
+    return _embeddings
+
+
+# Backward-compatible alias for older imports.
 embeddings = None

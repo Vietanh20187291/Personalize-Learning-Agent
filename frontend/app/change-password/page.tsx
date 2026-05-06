@@ -55,7 +55,7 @@ export default function ChangePasswordPage() {
       }
 
       // 2. Gọi API Đổi mật khẩu
-      const res = await axios.post("http://localhost:8000/api/auth/change-password", {
+      const res = await axios.post("http://localhost:8010/api/auth/change-password", {
         old_password: oldPassword,
         new_password: newPassword
       }, {

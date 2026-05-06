@@ -1,3 +1,6 @@
+import logging
+import time
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -5,10 +8,12 @@ from sqlalchemy.orm import Session
 from agents.teacher_agent import TeacherAgent
 from db.database import get_db
 from db.models import Classroom, Subject, User
+from logging_config import error_json_response
 from memory.conversation_memory import get_conversation_memory
 from memory.intent_classifier import IntentClassifier
 
 router = APIRouter()
+logger = logging.getLogger("app.nova")
 
 
 class TeacherAssistantRequest(BaseModel):
@@ -28,6 +33,7 @@ def _build_nova_fallback_response(agent: TeacherAgent, teacher_id: int, class_id
     memory = get_conversation_memory()
     context = memory.get_context(teacher_id, class_id)
     analysis = agent.classifier.classify_request(message, context)
+    canonical_message = agent._clean_text(analysis.get("rewritten_message") or message)
 
     pending_request = memory.get_pending_request(teacher_id, class_id)
     intent_type = analysis["intent_type"]
@@ -36,10 +42,10 @@ def _build_nova_fallback_response(agent: TeacherAgent, teacher_id: int, class_id
         intent_type = pending_request.get("intent_type", intent_type)
         entities = agent._merge_pending_entities(pending_request, entities)
 
-    explicit_subject = agent._find_subject_in_message(message)
+    explicit_subject = agent._find_subject_in_message(canonical_message, entities=entities)
     subject = explicit_subject or agent._resolve_subject(entities, context)
 
-    explicit_classroom = agent._find_classroom_in_message(message, subject)
+    explicit_classroom = agent._find_classroom_in_message(canonical_message, subject, entities=entities)
     classroom = explicit_classroom or agent._resolve_classroom(entities, context, subject)
     student = agent._resolve_student(entities, context, classroom)
 
@@ -64,7 +70,7 @@ def _build_nova_fallback_response(agent: TeacherAgent, teacher_id: int, class_id
     elif intent_type == IntentClassifier.STUDENT_INFO and student is not None:
         result = agent._student_overview_reply(student)
     elif intent_type == IntentClassifier.MATERIAL:
-        result = agent._material_reply(subject, classroom, message)
+        result = agent._material_reply(subject, classroom, canonical_message)
     elif intent_type == IntentClassifier.EXAM_GENERATION and subject is not None:
         exam_type = entities.get("exam_type") or "multiple_choice"
         num_questions = int(entities.get("num_questions") or 0)
@@ -91,20 +97,52 @@ def _build_nova_fallback_response(agent: TeacherAgent, teacher_id: int, class_id
 
 @router.post("/assistant")
 def teacher_assistant(req: TeacherAssistantRequest, db: Session = Depends(get_db)):
-    if not req.message or not req.message.strip():
-        raise HTTPException(status_code=400, detail="Vui lòng nhập yêu cầu cho agent")
-
+    started = time.perf_counter()
     try:
+        if not req.message or not req.message.strip():
+            raise HTTPException(status_code=400, detail="Vui lòng nhập yêu cầu cho agent")
+
+        logger.info(
+            "teacher_assistant start teacher_id=%s class_id=%s message=%s",
+            req.teacher_id,
+            req.class_id,
+            (req.message or "")[:200],
+        )
         agent = TeacherAgent(db)
-        return agent.respond(
+        response = agent.respond(
             teacher_id=req.teacher_id,
             class_id=req.class_id,
             message=req.message.strip(),
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Không thể xử lý yêu cầu của giảng viên: {str(exc)}")
+        logger.info(
+            "teacher_assistant done teacher_id=%s class_id=%s duration_ms=%s",
+            req.teacher_id,
+            req.class_id,
+            round((time.perf_counter() - started) * 1000, 2),
+        )
+        return response
+    except HTTPException as exc:
+        logger.warning(
+            "teacher_assistant rejected teacher_id=%s class_id=%s status=%s duration_ms=%s detail=%s",
+            req.teacher_id,
+            req.class_id,
+            exc.status_code,
+            round((time.perf_counter() - started) * 1000, 2),
+            exc.detail,
+        )
+        return error_json_response(exc.status_code, str(exc.detail), retryable=exc.status_code >= 500)
+    except Exception:
+        logger.exception(
+            "teacher_assistant failed teacher_id=%s class_id=%s duration_ms=%s",
+            req.teacher_id,
+            req.class_id,
+            round((time.perf_counter() - started) * 1000, 2),
+        )
+        return error_json_response(
+            500,
+            "Nova tạm thời chưa thể xử lý yêu cầu này. Vui lòng thử lại sau ít phút.",
+            retryable=True,
+        )
 
 
 @router.post("/nova-interactive")
@@ -116,38 +154,97 @@ def nova_interactive(req: NovaInteractiveRequest, db: Session = Depends(get_db))
     - Định tuyến sang các UI component phù hợp
     - Trả về action metadata cho frontend
     """
-    print(f"[NOVA] Request received: teacher_id={req.teacher_id}, class_id={req.class_id}, message='{req.message[:50]}'")
-    
-    if not req.message or not req.message.strip():
-        raise HTTPException(status_code=400, detail="Vui lòng nhập yêu cầu cho agent")
-
+    started = time.perf_counter()
     try:
+        if not req.message or not req.message.strip():
+            raise HTTPException(status_code=400, detail="Vui lòng nhập yêu cầu cho agent")
+
+        logger.info(
+            "nova_interactive start teacher_id=%s class_id=%s message=%s",
+            req.teacher_id,
+            req.class_id,
+            (req.message or "")[:200],
+        )
         agent = TeacherAgent(db)
         agent_response = agent.respond(
             teacher_id=req.teacher_id,
             class_id=req.class_id,
             message=req.message.strip(),
         )
+        logger.info(
+            "nova_interactive done teacher_id=%s class_id=%s duration_ms=%s",
+            req.teacher_id,
+            req.class_id,
+            round((time.perf_counter() - started) * 1000, 2),
+        )
         return {
             **agent_response,
         }
-        
+    except HTTPException as exc:
+        logger.warning(
+            "nova_interactive rejected teacher_id=%s class_id=%s status=%s duration_ms=%s detail=%s",
+            req.teacher_id,
+            req.class_id,
+            exc.status_code,
+            round((time.perf_counter() - started) * 1000, 2),
+            exc.detail,
+        )
+        return error_json_response(exc.status_code, str(exc.detail), retryable=exc.status_code >= 500)
     except ValueError as exc:
-        print(f"[NOVA] ValueError: {exc}")
-        raise HTTPException(status_code=403, detail=str(exc))
+        logger.warning(
+            "nova_interactive value_error teacher_id=%s class_id=%s duration_ms=%s detail=%s",
+            req.teacher_id,
+            req.class_id,
+            round((time.perf_counter() - started) * 1000, 2),
+            exc,
+        )
+        return error_json_response(403, str(exc), retryable=False)
     except NameError as exc:
         if "histories" in str(exc):
-            print(f"[NOVA] NameError fallback triggered: {exc}")
+            logger.warning(
+                "nova_interactive fallback teacher_id=%s class_id=%s duration_ms=%s detail=%s",
+                req.teacher_id,
+                req.class_id,
+                round((time.perf_counter() - started) * 1000, 2),
+                exc,
+            )
             agent = TeacherAgent(db)
             try:
-                return _build_nova_fallback_response(agent, req.teacher_id, req.class_id, req.message.strip())
-            except Exception as fallback_exc:
-                print(f"[NOVA] Fallback failed: {type(fallback_exc).__name__}: {fallback_exc}")
-                import traceback
-                traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Nova error: {str(exc)}")
-    except Exception as exc:
-        print(f"[NOVA] Exception: {type(exc).__name__}: {exc}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Nova error: {str(exc)}")
+                response = _build_nova_fallback_response(agent, req.teacher_id, req.class_id, req.message.strip())
+                logger.info(
+                    "nova_interactive fallback_done teacher_id=%s class_id=%s duration_ms=%s",
+                    req.teacher_id,
+                    req.class_id,
+                    round((time.perf_counter() - started) * 1000, 2),
+                )
+                return response
+            except Exception:
+                logger.exception(
+                    "nova_interactive fallback_failed teacher_id=%s class_id=%s duration_ms=%s",
+                    req.teacher_id,
+                    req.class_id,
+                    round((time.perf_counter() - started) * 1000, 2),
+                )
+        logger.exception(
+            "nova_interactive name_error teacher_id=%s class_id=%s duration_ms=%s",
+            req.teacher_id,
+            req.class_id,
+            round((time.perf_counter() - started) * 1000, 2),
+        )
+        return error_json_response(
+            500,
+            "Nova gặp lỗi nội bộ khi xử lý yêu cầu. Vui lòng thử lại sau ít phút.",
+            retryable=True,
+        )
+    except Exception:
+        logger.exception(
+            "nova_interactive failed teacher_id=%s class_id=%s duration_ms=%s",
+            req.teacher_id,
+            req.class_id,
+            round((time.perf_counter() - started) * 1000, 2),
+        )
+        return error_json_response(
+            500,
+            "Nova tạm thời chưa thể xử lý yêu cầu này. Vui lòng thử lại sau ít phút.",
+            retryable=True,
+        )

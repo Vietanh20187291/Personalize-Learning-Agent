@@ -1,29 +1,18 @@
 "use client";
 
-import React from 'react';
-import AssessmentForm from '@/components/AssessmentForm'; 
-import OrbitPanel from '@/components/OrbitPanel';
+import AssessmentForm from "@/components/AssessmentForm";
 
 export default function AssessmentPage() {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
-  const orbitUserId = typeof window !== 'undefined'
-    ? parseInt(localStorage.getItem('userId') || localStorage.getItem('user_id') || '0', 10)
-    : 0;
   return (
-    <>
     <div className="page-shell">
-      
-
       <div className="page-container">
-        {/* 2. Phần tiêu đề trang */}
-        <div className="hero-panel soft-grid text-center mb-8 py-8 px-6">
-          <h1 className="display-font text-3xl font-extrabold text-slate-900 mb-2">
-            AI Personalized Learning
-          </h1>
-          <div className="h-1 w-20 bg-teal-600 mx-auto rounded-full"></div>
+        <div className="hero-panel soft-grid mb-8 px-6 py-8 text-center">
+          <h1 className="display-font mb-2 text-3xl font-extrabold text-[#201915]">Assessment Control Room</h1>
+          <p className="mx-auto max-w-2xl text-sm text-[#6f6156]">
+            Chon dung ngu canh tai lieu, lam bai va nhan phan hoi tren cung mot phien hoc.
+          </p>
         </div>
 
-        {/* 3. Component chứa toàn bộ logic làm bài */}
         <div className="flex justify-center">
           <div className="w-full max-w-5xl">
             <AssessmentForm />
@@ -31,11 +20,5 @@ export default function AssessmentPage() {
         </div>
       </div>
     </div>
-    <OrbitPanel
-      userId={orbitUserId}
-      apiBaseUrl={apiBaseUrl}
-      enrolledClasses={[]}
-    />
-    </>
   );
 }

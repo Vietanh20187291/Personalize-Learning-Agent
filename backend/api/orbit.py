@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import logging
 import unicodedata
 from typing import Dict, List, Optional, Tuple
 
@@ -6,12 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from agents.adaptive_agent import AdaptiveAgent
 from agents.orbit_agent import OrbitAgent
 from db import models
 from db.database import get_db
+from logging_config import error_json_response
 from services.orbit_reminders import build_weekly_inactivity_report, send_weekly_reminders
 
 router = APIRouter()
+logger = logging.getLogger("app.orbit")
 
 
 class OrbitChatRequest(BaseModel):
@@ -363,7 +367,144 @@ def _first_available_document_for_subject(db: Session, user: models.User, subjec
 
 def _is_summary_request(message: str) -> bool:
     text = _normalize(message)
-    return any(token in text for token in ["tóm tắt", "tom tat", "tóm lược", "tom luoc", "summary"])
+    return any(token in text for token in [
+        "tóm tắt", "tom tat", "tóm lược", "tom luoc", "summary", "summarize"
+    ])
+
+
+def _is_document_followup_request(message: str) -> bool:
+    text = _normalize(message)
+    return any(token in text for token in [
+        "tóm tắt", "tom tat", "tóm lược", "tom luoc", "summary", "summarize",
+        "ý chính", "y chinh", "nội dung chính", "noi dung chinh",
+        "main idea", "main ideas", "key point", "key points",
+        "giải thích", "giai thich", "explain", "phân tích", "phan tich",
+    ])
+
+
+def _is_document_learning_request(message: str, selected_doc: Optional[models.Document]) -> bool:
+    if selected_doc is None:
+        return False
+
+    if _is_document_followup_request(message):
+        return True
+
+    if _is_open_document_request(message) or _is_progress_or_plan_request(message):
+        return False
+
+    if _should_recommend_study(message) or _is_progress_overview_request(message):
+        return False
+
+    if _is_entry_message(message):
+        return False
+
+    return bool((message or "").strip())
+
+
+def _resolve_selected_document(
+    db: Session,
+    user: models.User,
+    classroom: Optional[models.Classroom],
+    document_id: Optional[int],
+    source_file: Optional[str],
+) -> Optional[models.Document]:
+    selected_doc: Optional[models.Document] = None
+    if document_id:
+        selected_doc = db.query(models.Document).filter(models.Document.id == document_id).first()
+    elif (source_file or "").strip():
+        query = db.query(models.Document).filter(models.Document.filename == source_file.strip())
+        if classroom is not None:
+            query = query.filter(models.Document.class_id == classroom.id)
+        selected_doc = query.first()
+
+    if selected_doc is None:
+        return None
+
+    enrolled_class_ids = {item.id for item in getattr(user, "enrolled_classes", []) or []}
+    if selected_doc.class_id and selected_doc.class_id in enrolled_class_ids:
+        return selected_doc
+
+    return None
+
+
+def _recover_selected_document_from_history(
+    db: Session,
+    user: models.User,
+    classroom: Optional[models.Classroom],
+    session_id: Optional[int],
+) -> Optional[models.Document]:
+    if classroom is None:
+        return None
+
+    allowed_docs = _available_documents_for_classroom(db, classroom)
+    if not allowed_docs:
+        return None
+
+    candidates = []
+    for doc in allowed_docs:
+        filename = (doc.filename or "").strip()
+        title = (doc.title or "").strip()
+        if not filename and not title:
+            continue
+        candidates.append((doc, _normalize(filename), _normalize(title)))
+
+    _, recent_messages = _get_recent_orbit_messages(db, user.id, session_id=session_id, limit=24)
+    for item in reversed(recent_messages):
+        content = _normalize(str(item.get("content", "")))
+        if not content:
+            continue
+        for doc, filename_key, title_key in candidates:
+            if filename_key and filename_key in content:
+                return doc
+            if title_key and title_key in content:
+                return doc
+
+    return None
+
+
+def _reply_with_open_document_context(
+    db: Session,
+    user: models.User,
+    classroom: models.Classroom,
+    subject_name: str,
+    selected_doc: models.Document,
+    message: str,
+    session_id: Optional[int] = None,
+) -> str:
+    allowed_docs = _available_documents_for_classroom(db, classroom)
+    allowed_filenames = [item.filename for item in allowed_docs if (item.filename or "").strip()]
+    if selected_doc.filename and selected_doc.filename not in allowed_filenames:
+        allowed_filenames.append(selected_doc.filename)
+
+    _, recent_messages = _get_recent_orbit_messages(db, user.id, session_id=session_id, limit=16)
+    history = [
+        {"role": item.get("role"), "content": item.get("content", "")}
+        for item in recent_messages
+        if item.get("role") in {"user", "assistant"} and str(item.get("content", "")).strip()
+    ]
+
+    summary = _quick_document_summary(db, selected_doc)
+    key_points = summary.get("key_points") or []
+    key_points_text = "\n".join([f"- {str(item)}" for item in key_points[:4]]) if isinstance(key_points, list) and key_points else "- Bám vào các khái niệm cốt lõi và ví dụ trong tài liệu."
+    roadmap_context = (
+        f"Tài liệu đang mở: {selected_doc.filename}. "
+        f"Hỗ trợ người học bám sát tài liệu này, không lái sang tài liệu khác.\n"
+        f"Tóm tắt nhanh: {str(summary.get('summary', ''))[:900]}\n"
+        f"Ý chính:\n{key_points_text}"
+    )
+
+    agent = AdaptiveAgent(db)
+    response = agent.chat_with_tutor(
+        subject=subject_name,
+        user_message=message,
+        roadmap_context=roadmap_context,
+        allowed_filenames=allowed_filenames,
+        session_topic=(selected_doc.title or selected_doc.filename or "").strip(),
+        source_file=(selected_doc.filename or "").strip(),
+        history=history,
+        document_id=selected_doc.id,
+    )
+    return str(response or "").strip()
 
 
 def _is_entry_message(message: str) -> bool:
@@ -975,6 +1116,16 @@ def trigger_weekly_reminders(
 
 @router.post("/chat")
 def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
+    logger.info(
+        "orbit_chat start user_id=%s subject=%s class_id=%s document_id=%s source_file=%s session_id=%s message=%s",
+        req.user_id,
+        req.subject,
+        req.class_id,
+        req.document_id,
+        req.source_file,
+        req.session_id,
+        (req.message or "")[:200],
+    )
     user = db.query(models.User).filter(models.User.id == req.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
@@ -1009,6 +1160,37 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
             subject = models.Subject(name=subject_name, description=f"Môn {subject_name}")
             db.add(subject)
             db.flush()
+
+    selected_doc = _resolve_selected_document(
+        db=db,
+        user=user,
+        classroom=classroom,
+        document_id=req.document_id,
+        source_file=req.source_file,
+    )
+    if selected_doc is not None:
+        logger.info(
+            "orbit_chat selected_document_direct doc_id=%s filename=%s class_id=%s subject=%s",
+            selected_doc.id,
+            selected_doc.filename,
+            selected_doc.class_id,
+            selected_doc.subject,
+        )
+    if selected_doc is not None:
+        matched_classroom = next(
+            (item for item in enrolled_classes if item.id == selected_doc.class_id),
+            None,
+        )
+        if matched_classroom is not None:
+            classroom = matched_classroom
+        subject_name = (
+            getattr(getattr(selected_doc, "subject_obj", None), "name", None)
+            or selected_doc.subject
+            or subject_name
+            or ""
+        ).strip()
+        if getattr(selected_doc, "subject_id", None):
+            subject = db.query(models.Subject).filter(models.Subject.id == selected_doc.subject_id).first() or subject
 
     orbit_mode, orbit_status_text = _entry_orbit_mode(db, user.id)
     login_notice = _login_gap_notice(db, user.id)
@@ -1090,10 +1272,86 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
             "orbit_status_text": orbit_status_text,
         }
 
+    if selected_doc is None:
+        selected_doc = _resolve_selected_document(
+            db=db,
+            user=user,
+            classroom=classroom,
+            document_id=req.document_id,
+            source_file=req.source_file,
+        )
+    potential_document_context_request = bool((req.message or "").strip()) and not any([
+        is_entry,
+        _is_open_document_request(req.message),
+        _is_progress_or_plan_request(req.message),
+        _should_recommend_study(req.message),
+        _is_progress_overview_request(req.message),
+    ])
+    if selected_doc is None and potential_document_context_request:
+        selected_doc = _recover_selected_document_from_history(
+            db=db,
+            user=user,
+            classroom=classroom,
+            session_id=req.session_id,
+        )
+        if selected_doc is not None:
+            logger.info(
+                "orbit_chat selected_document_from_history doc_id=%s filename=%s session_id=%s",
+                selected_doc.id,
+                selected_doc.filename,
+                req.session_id,
+            )
+    if selected_doc is not None and selected_doc.class_id:
+        matched_classroom = next(
+            (item for item in enrolled_classes if item.id == selected_doc.class_id),
+            None,
+        )
+        if matched_classroom is not None:
+            classroom = matched_classroom
+            subject_name = (
+                getattr(getattr(selected_doc, "subject_obj", None), "name", None)
+                or selected_doc.subject
+                or subject_name
+                or ""
+            ).strip()
+    document_context_request = _is_document_learning_request(req.message, selected_doc)
+    logger.info(
+        "orbit_chat routing subject=%s classroom_id=%s selected_doc_id=%s is_entry=%s document_context_request=%s",
+        subject_name,
+        classroom.id if classroom else None,
+        selected_doc.id if selected_doc else None,
+        is_entry,
+        document_context_request,
+    )
+
     orbit = OrbitAgent(db)
     if is_entry:
         reply = ""
+    elif document_context_request and selected_doc is not None:
+        logger.info(
+            "orbit_chat branch=document_context doc_id=%s filename=%s",
+            selected_doc.id,
+            selected_doc.filename,
+        )
+        doc_subject_name = (
+            getattr(getattr(selected_doc, "subject_obj", None), "name", None)
+            or selected_doc.subject
+            or subject_name
+            or ""
+        ).strip()
+        reply = _reply_with_open_document_context(
+            db=db,
+            user=user,
+            classroom=classroom,
+            subject_name=doc_subject_name,
+            selected_doc=selected_doc,
+            message=req.message,
+            session_id=req.session_id,
+        )
+        if not reply:
+            reply = "Tôi đang bám vào tài liệu đang mở nhưng chưa rút ra được câu trả lời rõ ràng. Bạn hãy hỏi cụ thể hơn theo đúng phần tài liệu này."
     else:
+        logger.info("orbit_chat branch=generic_advice")
         # Ưu tiên phản hồi thích ứng đa môn để tránh lặp mẫu câu mặc định của OrbitAgent.
         if _is_summary_request(req.message):
             reply = orbit.respond(user=user, subject_name=subject_name, message=req.message, class_id=classroom.id)
@@ -1117,21 +1375,16 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
     recommendation_payload: Optional[Dict[str, object]] = None
     action_metadata: Optional[Dict[str, object]] = None
 
-    selected_doc: Optional[models.Document] = None
-    if req.document_id:
-        selected_doc = db.query(models.Document).filter(models.Document.id == req.document_id).first()
-    elif (req.source_file or "").strip():
-        selected_doc = db.query(models.Document).filter(
-            models.Document.class_id == classroom.id,
-            models.Document.filename == req.source_file.strip(),
-        ).first()
-
     requested_subject_from_msg = _extract_subject_from_message(req.message, user) if _is_open_document_request(req.message) else None
     should_recommend = (
         is_entry
         or _should_recommend_study(req.message)
-        or _is_open_document_request(req.message)
-        or (not _is_progress_or_plan_request(req.message) and not _is_summary_request(req.message))
+        or (_is_open_document_request(req.message) and not document_context_request)
+        or (
+            not document_context_request
+            and not _is_progress_or_plan_request(req.message)
+            and not _is_summary_request(req.message)
+        )
     )
 
     if should_recommend:
@@ -1159,7 +1412,7 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
                 "confirm_button_text": "OK, mở tài liệu đề xuất",
                 "should_auto_execute": False,
             }
-    elif _is_open_document_request(req.message):
+    elif _is_open_document_request(req.message) and not document_context_request:
         if requested_subject_from_msg:
             recommendation_payload, recommendation_text = _build_recommendation_payload_for_subject(db, user, requested_subject_from_msg)
         else:
@@ -1185,7 +1438,7 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
                 "should_auto_execute": False,
             }
 
-    if _is_summary_request(req.message):
+    if _is_summary_request(req.message) and not document_context_request:
         summary_doc = selected_doc
         if summary_doc is None and recommendation_payload:
             rec_doc = (recommendation_payload.get("document") or {}) if isinstance(recommendation_payload, dict) else {}
@@ -1253,6 +1506,16 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
 
     _sync_learning_progress(db, user.id)
     db.commit()
+    logger.info(
+        "orbit_chat done session_id=%s class_id=%s subject=%s action_type=%s recommendation_doc_id=%s",
+        session.id,
+        classroom.id,
+        subject_name,
+        (action_metadata or {}).get("action_type") if action_metadata else None,
+        ((recommendation_payload or {}).get("document") or {}).get("id")
+        if isinstance(recommendation_payload, dict)
+        else None,
+    )
 
     return {
         "reply": reply,
@@ -1269,7 +1532,7 @@ def chat_with_orbit(req: OrbitChatRequest, db: Session = Depends(get_db)):
             "Mở cho tôi tài liệu môn Lập trình hướng đối tượng",
         ],
         "session_id": session.id,
-        "debug_version": "orbit_patch_v2",
+        "debug_version": "orbit_patch_v4",
     }
 
 

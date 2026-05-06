@@ -1,8 +1,19 @@
-from fastapi import FastAPI
+import sys
+import logging
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager # Thư viện quản lý vòng đời (lifespan)
-from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, exam_generator, subject, teacher_agent, orbit, planning
+from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, exam_generator, subject, teacher_agent, orbit, planning, notification, debug, evaluation
+from config import settings
 from services.orbit_reminders import start_weekly_orbit_reminder_loop
+from logging_config import RequestLoggingMiddleware, error_json_response, get_current_request_id, setup_logging
 # --- IMPORT DATABASE VÀ MODELS ---
 from db import models
 from db.database import engine, SessionLocal 
@@ -12,7 +23,7 @@ from db.models import User, Subject
 from api.auth import hash_password 
 
 # --- IMPORT CÁC ROUTER API ---
-from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent, orbit, planning 
+from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent, orbit, planning, notification, evaluation
 
 from fastapi.staticfiles import StaticFiles
 import os
@@ -21,6 +32,9 @@ import re
 import threading
 from datetime import datetime, timedelta
 from agents.assessment_agent import AssessmentAgent
+
+setup_logging()
+logger = logging.getLogger("app.main")
 
 # Tự động tạo bảng nếu chưa có 
 models.Base.metadata.create_all(bind=engine)
@@ -51,6 +65,12 @@ def ensure_orbit_login_tracking_column():
         if "user_login_sessions" not in tables:
             models.Base.metadata.tables["user_login_sessions"].create(bind=engine, checkfirst=True)
             print("✅ Đã bổ sung bảng user_login_sessions")
+        if "student_learning_plan_steps" in tables:
+            step_columns = [column["name"] for column in inspector.get_columns("student_learning_plan_steps")]
+            if "deadline_date" not in step_columns:
+                with engine.begin() as connection:
+                    connection.execute(text("ALTER TABLE student_learning_plan_steps ADD COLUMN deadline_date DATE"))
+                    print("✅ Đã bổ sung cột deadline_date cho student_learning_plan_steps")
 
         # Backfill lịch sử login cho sinh viên cũ chưa có dòng trong user_login_sessions.
         if "user_login_sessions" in tables and "users" in tables:
@@ -203,6 +223,37 @@ def create_initial_admin():
         db.close()
 
 
+def ensure_document_publications_visible():
+    db = SessionLocal()
+    try:
+        docs = db.query(models.Document).all()
+        publications = {
+            int(item.doc_id): item
+            for item in db.query(models.DocumentPublication).all()
+        }
+
+        created = 0
+        updated = 0
+        for doc in docs:
+            publication = publications.get(int(doc.id))
+            if publication is None:
+                db.add(models.DocumentPublication(doc_id=doc.id, is_visible_to_students=True))
+                created += 1
+                continue
+            if not publication.is_visible_to_students:
+                publication.is_visible_to_students = True
+                updated += 1
+
+        if created or updated:
+            db.commit()
+            print(f"✅ Đồng bộ publication tài liệu: created={created}, updated={updated}")
+    except Exception as e:
+        db.rollback()
+        print(f"⚠️ Không thể đồng bộ publication tài liệu: {e}")
+    finally:
+        db.close()
+
+
 def warmup_document_question_banks(target_count: int = 20):
     db = SessionLocal()
     try:
@@ -285,16 +336,59 @@ def warmup_document_question_banks(target_count: int = 20):
 async def lifespan(app: FastAPI):
     create_default_subjects()  # Tạo môn học trước
     create_initial_admin()      # Rồi tạo admin
-    threading.Thread(
-        target=warmup_document_question_banks,
-        kwargs={"target_count": 20},
-        daemon=True,
-    ).start()
+    ensure_document_publications_visible()
+    warmup_enabled = os.getenv("ENABLE_QUESTION_BANK_WARMUP", "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if warmup_enabled:
+        threading.Thread(
+            target=warmup_document_question_banks,
+            kwargs={"target_count": 20},
+            daemon=True,
+            name="question-bank-warmup",
+        ).start()
+        logger.info("Question bank warmup thread started.")
+    else:
+        logger.info("Question bank warmup disabled. Set ENABLE_QUESTION_BANK_WARMUP=true to enable it.")
+    logger.info(
+        "RAG embeddings enabled=%s",
+        getattr(settings, "RAG_EMBEDDINGS_ENABLED", True),
+    )
     start_weekly_orbit_reminder_loop(SessionLocal)
-    yield 
+    yield
 
 # Khởi tạo App với lifespan
 app = FastAPI(title="AI Personalized Learning API", lifespan=lifespan)
+app.add_middleware(RequestLoggingMiddleware)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    detail = exc.detail if isinstance(exc.detail, str) else "Yêu cầu không hợp lệ hoặc không thể xử lý."
+    logger.warning(
+        "http_exception method=%s path=%s status=%s request_id=%s detail=%s",
+        request.method,
+        request.url.path,
+        exc.status_code,
+        get_current_request_id(),
+        detail,
+    )
+    return error_json_response(exc.status_code, detail, retryable=exc.status_code >= 500)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception(
+        "unhandled_exception method=%s path=%s request_id=%s",
+        request.method,
+        request.url.path,
+        get_current_request_id(),
+    )
+    return error_json_response(
+        500,
+        "Máy chủ tạm thời chưa thể hoàn tất yêu cầu này. Vui lòng thử lại sau ít phút.",
+        retryable=True,
+    )
 
 # --- CẤU HÌNH CORS ---
 app.add_middleware(
@@ -329,6 +423,7 @@ app.include_router(adaptive.router, prefix="/api/adaptive", tags=["AI Tutor"])
 app.include_router(stats.router, prefix="/api/stats", tags=["Statistics"])
 
 # 6. Admin (Quản lý người dùng - Giáo viên/Học sinh)
+app.include_router(evaluation.router, prefix="/api/evaluation", tags=["Evaluation AI"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 
 # 7. Document (Quản lý Thư viện học liệu) 
@@ -349,6 +444,22 @@ app.include_router(orbit.router, prefix="/api/orbit", tags=["Orbit AI"])
 # 11. Planning Agent (Kế hoạch học tập theo tài liệu)
 app.include_router(planning.router, prefix="/api/planning", tags=["Planning AI"])
 
+# 12. Notifications
+app.include_router(notification.router, prefix="/api/notifications", tags=["Notifications"])
+
+# 13. Debug (Real-time LLM debugging via SSE)
+app.include_router(debug.router, tags=["Debug"])
+app.include_router(debug.router, prefix="/api", tags=["Debug"])
+
 @app.get("/")
 def read_root():
     return {"message": "Hệ thống AI Learning đã sẵn sàng!"}
+
+
+@app.get("/api/health")
+def health_check():
+    return {
+        "ok": True,
+        "message": "Backend đang hoạt động",
+        "rag_embeddings_enabled": getattr(settings, "RAG_EMBEDDINGS_ENABLED", True),
+    }

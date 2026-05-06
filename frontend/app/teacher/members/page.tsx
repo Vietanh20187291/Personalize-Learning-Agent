@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
+import { confirmAlert } from '@/services/alerts';
 import * as XLSX from 'xlsx'; 
 import { 
   Users, Mail, GraduationCap, Search, Trash2, 
@@ -49,7 +50,7 @@ interface StatCardProps {
 }
 
 export default function ClassMembersPage() {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8010';
   const [members, setMembers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [classList, setClassList] = useState<any[]>([]);
@@ -173,7 +174,14 @@ export default function ClassMembersPage() {
   };
 
   const handleRemove = async (studentId: number, studentName: string) => {
-    if (!window.confirm(`⚠️ Bạn có chắc chắn muốn xóa học sinh ${studentName} khỏi lớp này?`)) return;
+    const confirmed = await confirmAlert({
+      title: "Xóa học sinh khỏi lớp",
+      message: `Bạn có chắc chắn muốn xóa học sinh ${studentName} khỏi lớp này?`,
+      confirmText: "Xóa học sinh",
+      cancelText: "Hủy",
+      tone: "danger",
+    });
+    if (!confirmed) return;
     if (!selectedClassId) {
       toast.error("Vui lòng chọn lớp học trước khi xóa học sinh");
       return;

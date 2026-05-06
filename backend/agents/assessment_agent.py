@@ -2,6 +2,7 @@ import os
 import json
 import random
 import re
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -9,21 +10,27 @@ from sqlalchemy.orm import Session
 from groq import Groq
 import google.generativeai as genai
 from dotenv import load_dotenv
-from db.models import QuestionBank, LearnerProfile, Subject
+from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, TextLoader
+from pptx import Presentation
+from db.models import Document, QuestionBank, LearnerProfile, Subject
 from rag.vector_store import get_vector_store
+from llm_trace import log_llm_request, log_llm_response, log_llm_error
 
-load_dotenv()
+load_dotenv(override=True)
 
 class AssessmentAgent:
     def __init__(self, db: Session):
         self.db = db
         self.provider = os.getenv("ASSESSMENT_LLM_PROVIDER", "ollama").strip().lower()
-        self.model = os.getenv(
-            "ASSESSMENT_LLM_MODEL",
-            "gpt-4o-mini"
-            if self.provider == "openai"
-            else ("gemini-1.5-flash" if self.provider == "gemini" else "mixtral-8x7b-instruct"),
-        )
+        default_model = "mixtral-8x7b-instruct"
+        if self.provider == "openai":
+            default_model = "gpt-4o-mini"
+        elif self.provider == "groq":
+            default_model = "llama-3.1-8b-instant"
+        elif self.provider == "gemini":
+            default_model = "gemini-1.5-flash"
+
+        self.model = os.getenv("ASSESSMENT_LLM_MODEL", default_model)
         self.ollama_fallback_model = os.getenv("ASSESSMENT_OLLAMA_FALLBACK_MODEL", "qwen2.5:14b")
         self.openai_api_key = os.getenv("ASSESSMENT_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.openai_base_url = os.getenv("ASSESSMENT_OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
@@ -31,8 +38,11 @@ class AssessmentAgent:
             "1", "true", "yes", "on"
         }
 
+        print(f"✅ AssessmentAgent config: provider={self.provider}, model={self.model}")
+
         self.client = None
         self.api_key = os.getenv("GROQ_KEY_ASSESSMENT")
+        self.request_timeout_seconds = float(os.getenv("ASSESSMENT_GROQ_TIMEOUT_SECONDS", "18") or 18)
         self.gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         self.gemini_model = None
         self.ollama_host = os.getenv("ASSESSMENT_OLLAMA_HOST", "http://localhost:11434").rstrip("/")
@@ -40,7 +50,10 @@ class AssessmentAgent:
         if self.provider == "groq":
             if not self.api_key:
                 raise ValueError("Thiếu GROQ_KEY_ASSESSMENT cho provider=groq")
-            self.client = Groq(api_key=self.api_key)
+            try:
+                self.client = Groq(api_key=self.api_key, timeout=self.request_timeout_seconds)
+            except TypeError:
+                self.client = Groq(api_key=self.api_key)
         elif self.provider == "openai":
             if not self.openai_api_key:
                 raise ValueError("Thiếu OPENAI_API_KEY/ASSESSMENT_OPENAI_API_KEY cho provider=openai")
@@ -66,6 +79,8 @@ class AssessmentAgent:
 
     def _chat_json(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int):
         if self.provider == "groq":
+            started = time.perf_counter()
+            log_llm_request("groq", self.model, prompt=prompt, system_prompt=system_prompt)
             res = self.client.chat.completions.create(
                 model=self.model,
                 temperature=temperature,
@@ -77,10 +92,23 @@ class AssessmentAgent:
                 ],
             )
             raw = res.choices[0].message.content
-            clean = re.sub(r'```json|```', '', raw).strip()
-            return json.loads(clean)
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            log_llm_response("groq", self.model, response=str(raw), duration_ms=duration_ms)
+
+            if isinstance(raw, (dict, list)):
+                return raw
+
+            raw_text = str(raw or "")
+            clean = re.sub(r'```json|```', '', raw_text).strip()
+            try:
+                return json.loads(clean)
+            except Exception as exc:
+                print(f"⚠️ Groq JSON parse failed, raw type={type(raw).__name__}, error={exc}")
+                return json.loads(raw_text)
 
         if self.provider == "openai":
+            started = time.perf_counter()
+            log_llm_request("openai", self.model, prompt=prompt, system_prompt=system_prompt)
             payload = {
                 "model": self.model,
                 "temperature": temperature,
@@ -106,9 +134,13 @@ class AssessmentAgent:
                 with urllib.request.urlopen(req, timeout=45) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                     raw = ((data.get("choices") or [{}])[0].get("message", {}) or {}).get("content", "")
+                    duration_ms = (time.perf_counter() - started) * 1000.0
+                    log_llm_response("openai", self.model, response=str(raw), duration_ms=duration_ms)
                     clean = re.sub(r'```json|```', '', str(raw)).strip()
                     return json.loads(clean)
             except Exception as e:
+                duration_ms = (time.perf_counter() - started) * 1000.0
+                log_llm_error("openai", self.model, error_message=str(e), duration_ms=duration_ms)
                 if not self.openai_fallback_to_ollama:
                     raise
                 print(f"⚠️ OpenAI lỗi ({e}), fallback sang Ollama.")
@@ -116,6 +148,8 @@ class AssessmentAgent:
         ollama_model = self.model
         if self.provider == "gemini":
             try:
+                started = time.perf_counter()
+                log_llm_request("gemini", self.model, prompt=prompt, system_prompt=system_prompt)
                 merged_prompt = f"{system_prompt}\n\n{prompt}"
                 res = self.gemini_model.generate_content(
                     merged_prompt,
@@ -128,9 +162,13 @@ class AssessmentAgent:
                 raw = (getattr(res, "text", "") or "").strip()
                 if not raw:
                     raise ValueError("Gemini trả về nội dung rỗng")
+                duration_ms = (time.perf_counter() - started) * 1000.0
+                log_llm_response("gemini", self.model, response=str(raw), duration_ms=duration_ms)
                 clean = re.sub(r'```json|```', '', raw).strip()
                 return json.loads(clean)
             except Exception as e:
+                duration_ms = (time.perf_counter() - started) * 1000.0
+                log_llm_error("gemini", self.model, error_message=str(e), duration_ms=duration_ms)
                 print(f"⚠️ Gemini lỗi ({e}), fallback sang Ollama.")
                 ollama_model = self.ollama_fallback_model
 
@@ -155,9 +193,13 @@ class AssessmentAgent:
             method="POST",
         )
 
+        started = time.perf_counter()
+        log_llm_request("ollama", ollama_model, prompt=prompt, system_prompt=system_prompt)
         with urllib.request.urlopen(req, timeout=45) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             content = data.get("message", {}).get("content", "")
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            log_llm_response("ollama", ollama_model, response=str(content), duration_ms=duration_ms)
             clean = re.sub(r'```json|```', '', content).strip()
             return json.loads(clean)
 
@@ -176,6 +218,79 @@ class AssessmentAgent:
 
     def _clean_text(self, text: str):
         return re.sub(r"\s+", " ", text or "").strip()
+
+    def _sanitize_question_text(self, text: str):
+        cleaned = self._clean_text(text)
+        cleaned = re.sub(r"\s+#\d+\b", "", cleaned)
+        cleaned = re.sub(r"\s*\(\s*mức\s*cơ\s*bản\s*,\s*câu\s*\d+\s*\)", "", cleaned, flags=re.IGNORECASE)
+        return self._clean_text(cleaned)
+
+    def _sanitize_option_text(self, text: str):
+        cleaned = self._sanitize_question_text(text)
+        cleaned = re.sub(
+            r"\s*(?:Trá»ng tÃ¢m|Trong ngá»¯ cáº£nh|Khi xÃ©t|Trong pháº¡m vi)\s*:\s*[^.?!;]+[.?!;:]*\s*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        return self._clean_text(cleaned)
+
+    def _load_document_text(self, file_path: str):
+        path = Path(str(file_path or "").strip())
+        if not path.exists() or not path.is_file():
+            return ""
+
+        suffix = path.suffix.lower()
+        try:
+            if suffix == ".pdf":
+                docs = PyPDFLoader(str(path)).load()
+                return "\n".join([self._clean_text(getattr(doc, "page_content", "")) for doc in docs if getattr(doc, "page_content", "")])
+            if suffix == ".docx":
+                docs = Docx2txtLoader(str(path)).load()
+                return "\n".join([self._clean_text(getattr(doc, "page_content", "")) for doc in docs if getattr(doc, "page_content", "")])
+            if suffix in {".txt", ".md"}:
+                docs = TextLoader(str(path), encoding="utf-8").load()
+                return "\n".join([self._clean_text(getattr(doc, "page_content", "")) for doc in docs if getattr(doc, "page_content", "")])
+            if suffix in {".pptx", ".ppt"}:
+                prs = Presentation(str(path))
+                slides = []
+                for slide in prs.slides:
+                    for shape in slide.shapes:
+                        text = getattr(shape, "text", "")
+                        if text:
+                            slides.append(self._clean_text(text))
+                return "\n".join([item for item in slides if item])
+        except Exception as exc:
+            print(f"⚠️ AssessmentAgent không đọc được file {path.name}: {exc}")
+        return ""
+
+    def _build_document_context_from_files(self, subject: str, allowed_files=None):
+        if not allowed_files:
+            return ""
+
+        subject_id = self._resolve_subject_id(subject)
+        normalized_files = [self._clean_text(str(name)) for name in allowed_files if self._clean_text(str(name))]
+        if not normalized_files:
+            return ""
+
+        documents = self.db.query(Document).filter(
+            Document.subject_id == subject_id,
+            Document.filename.in_(normalized_files),
+        ).order_by(Document.upload_time.desc()).all()
+
+        chunks = []
+        seen = set()
+        for doc in documents:
+            text = self._load_document_text(getattr(doc, "file_path", ""))
+            if not text:
+                continue
+            key = self._clean_text(doc.filename).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            chunks.append(text)
+
+        return "\n".join(chunks)[:40000]
 
     def _is_meaningful_text(self, text: str, min_len: int = 10):
         t = self._clean_text(text)
@@ -217,6 +332,10 @@ class AssessmentAgent:
         return True
 
     def _build_rag_context(self, subject: str, allowed_files=None):
+        direct_context = self._build_document_context_from_files(subject, allowed_files=allowed_files)
+        if direct_context:
+            return direct_context
+
         if self.vector_store is None:
             return ""
 
@@ -484,7 +603,7 @@ class AssessmentAgent:
         idx = 0
         while len(dedup) < limit:
             seed = suffix_seeds[idx % len(suffix_seeds)]
-            candidate = self._clean_text(f"{subject} - {seed} #{idx + 1}")
+            candidate = self._clean_text(f"{subject} - {seed}")
             key = candidate.lower()
             if key not in seen:
                 seen.add(key)
@@ -740,12 +859,12 @@ Trả về JSON đúng schema:
             except Exception:
                 continue
 
-            question = self._clean_text(str(data.get("question", "")))
+            question = self._sanitize_question_text(str(data.get("question", "")))
             options = data.get("options", [])
             if not isinstance(options, list):
                 continue
 
-            options = [self._clean_text(str(o)) for o in options[:4]]
+            options = [self._sanitize_option_text(str(o)) for o in options[:4]]
             if len(options) != 4:
                 continue
 
@@ -756,7 +875,7 @@ Trả về JSON đúng schema:
             if correct_index < 0 or correct_index > 3:
                 continue
 
-            explanation = self._clean_text(str(data.get("explanation", f"Khái niệm trọng tâm: {concept}.")))
+            explanation = self._sanitize_option_text(str(data.get("explanation", f"Khái niệm trọng tâm: {concept}.")))
 
             labels = ["A", "B", "C", "D"]
             final_options = [f"{labels[i]}. {options[i]}" for i in range(4)]
@@ -775,7 +894,7 @@ Trả về JSON đúng schema:
 
     def _generate_mcq_fallback(self, concept: str, subject: str, bloom_level: str):
         concept_low = self._clean_text(concept).lower()
-        concept_clean = self._clean_text(concept)
+        concept_clean = self._sanitize_option_text(concept)
         bloom_level = (bloom_level or "understand").lower()
         mappings = [
             (
@@ -930,10 +1049,10 @@ Trả về JSON đúng schema:
         labels = ["A", "B", "C", "D"]
         q = {
             "question": self._clean_text(q_text),
-            "options": [f"{labels[i]}. {self._clean_text(opts[i])}" for i in range(4)],
+            "options": [f"{labels[i]}. {self._sanitize_option_text(opts[i])}" for i in range(4)],
             "correct_answer": labels[correct_idx],
             "bloom_level": bloom_level,
-            "explanation": f"Phương án đúng phản ánh chính xác nội hàm học thuật của '{concept}'.",
+            "explanation": f"Phương án đúng phản ánh chính xác nội hàm học thuật của '{concept_clean}'.",
         }
         return q
 
@@ -1112,6 +1231,152 @@ Trả về JSON đúng schema:
 
         return questions
 
+    def _generate_batch_questions_with_llm(self, subject: str, source_file: str, concepts, count: int):
+        if getattr(self, "_disable_llm_generation", False):
+            return []
+
+        concept_list = []
+        seen = set()
+        for concept in concepts or []:
+            clean = self._clean_text(concept)
+            if len(clean) < 8:
+                continue
+            key = clean.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            concept_list.append(clean)
+
+        if not concept_list:
+            concept_list = self._fallback_concepts_for_subject(subject, limit=max(12, count))
+
+        concept_text = "\n".join([f"- {item}" for item in concept_list[:25]])
+        bloom_schedule = self._build_bloom_schedule(count)
+        bloom_text = ", ".join(bloom_schedule)
+
+        system_prompt = (
+            "Bạn là chuyên gia tạo bộ câu hỏi trắc nghiệm đại học. "
+            "Chỉ trả về JSON hợp lệ, không markdown, không giải thích ngoài JSON. "
+            "Mỗi câu phải rõ nghĩa, có 4 lựa chọn, chỉ 1 đáp án đúng, và các lựa chọn không được na ná nhau."
+        )
+
+        prompt = f"""
+Sinh đúng {count} câu hỏi MCQ cho môn "{subject}" từ tài liệu "{source_file}".
+
+Các concept gợi ý:
+{concept_text}
+
+Yêu cầu bắt buộc:
+1) Sinh đủ {count} câu trong một lần trả lời.
+2) Mỗi câu phải bám vào concept khác nhau, tránh lặp ý.
+3) Mỗi câu có đúng 4 lựa chọn.
+4) Chỉ một đáp án đúng.
+5) Độ khó gồm 4 loại: remember, understand, apply, analyze (không cần theo thứ tự cụ thể, chỉ đa dạng).
+6) Không dùng câu hỏi mơ hồ, không dùng câu quá chung chung.
+
+Trả về JSON đúng schema:
+{{
+  "questions": [
+    {{
+      "question": "...",
+      "options": ["...", "...", "...", "..."],
+      "correct_index": 0,
+      "explanation": "...",
+      "bloom_level": "remember"
+    }}
+  ]
+}}
+""".strip()
+
+        max_tokens = min(5200, max(3000, count * 220))
+        try:
+            data = self._chat_json(prompt, system_prompt, temperature=0.2, max_tokens=max_tokens)
+        except Exception as exc:
+            print(f"⚠️ Batch generation failed for {source_file}: {exc}")
+            error_text = str(exc).lower()
+            if "rate_limit_exceeded" in error_text or "request too large" in error_text or "413" in error_text:
+                smaller_count = max(1, count // 2)
+                if smaller_count != count:
+                    print(f"⚠️ Retrying batch with smaller chunk size: {smaller_count}")
+                    return self._generate_batch_questions_with_llm(subject, source_file, concepts, smaller_count)
+            return []
+
+        raw_questions = data.get("questions", []) if isinstance(data, dict) else []
+        if not isinstance(raw_questions, list):
+            return []
+
+        labels = ["A", "B", "C", "D"]
+        batch = []
+        seen_questions = set()
+
+        for idx, item in enumerate(raw_questions):
+            if len(batch) >= count:
+                break
+            if not isinstance(item, dict):
+                continue
+
+            question = self._sanitize_question_text(str(item.get("question", "")))
+            options = item.get("options", [])
+            if not question or not isinstance(options, list) or len(options) < 4:
+                continue
+
+            options = [self._clean_text(str(opt)) for opt in options[:4]]
+            if len(options) != 4:
+                continue
+
+            try:
+                correct_index = int(item.get("correct_index", -1))
+            except Exception:
+                correct_index = -1
+            if correct_index < 0 or correct_index > 3:
+                continue
+
+            if question.lower() in seen_questions:
+                continue
+            seen_questions.add(question.lower())
+
+            bloom_level = self._clean_text(str(item.get("bloom_level", bloom_schedule[idx % len(bloom_schedule)] if bloom_schedule else "understand"))).lower()
+            if bloom_level not in {"remember", "understand", "apply", "analyze"}:
+                bloom_level = bloom_schedule[idx % len(bloom_schedule)] if bloom_schedule else "understand"
+
+            final_options = [f"{labels[i]}. {options[i]}" for i in range(4)]
+            explanation = self._clean_text(str(item.get("explanation", f"Khái niệm trọng tâm: {question}")))
+
+            q = {
+                "question": question,
+                "options": final_options,
+                "correct_answer": labels[correct_index],
+                "bloom_level": bloom_level,
+                "explanation": explanation,
+            }
+
+            if self.validate_question(q):
+                batch.append(q)
+
+        return batch
+
+    def _generate_guaranteed_local_mcq(self, subject: str, concept: str, idx: int):
+        subject_clean = self._clean_text(subject) or "môn học"
+        concept_clean = self._sanitize_option_text(concept) or f"khái niệm {idx + 1}"
+        question = f"Trong {subject_clean}, phát biểu nào đúng nhất về {concept_clean}?"
+
+        options = [
+            f"A. {concept_clean} là nội dung chuyên môn cốt lõi cần nắm để xử lý bài toán đúng trong {subject_clean}.",
+            f"B. {concept_clean} chỉ là quy ước trình bày và không ảnh hưởng đến kết quả trong {subject_clean}.",
+            f"C. {concept_clean} luôn có thể bỏ qua vì mọi bài toán trong {subject_clean} đều cho cùng kết quả.",
+            f"D. {concept_clean} chỉ dùng để ghi chú hành chính và không liên quan kiến thức chuyên môn.",
+        ]
+
+        return {
+            "question": question,
+            "options": [self._sanitize_option_text(opt) for opt in options],
+            "correct_answer": "A",
+            "bloom_level": "understand",
+            "explanation": self._sanitize_option_text(
+                f"{concept_clean} là thành phần kiến thức chuyên môn, không phải nội dung hành chính hay trang trí."
+            ),
+        }
+
     def _build_bloom_schedule(self, count: int):
         if count <= 0:
             return []
@@ -1146,12 +1411,20 @@ Trả về JSON đúng schema:
         random.shuffle(existing)
         return self._format(existing[:num_questions])
 
-    def pre_generate_questions_for_document(self, subject: str, source_file: str, count: int = 20, force_refresh: bool = True):
+    def pre_generate_questions_for_document(
+        self,
+        subject: str,
+        source_file: str,
+        count: int = 20,
+        force_refresh: bool = True,
+        replace_existing: bool = True,
+    ):
         subject = self._clean_text(subject)
         source_file = self._clean_text(source_file)
         if not subject or not source_file:
             return []
 
+        count = max(1, int(count))
         subject_id = self._resolve_subject_id(subject)
         self._active_subject = subject
 
@@ -1160,23 +1433,49 @@ Trả về JSON đúng schema:
             QuestionBank.source_file == source_file,
         ).all()
 
-        should_refresh = force_refresh
-        if not should_refresh:
-            should_refresh = len(existing_rows) < count or self._question_pool_has_low_diversity(existing_rows)
+        if replace_existing:
+            should_refresh = force_refresh
+            if not should_refresh:
+                should_refresh = len(existing_rows) < count or self._question_pool_has_low_diversity(existing_rows)
+            if not should_refresh:
+                return self._format(existing_rows[:count])
 
-        if should_refresh:
             self.db.query(QuestionBank).filter(
                 QuestionBank.subject == subject,
                 QuestionBank.source_file == source_file,
             ).delete(synchronize_session=False)
             self.db.commit()
-        else:
-            return self._format(existing_rows[:count])
+            existing_rows = []
 
         previous_llm_flag = getattr(self, "_disable_llm_generation", False)
         self._disable_llm_generation = previous_llm_flag
 
         try:
+            def _question_key(text):
+                return self._sanitize_question_text(text).lower()
+
+            existing_keys = {
+                _question_key(getattr(row, "content", ""))
+                for row in existing_rows
+                if _question_key(getattr(row, "content", ""))
+            }
+
+            def _dedupe_mcqs(items):
+                unique = []
+                seen_local = set(existing_keys)
+                for mcq in items or []:
+                    q_text = self._sanitize_question_text((mcq or {}).get("question", ""))
+                    if not q_text:
+                        continue
+                    q_key = q_text.lower()
+                    if q_key in seen_local:
+                        continue
+                    seen_local.add(q_key)
+                    patched = dict(mcq)
+                    patched["question"] = q_text
+                    unique.append(patched)
+                return unique
+
             concepts = []
             try:
                 rag_context = self._build_rag_context(subject, allowed_files=[source_file])
@@ -1187,69 +1486,113 @@ Trả về JSON đúng schema:
                 print(f"⚠️ Pre-generate fallback for {source_file}: {exc}")
 
             if not concepts:
-                concepts = self._fallback_concepts_for_subject(subject, limit=max(8, count))
+                concepts = self._fallback_concepts_for_subject(subject, limit=max(12, count))
 
-            generated = self.generate_questions_from_concepts(concepts, count)
-            if not generated:
-                generated = self.generate_questions_from_concepts(
-                    self._fallback_concepts_for_subject(subject, limit=max(8, count)),
+            generated = []
+            if count <= 12:
+                generated = self._generate_batch_questions_with_llm(
+                    subject,
+                    source_file,
+                    concepts,
                     count,
                 )
+                generated = _dedupe_mcqs(generated)
+            else:
+                remaining = count
+                chunk_size = 12
+                chunk_index = 1
+                while remaining > 0:
+                    current_chunk = min(chunk_size, remaining)
+                    chunk_questions = self._generate_batch_questions_with_llm(
+                        subject,
+                        source_file,
+                        concepts,
+                        current_chunk,
+                    )
+                    if not chunk_questions:
+                        print(f"⚠️ Chunk {chunk_index} generation returned empty for {source_file}.")
+                        break
+                    generated.extend(chunk_questions)
+                    generated = _dedupe_mcqs(generated)
+                    remaining = count - len(generated)
+                    print(f"✅ Chunk {chunk_index}: +{len(chunk_questions)} câu, hợp lệ/tổng={len(generated)}/{count}")
+                    chunk_index += 1
 
             if len(generated) < count:
-                supplemental_concepts = self._fallback_concepts_for_subject(subject, limit=max(count * 2, 16))
-                supplemental = self.generate_questions_from_concepts(
-                    supplemental_concepts,
-                    count - len(generated),
-                )
-                combined = []
-                seen_questions = set()
-                for mcq in generated + supplemental:
-                    question_text = self._clean_text(mcq.get("question", ""))
-                    if not question_text:
-                        continue
-                    question_key = question_text.lower()
-                    if question_key in seen_questions:
-                        continue
-                    seen_questions.add(question_key)
-                    combined.append(mcq)
-                generated = combined[:count]
+                fallback_concepts = self._fallback_concepts_for_subject(subject, limit=max(20, count * 2))
+                previous_disable_llm_flag = getattr(self, "_disable_llm_generation", False)
+                self._disable_llm_generation = True
+                try:
+                    local_fallback = self.generate_questions_from_concepts(
+                        fallback_concepts,
+                        count - len(generated),
+                    )
+                finally:
+                    self._disable_llm_generation = previous_disable_llm_flag
+                generated.extend(local_fallback)
+                generated = _dedupe_mcqs(generated)
 
-            saved_questions = []
-            seen = set()
+            if len(generated) < count:
+                existing_generated_keys = {
+                    _question_key((mcq or {}).get("question", ""))
+                    for mcq in generated
+                    if _question_key((mcq or {}).get("question", ""))
+                }
+                seen_all = set(existing_keys).union(existing_generated_keys)
+                fallback_concepts = self._fallback_concepts_for_subject(subject, limit=max(20, count * 2))
+                safe_guard = 0
+                while len(generated) < count and safe_guard < count * 6:
+                    concept = fallback_concepts[safe_guard % len(fallback_concepts)] if fallback_concepts else f"khái niệm {safe_guard + 1}"
+                    mcq = self._generate_guaranteed_local_mcq(subject, concept, safe_guard)
+                    mcq["question"] = self._sanitize_question_text(mcq.get("question", ""))
+                    q_key = _question_key(mcq.get("question", ""))
+                    if q_key and q_key not in seen_all:
+                        seen_all.add(q_key)
+                        generated.append(mcq)
+                    safe_guard += 1
+
+            generated = _dedupe_mcqs(generated)[:count]
+
+            new_rows = []
             for mcq in generated:
-                q = self._clean_text(mcq.get("question", ""))
-                if not q or q.lower() in seen:
+                q = self._sanitize_question_text(mcq.get("question", ""))
+                if not q:
                     continue
-                seen.add(q.lower())
-
                 final_opts = mcq.get("options", [])
                 ans = mcq.get("correct_answer", "A")
                 bloom_level = mcq.get("bloom_level", "understand")
-                exp = f"[bloom:{bloom_level}] {mcq.get('explanation', '')}"
-
-                db_q = QuestionBank(
+                explanation_body = self._clean_text(mcq.get("explanation", ""))
+                exp = f"[bloom:{bloom_level}] {explanation_body}"
+                new_rows.append(QuestionBank(
                     subject_id=subject_id,
                     subject=subject,
                     difficulty="Basic",
                     content=q,
-                    options=json.dumps(final_opts, ensure_ascii=False),
+                    options=final_opts,
                     correct_answer=ans,
                     explanation=exp,
                     is_used=False,
                     source_file=source_file,
-                )
-                self.db.add(db_q)
-                self.db.flush()
-                saved_questions.append({
-                    "id": db_q.id,
-                    "content": db_q.content,
-                    "options": final_opts,
-                    "correct_answer": db_q.correct_answer,
-                    "explanation": mcq.get("explanation", ""),
-                })
+                ))
 
+            if not new_rows:
+                return []
+
+            self.db.add_all(new_rows)
+            self.db.flush()
             self.db.commit()
+
+            saved_questions = [
+                {
+                    "id": row.id,
+                    "content": row.content,
+                    "options": row.options,
+                    "correct_answer": row.correct_answer,
+                    "explanation": self._clean_text(re.sub(r"^\[bloom:[^\]]+\]\s*", "", row.explanation or "", flags=re.IGNORECASE)),
+                }
+                for row in new_rows
+            ]
+            print(f"✅ Saved questions for {source_file}: {len(saved_questions)}/{count}")
             return saved_questions
         finally:
             self._disable_llm_generation = previous_llm_flag
@@ -1261,7 +1604,12 @@ Trả về JSON đúng schema:
         result = []
         for q in questions:
             try:
-                options = json.loads(q.options)
+                if isinstance(q.options, str):
+                    options = json.loads(q.options)
+                elif isinstance(q.options, list):
+                    options = q.options
+                else:
+                    options = []
             except:
                 options = []
 
@@ -1328,7 +1676,7 @@ Trả về JSON đúng schema:
                     subject=subject,
                     difficulty="Basic",
                     content=q,
-                    options=json.dumps(final_opts, ensure_ascii=False),
+                    options=final_opts,
                     correct_answer=ans,
                     explanation=exp,
                     is_used=False,

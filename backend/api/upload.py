@@ -7,7 +7,6 @@ from pydantic import BaseModel
 from db.database import get_db
 from db import models
 from agents.content_agent import content_agent 
-from agents.assessment_agent import AssessmentAgent
 from rag.vector_store import get_vector_store
 
 router = APIRouter()
@@ -107,24 +106,11 @@ async def upload_document(
             # Mặc định KHÔNG hiển thị cho sinh viên đến khi giáo viên bật.
             publication = models.DocumentPublication(
                 doc_id=new_doc.id,
-                is_visible_to_students=False,
+                is_visible_to_students=True,
             )
             db.add(publication)
             db.commit()
             db.refresh(new_doc)
-
-            # Sinh sẵn bộ câu hỏi cho sinh viên ngay sau khi upload tài liệu.
-            generated_questions = []
-            try:
-                assessment_agent = AssessmentAgent(db)
-                generated_questions = assessment_agent.pre_generate_questions_for_document(
-                    subject=final_subject,
-                    source_file=safe_filename,
-                    count=20,
-                    force_refresh=True,
-                )
-            except Exception as question_error:
-                print(f"⚠️ Không thể sinh sẵn câu hỏi cho {safe_filename}: {question_error}")
 
             return {
                 "id": new_doc.id,
@@ -132,7 +118,7 @@ async def upload_document(
                 "subject_id": subject_id,
                 "subject": final_subject,
                 "class_id": class_id,
-                "generated_question_count": len(generated_questions),
+                "generated_question_count": 0,
                 "message": f"✅ Tài liệu đã được nạp riêng cho lớp học này."
             }
         else:
@@ -175,7 +161,7 @@ async def get_documents(teacher_id: Optional[int] = None, class_id: Optional[int
             "upload_time": doc.upload_time,
             "teacher_id": doc.teacher_id,
             "class_id": doc.class_id,
-            "is_visible_to_students": visibility_map.get(doc.id, False),
+            "is_visible_to_students": visibility_map.get(doc.id, True),
         }
         for doc in docs
     ]
@@ -230,28 +216,31 @@ async def delete_document(doc_id: int, db: Session = Depends(get_db)):
 
     try:
         filename = doc.filename
-        vector_store = get_vector_store()
-        
-        # Quét và xóa trong Vector DB
-        all_data = vector_store.get()
-        ids = all_data.get("ids", [])
-        metadatas = all_data.get("metadatas", [])
-        
-        ids_to_delete = []
-        for i, meta in enumerate(metadatas):
-            if any(filename in str(val) for val in meta.values()):
-                ids_to_delete.append(ids[i])
+        try:
+            vector_store = get_vector_store()
 
-        if ids_to_delete:
-            vector_store.delete(ids=ids_to_delete)
+            # Quét và xóa trong Vector DB
+            all_data = vector_store.get()
+            ids = all_data.get("ids", [])
+            metadatas = all_data.get("metadatas", [])
+
+            ids_to_delete = []
+            for i, meta in enumerate(metadatas):
+                if any(filename in str(val) for val in meta.values()):
+                    ids_to_delete.append(ids[i])
+
+            if ids_to_delete:
+                vector_store.delete(ids=ids_to_delete)
+        except Exception as rag_exc:
+            print(f"⚠️ Bỏ qua dọn vector store khi xóa tài liệu '{filename}': {rag_exc}")
 
         # Xóa trong SQL (Chunks và Document)
         db.query(models.Chunk).filter(models.Chunk.source_file == filename).delete()
         db.delete(doc)
-        
+
         db.commit()
         return {"message": f"✅ Đã dọn dẹp sạch sẽ tri thức của: {filename}"}
-        
+
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Lỗi khi xóa: {str(e)}")

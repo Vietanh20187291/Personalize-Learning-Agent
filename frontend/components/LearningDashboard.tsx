@@ -12,7 +12,7 @@ const LearningDashboard = () => {
     const fetchStats = async () => {
       try {
         // Gọi API History tổng hợp
-        const res = await axios.get("http://localhost:8000/api/assessment/history/all"); 
+        const res = await axios.get("http://localhost:8010/api/assessment/history/all"); 
         setData(res.data);
       } catch (e) {
         console.error("Lỗi lấy dữ liệu thống kê:", e);

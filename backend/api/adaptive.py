@@ -10,6 +10,18 @@ from agents.adaptive_agent import AdaptiveAgent
 
 router = APIRouter()
 
+
+def _normalize_subject_name(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
+
+def _classroom_subject_name(classroom) -> str:
+    return (
+        getattr(getattr(classroom, "subject_obj", None), "name", None)
+        or getattr(classroom, "subject", None)
+        or ""
+    ).strip()
+
 # --- MODEL DỮ LIỆU ---
 class TutorChatRequest(BaseModel):
     subject: str
@@ -94,12 +106,16 @@ def get_learning_recommendation(
         allowed_filenames = []
         
         if user and hasattr(user, 'enrolled_classes'):
-            # Lọc ra lớp học thuộc môn này mà sinh viên đã tham gia
-            target_class = next((c for c in user.enrolled_classes if c.subject == subject), None)
-            
-            if target_class:
-                docs = db.query(models.Document).filter(models.Document.class_id == target_class.id).all()
-                allowed_filenames = [doc.filename for doc in docs]
+            target_classes = [
+                c
+                for c in user.enrolled_classes
+                if _normalize_subject_name(_classroom_subject_name(c)) == _normalize_subject_name(subject)
+            ]
+
+            if target_classes:
+                class_ids = [item.id for item in target_classes]
+                docs = db.query(models.Document).filter(models.Document.class_id.in_(class_ids)).all()
+                allowed_filenames = [doc.filename for doc in docs if (doc.filename or "").strip()]
 
         # 2. Sinh chương trình học
         result = agent.generate_overall_roadmap(
@@ -127,15 +143,18 @@ def chat_with_adaptive_tutor(req: TutorChatRequest, db: Session = Depends(get_db
         if not user:
             raise HTTPException(status_code=404, detail="Không tìm thấy người dùng.")
         
-        # Tìm lớp học tương ứng với môn học
-        target_class = next((c for c in getattr(user, 'enrolled_classes', []) if c.subject == req.subject), None)
-        
-        if not target_class:
+        target_classes = [
+            c
+            for c in getattr(user, 'enrolled_classes', []) or []
+            if _normalize_subject_name(_classroom_subject_name(c)) == _normalize_subject_name(req.subject)
+        ]
+
+        if not target_classes:
             return {"reply": f"Bạn chưa tham gia lớp học nào cho môn {req.subject}. Vui lòng nhập mã lớp để bắt đầu học."}
 
-        # 2. Lấy tài liệu của lớp đó
-        allowed_docs = db.query(models.Document).filter(models.Document.class_id == target_class.id).all()
-        allowed_filenames = [doc.filename for doc in allowed_docs]
+        class_ids = [item.id for item in target_classes]
+        allowed_docs = db.query(models.Document).filter(models.Document.class_id.in_(class_ids)).all()
+        allowed_filenames = [doc.filename for doc in allowed_docs if (doc.filename or "").strip()]
 
         requested_file = (req.source_file or "").strip()
         if requested_file and requested_file in allowed_filenames:
@@ -157,7 +176,6 @@ def chat_with_adaptive_tutor(req: TutorChatRequest, db: Session = Depends(get_db
             history=req.history
         )
 
-        # Guard cuối cùng: không để lộ lỗi API key/401 ra giao diện.
         response_text = str(response or "").strip()
         lowered = response_text.lower()
         if (
@@ -165,10 +183,7 @@ def chat_with_adaptive_tutor(req: TutorChatRequest, db: Session = Depends(get_db
             or "error code: 401" in lowered
             or "gia sư ai đang bận truy xuất dữ liệu" in lowered
         ):
-            response_text = (
-                f"Mình đang hỗ trợ bạn ở chế độ dự phòng cho môn {req.subject}. "
-                "Bạn tiếp tục hỏi ngắn gọn theo đúng nội dung buổi học, mình sẽ hướng dẫn từng bước ngay."
-            )
+            response_text = "Tutor Agent chưa thể gọi Groq ở thời điểm này. Hãy kiểm tra cấu hình Groq rồi thử lại."
         
         return {"reply": response_text}
         
@@ -176,7 +191,7 @@ def chat_with_adaptive_tutor(req: TutorChatRequest, db: Session = Depends(get_db
         print(f"❌ LỖI API CHAT: {str(e)}")
         import traceback
         traceback.print_exc()
-        return {"reply": "Gia sư AI đang bận xử lý dữ liệu, vui lòng thử lại sau."}
+        return {"reply": "Tutor Agent đang gặp lỗi xử lý dữ liệu. Vui lòng thử lại sau."}
 
 
 @router.post("/material-summary")
@@ -185,12 +200,17 @@ def summarize_material(req: MaterialSummaryRequest, db: Session = Depends(get_db
     if not user:
         raise HTTPException(status_code=404, detail="Không tìm thấy người dùng.")
 
-    target_class = next((c for c in getattr(user, 'enrolled_classes', []) if c.subject == req.subject), None)
-    if not target_class:
+    target_classes = [
+        c
+        for c in getattr(user, 'enrolled_classes', []) or []
+        if _normalize_subject_name(_classroom_subject_name(c)) == _normalize_subject_name(req.subject)
+    ]
+    if not target_classes:
         raise HTTPException(status_code=400, detail=f"Bạn chưa tham gia lớp học nào cho môn {req.subject}.")
 
-    allowed_docs = db.query(models.Document).filter(models.Document.class_id == target_class.id).all()
-    allowed_filenames = [doc.filename for doc in allowed_docs]
+    class_ids = [item.id for item in target_classes]
+    allowed_docs = db.query(models.Document).filter(models.Document.class_id.in_(class_ids)).all()
+    allowed_filenames = [doc.filename for doc in allowed_docs if (doc.filename or "").strip()]
     if req.source_file not in allowed_filenames:
         raise HTTPException(status_code=403, detail="Bạn không có quyền truy cập tài liệu này.")
 

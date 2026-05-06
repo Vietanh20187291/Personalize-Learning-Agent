@@ -1,12 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from db.database import get_db, engine, Base
-from db.models import LearnerProfile, QuestionBank, AssessmentHistory, StudentLearningProgress, StudentDocumentEvaluation, StudentDocumentScoreHistory, User, Document, LearningRoadmap, Classroom, Subject
+from db.database import SessionLocal, get_db, engine, Base
+from db.models import LearnerProfile, QuestionBank, AssessmentHistory, StudentLearningProgress, StudentDocumentEvaluation, StudentDocumentScoreHistory, User, Document, LearningRoadmap, Classroom, Subject, UserLoginSession
 from pydantic import BaseModel
 from datetime import datetime
 from typing import List, Optional
 import json
 import re
+import logging
 from sqlalchemy import func
 
 from agents.assessment_agent import AssessmentAgent
@@ -16,6 +17,37 @@ from agents.adaptive_agent import AdaptiveAgent
 from services.score_metrics import compute_subject_score_metrics
 
 router = APIRouter()
+logger = logging.getLogger("app.assessment")
+
+
+def _sanitize_question_bank_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    cleaned = re.sub(r"\s+#\d+\b", "", cleaned)
+    cleaned = re.sub(r"\s*\(\s*mức\s*cơ\s*bản\s*,\s*câu\s*\d+\s*\)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\s*(?:Trọng tâm|Trong ngữ cảnh|Khi xét|Trong phạm vi)\s*:\s*[^.?!;]+[.?!;:]*\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _normalize_question_bank_options(raw_options) -> List[str]:
+    try:
+        parsed = json.loads(raw_options) if isinstance(raw_options, str) else raw_options
+    except Exception:
+        parsed = []
+
+    if not isinstance(parsed, list):
+        return []
+
+    normalized = []
+    for option in parsed:
+        text = _sanitize_question_bank_text(str(option))
+        if text:
+            normalized.append(text)
+    return normalized
 
 # --- HELPER FUNCTION: CONVERT SUBJECT STRING TO SUBJECT_ID ---
 def get_subject_id(subject_name: str, db: Session) -> int:
@@ -32,6 +64,171 @@ def get_subject_id(subject_name: str, db: Session) -> int:
     db.add(new_subject)
     db.flush()
     return new_subject.id
+
+def _compute_effort_score(db: Session, user_id: int) -> float:
+    login_seconds = sum(
+        int(item.duration_seconds or 0)
+        for item in db.query(UserLoginSession).filter(UserLoginSession.user_id == user_id).all()
+    )
+    total_minutes = int(login_seconds // 60)
+    expected_login_minutes = 600
+    if expected_login_minutes <= 0:
+        return 0.0
+    return round(min((total_minutes / expected_login_minutes) * 100, 100), 2)
+
+
+def _build_fast_feedback(score_percent: float, passed: bool, is_session_quiz: bool) -> str:
+    if is_session_quiz:
+        if passed:
+            return "Bạn đã hoàn thành bài kiểm tra. Hệ thống đang cập nhật đánh giá chi tiết."
+        return "Bạn đã nộp bài. Hệ thống đang tổng hợp phần cần ôn lại cho bạn."
+    if score_percent >= 80:
+        return "Kết quả rất tốt. Hệ thống đang cập nhật đánh giá chi tiết của bạn."
+    if score_percent >= 60:
+        return "Bạn đã đạt yêu cầu. Hệ thống đang cập nhật thêm đánh giá học tập."
+    return "Bạn đã nộp bài. Hệ thống đang cập nhật gợi ý ôn tập cho phần còn yếu."
+
+
+def _run_post_submit_updates(
+    req_payload: dict,
+    subject_id: int,
+    old_level: str,
+    final_test_type: str,
+    score_percent: float,
+    correct_count: int,
+    total_q: int,
+):
+    db = SessionLocal()
+    try:
+        req_user_id = int(req_payload.get("user_id"))
+        req_subject = str(req_payload.get("subject") or "")
+        req_is_session_quiz = bool(req_payload.get("is_session_quiz"))
+        req_session_number = req_payload.get("session_number")
+        req_session_topic = req_payload.get("session_topic")
+        req_source_file = req_payload.get("source_file")
+        req_force_level = req_payload.get("force_level")
+
+        profile = db.query(LearnerProfile).filter_by(subject_id=subject_id, user_id=req_user_id).first()
+        if not profile:
+            profile = db.query(LearnerProfile).filter_by(subject=req_subject, user_id=req_user_id).first()
+
+        profiler = ProfilingAgent(db)
+        calculated_level = profiler.classify_learner(correct_count, total_q, req_subject, req_user_id)
+        new_level = old_level if req_is_session_quiz else calculated_level
+
+        roadmap = db.query(LearningRoadmap).filter_by(user_id=req_user_id, subject_id=subject_id).first()
+        if not roadmap:
+            roadmap = db.query(LearningRoadmap).filter_by(user_id=req_user_id, subject=req_subject).first()
+
+        user_obj = db.query(User).filter(User.id == req_user_id).first()
+        target_class = next((c for c in getattr(user_obj, 'enrolled_classes', []) if c.subject == req_subject), None)
+        allowed_filenames = []
+        if target_class:
+            allowed_docs = db.query(Document).filter(
+                Document.class_id == target_class.id,
+                Document.subject_id == target_class.subject_id
+            ).all()
+            allowed_filenames = [doc.filename for doc in allowed_docs]
+
+        adaptive_agent = None
+        if not roadmap:
+            try:
+                adaptive_agent = AdaptiveAgent(db)
+                adaptive_agent.generate_overall_roadmap(req_user_id, req_subject, allowed_filenames, force_level=req_force_level or new_level)
+            except Exception as e:
+                print(f"🚨 CẢNH BÁO AI CRASH ROADMAP: {e}")
+        else:
+            total_sessions = len(roadmap.roadmap_data) if roadmap.roadmap_data else 11
+            if req_is_session_quiz:
+                required_correct = 4
+                passed = correct_count >= required_correct
+                if passed:
+                    if req_session_number and req_session_number != roadmap.current_session:
+                        pass
+                    elif roadmap.current_session < total_sessions:
+                        roadmap.current_session += 1
+                    else:
+                        roadmap.is_completed = True
+            elif score_percent >= 60.0:
+                if roadmap.current_session < total_sessions:
+                    roadmap.current_session += 1
+                else:
+                    current_lvl = roadmap.level_assigned
+                    if current_lvl == "Beginner":
+                        roadmap.level_assigned = "Intermediate"
+                        roadmap.current_session = 1
+                        new_level = "Intermediate"
+                        if profile:
+                            profile.current_level = "Intermediate"
+                        try:
+                            adaptive_agent = adaptive_agent or AdaptiveAgent(db)
+                            adaptive_agent.generate_overall_roadmap(req_user_id, req_subject, allowed_filenames, force_level="Intermediate")
+                        except Exception:
+                            pass
+                    elif current_lvl == "Intermediate":
+                        roadmap.level_assigned = "Advanced"
+                        roadmap.current_session = 1
+                        new_level = "Advanced"
+                        if profile:
+                            profile.current_level = "Advanced"
+                        try:
+                            adaptive_agent = adaptive_agent or AdaptiveAgent(db)
+                            adaptive_agent.generate_overall_roadmap(req_user_id, req_subject, allowed_filenames, force_level="Advanced")
+                        except Exception:
+                            pass
+                    elif current_lvl == "Advanced":
+                        roadmap.is_completed = True
+
+        eval_agent = EvaluationAgent(db)
+        performance_data = eval_agent.evaluate_performance(
+            user_id=req_user_id,
+            subject=req_subject,
+            current_score=score_percent,
+            test_type=final_test_type
+        )
+
+        if profile:
+            profile.avg_score = performance_data["actual_test_score"]
+
+        progress = db.query(StudentLearningProgress).filter(StudentLearningProgress.user_id == req_user_id).first()
+        if not progress:
+            progress = StudentLearningProgress(user_id=req_user_id)
+            db.add(progress)
+
+        total_tests_count = db.query(StudentDocumentScoreHistory).filter(
+            StudentDocumentScoreHistory.user_id == req_user_id,
+            StudentDocumentScoreHistory.test_type != "baseline",
+        ).count()
+        lessons_completed_count = db.query(StudentDocumentEvaluation).filter(
+            StudentDocumentEvaluation.user_id == req_user_id,
+            StudentDocumentEvaluation.is_completed == True,
+        ).count()
+        progress.tests_completed_total = int(total_tests_count)
+        progress.lessons_completed_total = int(lessons_completed_count)
+        progress.last_active_at = datetime.utcnow()
+
+        if req_source_file and target_class:
+            related_doc = db.query(Document).filter(
+                Document.class_id == target_class.id,
+                Document.subject_id == target_class.subject_id,
+                Document.filename == str(req_source_file).strip(),
+            ).first()
+            if related_doc and profile:
+                refreshed = compute_subject_score_metrics(
+                    db=db,
+                    user_id=req_user_id,
+                    subject_id=related_doc.subject_id,
+                    class_id=related_doc.class_id,
+                )
+                profile.avg_score = refreshed["test_score"]
+
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print(f"⚠️ Post-submit background update failed: {exc}")
+    finally:
+        db.close()
+
 
 # --- SCHEMA ---
 class QuizRequest(BaseModel):
@@ -78,6 +275,7 @@ class SubmitRequest(BaseModel):
 # --- 1. SINH ĐỀ THI ĐÁNH GIÁ TỔNG QUAN (ĐẦU VÀO) ---
 @router.post("/generate")
 def generate_quiz(req: QuizRequest, db: Session = Depends(get_db)):
+    logger.info("generate_quiz start user_id=%s subject=%s", req.user_id, req.subject)
     if not req.subject or req.subject.strip() == "":
         raise HTTPException(status_code=400, detail="Vui lòng chọn môn học!")
 
@@ -93,6 +291,7 @@ def generate_quiz(req: QuizRequest, db: Session = Depends(get_db)):
     # Cho phép làm lại bài đánh giá đầu vào bất cứ lúc nào, không khóa theo roadmap.
 
     # LẤY TÀI LIỆU CỦA ĐÚNG LỚP ĐÓ - DÙNG SUBJECT_ID FK THAY VÌ SUBJECT STRING
+    subject_id = int(target_class.subject_id)
     allowed_docs = db.query(Document).filter(
         Document.class_id == target_class.id,
         Document.subject_id == target_class.subject_id
@@ -118,11 +317,19 @@ def generate_quiz(req: QuizRequest, db: Session = Depends(get_db)):
     if not questions:
         raise HTTPException(status_code=404, detail="AI chưa chuẩn bị xong câu hỏi. Hãy thử lại!")
         
+    logger.info("generate_quiz done user_id=%s subject=%s question_count=%s", req.user_id, req.subject, len(questions))
     return {"questions": questions, "subject": req.subject}
 
 # --- 2. TẠO BÀI KIỂM TRA THEO BÁM SÁT BUỔI HỌC VÀ LEVEL ---
 @router.post("/generate-session")
 def generate_session_assessment(req: SessionQuizRequest, db: Session = Depends(get_db)):
+    logger.info(
+        "generate_session start user_id=%s subject=%s session_topic=%s source_file=%s",
+        req.user_id,
+        req.subject,
+        req.session_topic,
+        req.source_file,
+    )
     if not req.subject or not req.session_topic:
         raise HTTPException(status_code=400, detail="Thiếu thông tin môn học hoặc chủ đề.")
 
@@ -141,6 +348,7 @@ def generate_session_assessment(req: SessionQuizRequest, db: Session = Depends(g
         Document.subject_id == target_class.subject_id
     ).all()
     allowed_filenames = [doc.filename for doc in allowed_docs]
+    subject_id = int(target_class.subject_id)
 
     requested_file = (req.source_file or "").strip()
     if requested_file and requested_file in allowed_filenames:
@@ -160,8 +368,10 @@ def generate_session_assessment(req: SessionQuizRequest, db: Session = Depends(g
 
     # Lưu câu hỏi AI vừa tạo vào Database để hàm /submit có thể chấm điểm được
     saved_questions = []
+    pending_questions = []
     for q_data in raw_questions:
         new_q = QuestionBank(
+            subject_id=subject_id,
             subject=req.subject,
             content=q_data.get("content", ""),
             options=json.dumps(q_data.get("options", []), ensure_ascii=False),
@@ -170,15 +380,35 @@ def generate_session_assessment(req: SessionQuizRequest, db: Session = Depends(g
             difficulty=req.level 
         )
         db.add(new_q)
+        db.flush()
+        pending_questions.append((new_q, q_data))
+
+    try:
         db.commit()
-        db.refresh(new_q)
-        
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "generate_session save failed user_id=%s subject=%s session_topic=%s",
+            req.user_id,
+            req.subject,
+            req.session_topic,
+        )
+        raise
+
+    for new_q, q_data in pending_questions:
         saved_questions.append({
             "id": new_q.id,
             "content": new_q.content,
             "options": q_data.get("options", [])
         })
         
+    logger.info(
+        "generate_session done user_id=%s subject=%s saved_questions=%s source_file=%s",
+        req.user_id,
+        req.subject,
+        len(saved_questions),
+        requested_file or "",
+    )
     return {
         "questions": saved_questions,
         "subject": req.subject,
@@ -214,13 +444,15 @@ def ensure_document_question_bank(req: DocumentQuestionBankRequest, db: Session 
     ).scalar() or 0
 
     generated_count = 0
-    if existing_count < req.target_count:
+    missing_count = max(0, int(req.target_count) - int(existing_count))
+    if missing_count > 0:
         agent = AssessmentAgent(db)
         generated = agent.pre_generate_questions_for_document(
             subject=req.subject,
             source_file=requested_file,
-            count=req.target_count,
+            count=min(missing_count, 20),
             force_refresh=True,
+            replace_existing=False,
         )
         generated_count = len(generated)
         existing_count = db.query(func.count(QuestionBank.id)).filter(
@@ -273,12 +505,14 @@ def generate_chapter_quiz(req: SessionQuizRequest, db: Session = Depends(get_db)
     )
     existing = query.all()
 
-    if len(existing) < 15:
+    missing_count = max(0, 15 - len(existing))
+    if missing_count > 0:
         agent.pre_generate_questions_for_document(
             subject=req.subject,
             source_file=requested_file,
-            count=20,
+            count=missing_count,
             force_refresh=True,
+            replace_existing=False,
         )
         existing = query.all()
 
@@ -292,14 +526,11 @@ def generate_chapter_quiz(req: SessionQuizRequest, db: Session = Depends(get_db)
 
     result = []
     for q in questions:
-        try:
-            parsed_options = json.loads(q.options) if isinstance(q.options, str) else q.options
-        except:
-            parsed_options = []
+        parsed_options = _normalize_question_bank_options(q.options)
 
         result.append({
             "id": q.id,
-            "content": q.content,
+            "content": _sanitize_question_bank_text(q.content),
             "options": parsed_options,
             "correct_answer": q.correct_answer,
             "explanation": q.explanation
@@ -315,53 +546,54 @@ def generate_chapter_quiz(req: SessionQuizRequest, db: Session = Depends(get_db)
 
 # --- 3. NỘP BÀI, CHẤM ĐIỂM & ĐIỀU HƯỚNG LỘ TRÌNH (THĂNG CẤP) ---
 @router.post("/submit")
-def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
+def submit_quiz(req: SubmitRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    logger.info(
+        "submit_quiz start user_id=%s subject=%s answers=%s source_file=%s is_session_quiz=%s",
+        req.user_id,
+        req.subject,
+        len(req.answers or []),
+        req.source_file,
+        req.is_session_quiz,
+    )
     if not req.answers:
         raise HTTPException(status_code=400, detail="Không có câu trả lời nào.")
 
     subject_id = get_subject_id(req.subject, db)
-
     user_map = {a.question_id: a.selected_option for a in req.answers}
     question_ids = list(user_map.keys())
 
-    # Lấy Profile cũ để bảo vệ Level nếu đây là bài thi qua buổi
     profile = db.query(LearnerProfile).filter_by(subject_id=subject_id, user_id=req.user_id).first()
     if not profile:
         profile = db.query(LearnerProfile).filter_by(subject=req.subject, user_id=req.user_id).first()
     old_level = profile.current_level if profile else "Beginner"
 
-    
-
-    # 2. Xử lý chấm điểm chi tiết
     questions_db = db.query(QuestionBank).filter(
         QuestionBank.id.in_(question_ids),
-        QuestionBank.subject == req.subject 
+        QuestionBank.subject == req.subject
     ).all()
-    
+
     correct_count = 0
     wrong_questions_log = []
-    detailed_results = [] 
+    detailed_results = []
 
     for q in questions_db:
         user_choice = user_map.get(q.id, "")
         db_correct_label = q.correct_answer.strip().upper() if q.correct_answer else ""
-
         if len(db_correct_label) > 1:
-             match_db = re.search(r'^(?:ĐÁP ÁN\s*|CHỌN\s*)?([A-D])\s*[\.\:\-\)]', db_correct_label, re.IGNORECASE)
-             db_correct_label = match_db.group(1).upper() if match_db else db_correct_label[0].upper()
+            match_db = re.search(r'^(?:ĐÁP ÁN\s*|CHỌN\s*)?([A-D])\s*[\.\:\-\)]', db_correct_label, re.IGNORECASE)
+            db_correct_label = match_db.group(1).upper() if match_db else db_correct_label[0].upper()
 
         user_label = user_choice.strip().upper() if user_choice else ""
         is_correct = (user_label == db_correct_label)
-        
         if is_correct:
             correct_count += 1
         else:
             wrong_questions_log.append({
-                "question": q.content,
+                "question": _sanitize_question_bank_text(q.content),
                 "student_choice": user_choice,
                 "correct_answer": q.correct_answer
             })
-            
+
         detailed_results.append({
             "question_id": q.id,
             "is_correct": is_correct,
@@ -372,55 +604,33 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
     total_q = len(questions_db)
     score_percent = round((correct_count / total_q * 100), 2) if total_q > 0 else 0.0
 
-    # 3. GỌI PROFILING AGENT ĐỂ CHỐT LEVEL
     profiler = ProfilingAgent(db)
     calculated_level = profiler.classify_learner(correct_count, total_q, req.subject, req.user_id)
+    new_level = old_level if req.is_session_quiz else calculated_level
 
-    if req.is_session_quiz:
-        new_level = old_level
-    else:
-        new_level = calculated_level
-
-    # ==============================================================
-    # 4. ĐIỀU HƯỚNG VÀ THĂNG CẤP LỘ TRÌNH (RPG LEVEL UP)
-    # ==============================================================
     roadmap = db.query(LearningRoadmap).filter_by(user_id=req.user_id, subject_id=subject_id).first()
     if not roadmap:
         roadmap = db.query(LearningRoadmap).filter_by(user_id=req.user_id, subject=req.subject).first()
+
     is_passed = True
     msg = ""
     chapter_feedback = None
-    
-    # Chuẩn bị file tài liệu
+    needs_background_roadmap = False
+    pending_force_level = None
+
     user_obj = db.query(User).filter(User.id == req.user_id).first()
     target_class = next((c for c in getattr(user_obj, 'enrolled_classes', []) if c.subject == req.subject), None)
-    allowed_filenames = []
-    if target_class:
-        allowed_docs = db.query(Document).filter(
-            Document.class_id == target_class.id,
-            Document.subject_id == target_class.subject_id
-        ).all()
-        allowed_filenames = [doc.filename for doc in allowed_docs]
 
-    adaptive_agent = AdaptiveAgent(db)
-    
     if not roadmap:
-        try:
-            adaptive_agent.generate_overall_roadmap(req.user_id, req.subject, allowed_filenames, force_level=new_level)
-            msg = f"Đã thiết lập lộ trình học dựa trên trình độ {new_level} của bạn."
-        except Exception as e:
-            print(f"🚨 CẢNH BÁO AI CRASH ROADMAP: {e}")
-            msg = f"Đã ghi nhận điểm số. Đang chờ AI cập nhật lộ trình."
-            
+        needs_background_roadmap = True
+        pending_force_level = new_level
+        msg = f"Đã ghi nhận điểm số. Hệ thống đang cập nhật lộ trình học dựa trên trình độ {new_level} của bạn."
     else:
         total_sessions = len(roadmap.roadmap_data) if roadmap.roadmap_data else 11
-
         if req.is_session_quiz:
             required_correct = 4
             is_passed = correct_count >= required_correct
-
             if is_passed:
-                # Chỉ mở bài tiếp theo nếu người học đang thi đúng buổi hiện tại.
                 if req.session_number and req.session_number != roadmap.current_session:
                     msg = "Bạn đã hoàn thành bài kiểm tra của buổi này. Hãy tiếp tục theo buổi hiện tại trên lộ trình."
                 elif roadmap.current_session < total_sessions:
@@ -429,7 +639,6 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
                 else:
                     roadmap.is_completed = True
                     msg = "Tuyệt vời! Bạn đã hoàn thành chapter cuối cùng của lộ trình hiện tại."
-
                 chapter_feedback = {
                     "is_session_quiz": True,
                     "required_correct": required_correct,
@@ -452,62 +661,46 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
                     "session_topic": req.session_topic,
                     "source_file": req.source_file,
                 }
-
         elif score_percent >= 60.0:
             is_passed = True
-            
-            # TRƯỜNG HỢP A: CHƯA HỌC HẾT 11 BÀI
             if roadmap.current_session < total_sessions:
                 roadmap.current_session += 1
                 msg = "Chúc mừng! Bạn đã mở khóa bài học tiếp theo."
-                
-            # TRƯỜNG HỢP B: ĐÃ QUA BÀI 11 -> THĂNG CẤP!
             else:
                 current_lvl = roadmap.level_assigned
-                
                 if current_lvl == "Beginner":
                     roadmap.level_assigned = "Intermediate"
-                    roadmap.current_session = 1 
+                    roadmap.current_session = 1
                     new_level = "Intermediate"
-                    if profile: profile.current_level = "Intermediate"
-                    
-                    try:
-                        adaptive_agent.generate_overall_roadmap(req.user_id, req.subject, allowed_filenames, force_level="Intermediate")
-                        msg = "🔥 CHÚC MỪNG! Bạn đã phá đảo cấp độ Beginner. Hệ thống đã TỰ ĐỘNG THĂNG CẤP bạn lên INTERMEDIATE kèm lộ trình 11 bài mới!"
-                    except:
-                        msg = "🔥 Bạn đã thăng cấp INTERMEDIATE! Đang tạo lộ trình mới..."
-                        
+                    if profile:
+                        profile.current_level = "Intermediate"
+                    needs_background_roadmap = True
+                    pending_force_level = "Intermediate"
+                    msg = "Bạn đã thăng cấp INTERMEDIATE. Hệ thống đang cập nhật lộ trình mới."
                 elif current_lvl == "Intermediate":
                     roadmap.level_assigned = "Advanced"
                     roadmap.current_session = 1
                     new_level = "Advanced"
-                    if profile: profile.current_level = "Advanced"
-                    
-                    try:
-                        adaptive_agent.generate_overall_roadmap(req.user_id, req.subject, allowed_filenames, force_level="Advanced")
-                        msg = "⚡ QUÁ ĐỈNH! Bạn đã thăng cấp lên ADVANCED (Cao thủ). Lộ trình Boss cuối đã mở khóa!"
-                    except:
-                        msg = "⚡ Bạn đã thăng cấp ADVANCED! Đang tạo lộ trình Boss..."
-                        
+                    if profile:
+                        profile.current_level = "Advanced"
+                    needs_background_roadmap = True
+                    pending_force_level = "Advanced"
+                    msg = "Bạn đã thăng cấp ADVANCED. Hệ thống đang cập nhật lộ trình mới."
                 elif current_lvl == "Advanced":
-                    roadmap.is_completed = True 
-                    msg = "🏆 HUYỀN THOẠI! Bạn đã hoàn thành toàn bộ 11 bài của cấp độ cao nhất. Chính thức TỐT NGHIỆP môn học này!"
+                    roadmap.is_completed = True
+                    msg = "Bạn đã hoàn thành toàn bộ lộ trình học hiện tại."
         else:
             is_passed = False
             msg = "Điểm chưa đạt (cần tối thiểu 60%). Hãy ôn tập lại toàn bộ kiến thức và thử lại nhé!"
 
-    # ==============================================================
-    # 5. LƯU LỊCH SỬ BÀI LÀM
-    # ==============================================================
-    # Đảm bảo frontend gửi đúng type, nếu gọi qua bài thì ép thành session
     final_test_type = "session" if req.is_session_quiz and req.test_type == "baseline" else req.test_type
 
     history = AssessmentHistory(
         subject_id=subject_id,
         subject=req.subject,
-        user_id=req.user_id, 
+        user_id=req.user_id,
         score=score_percent,
-        test_type=final_test_type, 
+        test_type=final_test_type,
         level_at_time=new_level,
         duration_seconds=req.duration_seconds,
         correct_count=correct_count,
@@ -516,50 +709,13 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
         timestamp=datetime.utcnow()
     )
     db.add(history)
-    db.commit() # BẮT BUỘC COMMIT Ở ĐÂY ĐỂ EVALUATION AGENT ĐỌC ĐƯỢC RECORD MỚI NÀY
-    
-    # ==============================================================
-    # 🚀 6. GỌI EVALUATION AGENT ĐỂ TÍNH BỘ ĐIỂM CHUẨN 1-10-1
-    # ==============================================================
-    eval_agent = EvaluationAgent(db)
-    
-    performance_data = eval_agent.evaluate_performance(
-        user_id=req.user_id,
-        subject=req.subject,
-        current_score=score_percent,
-        test_type=final_test_type
-    )
 
-    if profile:
-        profile.total_tests = (profile.total_tests or 0) + 1
-        # 🔥 Lưu điểm Test Score ĐÃ LỌC (Không có bài đầu vào) làm Trung bình thật sự
-        profile.avg_score = performance_data["actual_test_score"]
-    
-    progress = db.query(StudentLearningProgress).filter(StudentLearningProgress.user_id == req.user_id).first()
-    if not progress:
-        progress = StudentLearningProgress(user_id=req.user_id)
-        db.add(progress)
-
-    total_tests_count = db.query(StudentDocumentScoreHistory).filter(
-        StudentDocumentScoreHistory.user_id == req.user_id,
-        StudentDocumentScoreHistory.test_type != "baseline",
-    ).count()
-    lessons_completed_count = db.query(StudentDocumentEvaluation).filter(
-        StudentDocumentEvaluation.user_id == req.user_id,
-        StudentDocumentEvaluation.is_completed == True,
-    ).count()
-    progress.tests_completed_total = int(total_tests_count)
-    progress.lessons_completed_total = int(lessons_completed_count)
-    progress.last_active_at = datetime.utcnow()
-
-    # Lưu toàn bộ lần thi theo tài liệu để tính điểm môn theo các phần.
     if req.source_file and target_class:
         related_doc = db.query(Document).filter(
             Document.class_id == target_class.id,
             Document.subject_id == target_class.subject_id,
             Document.filename == req.source_file.strip(),
         ).first()
-
         if related_doc:
             doc_eval = db.query(StudentDocumentEvaluation).filter(
                 StudentDocumentEvaluation.user_id == req.user_id,
@@ -594,33 +750,76 @@ def submit_quiz(req: SubmitRequest, db: Session = Depends(get_db)):
                 tested_at=datetime.utcnow(),
             ))
 
-            refreshed = compute_subject_score_metrics(
-                db=db,
-                user_id=req.user_id,
-                subject_id=related_doc.subject_id,
-                class_id=related_doc.class_id,
-            )
-            if profile:
-                profile.avg_score = refreshed["test_score"]
+    progress = db.query(StudentLearningProgress).filter(StudentLearningProgress.user_id == req.user_id).first()
+    if not progress:
+        progress = StudentLearningProgress(user_id=req.user_id)
+        db.add(progress)
+    if profile:
+        profile.total_tests = int(profile.total_tests or 0) + 1
+    total_tests_count = db.query(StudentDocumentScoreHistory).filter(
+        StudentDocumentScoreHistory.user_id == req.user_id,
+        StudentDocumentScoreHistory.test_type != "baseline",
+    ).count()
+    lessons_completed_count = db.query(StudentDocumentEvaluation).filter(
+        StudentDocumentEvaluation.user_id == req.user_id,
+        StudentDocumentEvaluation.is_completed == True,
+    ).count()
+    progress.tests_completed_total = int(total_tests_count)
+    progress.lessons_completed_total = int(lessons_completed_count)
+    progress.last_active_at = datetime.utcnow()
 
     db.commit()
-    
+
+    score_metrics = compute_subject_score_metrics(
+        db=db,
+        user_id=req.user_id,
+        subject_id=subject_id,
+        class_id=target_class.id if target_class else None,
+    )
+    actual_test_score = round(float(score_metrics.get("test_score", score_percent) or score_percent), 2)
+    effort_score = _compute_effort_score(db, req.user_id)
+    progress_score = round(float(score_metrics.get("progress_score", 0.0) or 0.0), 2)
+    final_score = round((0.5 * actual_test_score) + (0.3 * effort_score) + (0.2 * progress_score), 2)
+    ai_feedback = _build_fast_feedback(score_percent, is_passed, req.is_session_quiz)
+
+    req_payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+    if needs_background_roadmap:
+        req_payload["force_level"] = pending_force_level
+    if background_tasks is not None:
+        background_tasks.add_task(
+            _run_post_submit_updates,
+            req_payload,
+            subject_id,
+            old_level,
+            final_test_type,
+            score_percent,
+            correct_count,
+            total_q,
+        )
+
+    logger.info(
+        "submit_quiz done user_id=%s subject=%s score=%s correct_count=%s total_questions=%s passed=%s",
+        req.user_id,
+        req.subject,
+        score_percent,
+        correct_count,
+        total_q,
+        is_passed,
+    )
     return {
-        "level": new_level, 
-        "score": score_percent, 
+        "level": new_level,
+        "score": score_percent,
         "correct_count": correct_count,
         "total_questions": total_q,
         "results": detailed_results,
         "is_passed": is_passed,
         "message": msg,
         "chapter_feedback": chapter_feedback,
-        
-        # Trả về bộ dữ liệu từ Evaluation Agent để hiển thị UI
-        "actual_test_score": performance_data["actual_test_score"],
-        "effort_score": performance_data["effort_score"],
-        "progress_score": performance_data["progress_score"],
-        "final_score": performance_data["final_score"],
-        "ai_feedback": performance_data["evaluation_msg"]
+        "actual_test_score": actual_test_score,
+        "effort_score": effort_score,
+        "progress_score": progress_score,
+        "final_score": final_score,
+        "ai_feedback": ai_feedback
     }
 
 # --- 4. SAVE QUIZ RESULT + EVALUATION AGENT ANALYSIS ---
@@ -669,14 +868,11 @@ def save_quiz_result(req: SaveQuizResultRequest, db: Session = Depends(get_db)):
             correct_count += 1
         
         # Parse options
-        try:
-            parsed_options = json.loads(q.options) if isinstance(q.options, str) else q.options
-        except:
-            parsed_options = []
-        
+        parsed_options = _normalize_question_bank_options(q.options)
+
         question_answer_pairs.append({
             "question_id": q.id,
-            "question_text": q.content,
+            "question_text": _sanitize_question_bank_text(q.content),
             "user_answer": user_label,
             "correct_answer": db_correct_label,
             "is_correct": is_correct,

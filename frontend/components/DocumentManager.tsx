@@ -1,8 +1,10 @@
 "use client";
 import React, { useEffect, useState } from 'react';
-import axios from 'axios';
 import { toast } from 'react-hot-toast';
-import { FileText, Trash2, Clock, BookOpen, Loader2, Pencil, Save, X } from 'lucide-react';
+import { FileText, Trash2, Clock, BookOpen, Loader2, Pencil, Save, X, FolderOpen } from 'lucide-react';
+
+import { apiClient, longRequestConfig, normalizeApiError, runLongRequest } from '../services/api';
+import { confirmAlert } from '../services/alerts';
 
 interface Document {
   id: number;
@@ -20,13 +22,14 @@ interface DocumentManagerProps {
 }
 
 export default function DocumentManager({ classId }: DocumentManagerProps) {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8010';
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
-  const [updatingVisibilityId, setUpdatingVisibilityId] = useState<number | null>(null);
+  const [generatingId, setGeneratingId] = useState<number | null>(null);
+  const [slowGeneratingId, setSlowGeneratingId] = useState<number | null>(null);
 
   // 2. Lấy danh sách tài liệu (Có lọc theo class_id nếu có)
   const fetchDocuments = async () => {
@@ -37,7 +40,7 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
         ? `${apiBaseUrl}/api/upload/documents?class_id=${classId}`
         : `${apiBaseUrl}/api/upload/documents`;
         
-      const res = await axios.get(url);
+      const res = await apiClient.get(url);
       setDocuments(res.data);
     } catch (error) {
       console.error("Lỗi lấy danh sách tài liệu:", error);
@@ -54,15 +57,22 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
 
   // Xử lý xóa tài liệu
   const handleDelete = async (id: number) => {
-    if (!confirm("Bạn có chắc chắn muốn xóa tài liệu này khỏi kho học liệu của lớp?")) return;
+    const confirmed = await confirmAlert({
+      title: "Xóa tài liệu",
+      message: "Bạn có chắc chắn muốn xóa tài liệu này khỏi kho học liệu của lớp?",
+      confirmText: "Xóa ngay",
+      cancelText: "Giữ lại",
+      tone: "danger",
+    });
+    if (!confirmed) return;
 
     try {
-      await axios.delete(`${apiBaseUrl}/api/upload/documents/${id}`);
+      await apiClient.delete(`/api/upload/documents/${id}`, { baseURL: apiBaseUrl });
       toast.success("Đã xóa tài liệu thành công!");
       // Cập nhật lại UI ngay lập tức
       setDocuments(documents.filter(doc => doc.id !== id));
-    } catch (error) {
-      toast.error("Không thể xóa tài liệu.");
+    } catch (error: unknown) {
+      toast.error(normalizeApiError(error, "Không thể xóa tài liệu."));
     }
   };
 
@@ -84,34 +94,57 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
 
     setSavingEdit(true);
     try {
-      await axios.put(`${apiBaseUrl}/api/upload/documents/${id}`, {
+      await apiClient.put(`/api/upload/documents/${id}`, {
         title: editingTitle.trim(),
+      }, {
+        baseURL: apiBaseUrl,
       });
       setDocuments((prev) =>
         prev.map((doc) => (doc.id === id ? { ...doc, title: editingTitle.trim() } : doc))
       );
       toast.success('Đã cập nhật tiêu đề tài liệu');
       cancelEdit();
-    } catch (error: any) {
-      toast.error(error?.response?.data?.detail || 'Không thể cập nhật tài liệu.');
+    } catch (error: unknown) {
+      toast.error(normalizeApiError(error, 'Không thể cập nhật tài liệu.'));
     } finally {
       setSavingEdit(false);
     }
   };
 
-  const handleToggleVisibility = async (doc: Document) => {
-    setUpdatingVisibilityId(doc.id);
+  const handleGenerateQuestionBank = async (doc: Document) => {
+    const confirmed = await confirmAlert({
+      title: "Tạo lại bộ câu hỏi",
+      message: `Tạo lại nhanh 20 câu cho tài liệu này?\nHệ thống sẽ thay thế bộ câu hỏi cũ của tài liệu.`,
+      confirmText: "Tạo lại",
+      cancelText: "Hủy",
+      tone: "danger",
+    });
+    if (!confirmed) return;
+
+    setGeneratingId(doc.id);
     try {
-      const nextValue = !doc.is_visible_to_students;
-      await axios.put(`${apiBaseUrl}/api/upload/documents/${doc.id}/visibility`, {
-        is_visible_to_students: nextValue,
-      });
-      setDocuments((prev) => prev.map((d) => (d.id === doc.id ? { ...d, is_visible_to_students: nextValue } : d)));
-      toast.success(nextValue ? 'Đã bật hiển thị cho sinh viên' : 'Đã ẩn tài liệu khỏi sinh viên');
-    } catch {
-      toast.error('Không thể cập nhật quyền hiển thị tài liệu.');
+      const res = await runLongRequest(
+        () =>
+          apiClient.post(
+            `/api/documents/generate-question-bank/${doc.id}?target_count=20`,
+            undefined,
+            {
+              ...longRequestConfig,
+              baseURL: apiBaseUrl,
+            }
+          ),
+        {
+          onSlowStateChange: (isSlow) => setSlowGeneratingId(isSlow ? doc.id : null),
+          slowDelayMs: 4000,
+        }
+      );
+      const data = res.data || {};
+      toast.success(`Đã tạo ${data.generated_count ?? 0}/${data.target_count ?? 20} câu`);
+    } catch (error: unknown) {
+      toast.error(normalizeApiError(error, 'Không thể tạo bộ đề cho tài liệu này.'));
     } finally {
-      setUpdatingVisibilityId(null);
+      setGeneratingId(null);
+      setSlowGeneratingId(null);
     }
   };
 
@@ -124,14 +157,21 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
 
   return (
     <div className="hero-panel overflow-hidden animate-in fade-in duration-500">
-      <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70 backdrop-blur flex justify-between items-center">
-        <h3 className="text-sm font-black text-slate-800 uppercase tracking-tight flex items-center gap-2">
-          <BookOpen className="w-4 h-4 text-teal-700" /> 
-          Tri thức lớp ID: <span className="text-indigo-600">{classId || "Toàn bộ"}</span>
-        </h3>
-        <span className="text-[10px] font-bold text-slate-400 uppercase">
-          {documents.length} Tài liệu
-        </span>
+      <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70 backdrop-blur">
+        <div className="flex justify-between items-center gap-4">
+          <h3 className="text-sm font-black text-slate-800 uppercase tracking-tight flex items-center gap-2">
+            <BookOpen className="w-4 h-4 text-teal-700" />
+            Tri thức lớp ID: <span className="text-indigo-600">{classId || "Toàn bộ"}</span>
+          </h3>
+          <span className="text-[10px] font-bold text-slate-400 uppercase">
+            {documents.length} Tài liệu
+          </span>
+        </div>
+        {slowGeneratingId ? (
+          <p className="mt-3 text-[12px] font-semibold text-indigo-700">
+            Hệ thống vẫn đang sinh câu hỏi cho tài liệu này, backend chưa mất kết nối. Vui lòng chờ thêm một chút.
+          </p>
+        ) : null}
       </div>
 
       <div className="overflow-x-auto">
@@ -141,7 +181,7 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
               <th className="px-6 py-4">Tên tài liệu</th>
               <th className="px-6 py-4">Môn học</th>
               <th className="px-6 py-4">Ngày tải lên</th>
-              <th className="px-6 py-4">Hiển thị cho SV</th>
+              <th className="px-6 py-4">Trạng thái</th>
               <th className="px-6 py-4 text-right">Thao tác</th>
             </tr>
           </thead>
@@ -175,18 +215,9 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
                     {new Date(doc.upload_time).toLocaleDateString('vi-VN')}
                   </td>
                   <td className="px-6 py-4">
-                    <button
-                      onClick={() => handleToggleVisibility(doc)}
-                      disabled={updatingVisibilityId === doc.id}
-                      className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border transition-all disabled:opacity-60 ${
-                        doc.is_visible_to_students
-                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
-                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                      }`}
-                      title="Bật/tắt hiển thị cho sinh viên"
-                    >
-                      {doc.is_visible_to_students ? 'Đang hiển thị' : 'Đang ẩn'}
-                    </button>
+                    <span className="inline-flex rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-emerald-700">
+                      Tự hiển thị cho SV
+                    </span>
                   </td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex justify-end gap-1">
@@ -216,6 +247,14 @@ export default function DocumentManager({ classId }: DocumentManagerProps) {
                             title="Sửa tiêu đề tài liệu"
                           >
                             <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleGenerateQuestionBank(doc)}
+                            disabled={generatingId === doc.id}
+                            className="p-2 text-slate-300 hover:text-indigo-700 hover:bg-indigo-50 rounded-lg transition-all disabled:opacity-50"
+                            title="Tạo nhanh 20 câu"
+                          >
+                            {generatingId === doc.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderOpen className="w-4 h-4" />}
                           </button>
                           <button 
                             onClick={() => handleDelete(doc.id)}

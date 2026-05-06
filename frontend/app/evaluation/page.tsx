@@ -1,14 +1,26 @@
 "use client";
-import React, { useState, useEffect } from 'react';
-import axios from 'axios';
-import { 
-  BarChart3, History, TrendingUp, Calendar, Target, Award, ChevronDown, 
-  Clock, ArrowUpRight, ArrowDownRight, Minus, Timer, LockKeyhole, Sparkles
-} from 'lucide-react';
-import OrbitPanel from '@/components/OrbitPanel';
 
-// Định nghĩa Interface
-interface AssessmentItem {
+import { type ReactNode, useEffect, useMemo, useState } from "react";
+import axios from "axios";
+import {
+  Award,
+  BarChart3,
+  Calendar,
+  ChevronDown,
+  History,
+  LockKeyhole,
+  Minus,
+  Sparkles,
+  Target,
+  Timer,
+  ArrowUpRight,
+  ArrowDownRight,
+} from "lucide-react";
+
+import AgentConversationCard from "@/components/AgentConversationCard";
+import { apiClient, longRequestConfig, normalizeApiError, runLongRequest } from "@/services/api";
+
+type AssessmentItem = {
   id: number;
   date: string;
   duration: string | number;
@@ -17,120 +29,132 @@ interface AssessmentItem {
   level?: string;
   trend?: number;
   test_type?: string;
-}
+};
 
-interface StatsData {
+type StatsData = {
   avg: number;
   total: number;
   best: number;
-}
+};
 
-// Bổ sung Interface cho Điểm Evaluation Agent
-interface EvaluationScores {
+type EvaluationScores = {
   test_score: number;
   effort_score: number;
   progress_score: number;
   final_score: number;
-}
+};
 
-interface StatCardProps {
-  icon: React.ReactNode;
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type StatCardProps = {
+  icon: ReactNode;
   label: string;
   value: string | number;
   bg: string;
-  subtitle?: string;
-}
+};
 
 export default function EvaluationPage() {
-  const [selectedSubject, setSelectedSubject] = useState<string>(""); 
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8010";
+
+  const [userId, setUserId] = useState<number | null>(null);
+  const [selectedSubject, setSelectedSubject] = useState("");
   const [enrolledSubjects, setEnrolledSubjects] = useState<string[]>([]);
-  const [loadingSubjects, setLoadingSubjects] = useState<boolean>(true);
-  const [classIdMap, setClassIdMap] = useState<{[key: string]: number}>({}); // Lưu mapping Môn học -> ID lớp
-
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
-
-  const [history, setHistory] = useState<AssessmentItem[]>([]); 
-  const [loadingStats, setLoadingStats] = useState<boolean>(false);
+  const [classIdMap, setClassIdMap] = useState<Record<string, number>>({});
+  const [loadingSubjects, setLoadingSubjects] = useState(true);
+  const [loadingStats, setLoadingStats] = useState(false);
+  const [history, setHistory] = useState<AssessmentItem[]>([]);
   const [stats, setStats] = useState<StatsData>({ avg: 0, total: 0, best: 0 });
   const [evalScores, setEvalScores] = useState<EvaluationScores | null>(null);
-  const orbitUserId = typeof window !== 'undefined'
-    ? parseInt(localStorage.getItem('userId') || localStorage.getItem('user_id') || '0', 10)
-    : 0;
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
+    {
+      role: "assistant",
+      content:
+        "Evaluation Agent đã sẵn sàng. Bạn có thể hỏi về thành tích học tập, môn đang yếu, xu hướng tiến bộ hoặc tài liệu nên ôn tập lại.",
+    },
+  ]);
+  const [chatInput, setChatInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const [slowNotice, setSlowNotice] = useState(false);
+  const [examples, setExamples] = useState<string[]>([]);
 
-  // LẤY DANH SÁCH MÔN HỌC MÀ SINH VIÊN ĐÃ THAM GIA LỚP
+  useEffect(() => {
+    const rawId = localStorage.getItem("userId") || localStorage.getItem("user_id");
+    const uid = rawId ? Number(rawId) : null;
+    if (!uid) {
+      setLoadingSubjects(false);
+      return;
+    }
+    setUserId(uid);
+  }, []);
+
   useEffect(() => {
     const fetchEnrolledClasses = async () => {
-      const storedId = localStorage.getItem('userId') || localStorage.getItem('user_id');
-      const userId = storedId ? parseInt(storedId, 10) : null;
-      
-      if (!userId) {
-        setLoadingSubjects(false);
-        return;
-      }
-
+      if (!userId) return;
       try {
-          const res = await axios.get(`${apiBaseUrl}/api/auth/me/${userId}`);
-        const classes = res.data.enrolled_classes || [];
-        
-        const map: {[key: string]: number} = {};
-        const subjects: string[] = [];
-        
-        classes.forEach((c: any) => {
-            if (!subjects.includes(c.subject)) {
-                subjects.push(c.subject);
-                map[c.subject] = c.id; // Ghi nhớ ID của lớp tương ứng với môn
-            }
+        const res = await axios.get(`${apiBaseUrl}/api/auth/me/${userId}`);
+        const classes = Array.isArray(res.data?.enrolled_classes) ? res.data.enrolled_classes : [];
+
+        const subjectList: string[] = [];
+        const nextMap: Record<string, number> = {};
+        classes.forEach((item: { subject?: string; id?: number }) => {
+          if (!item.subject || typeof item.id !== "number") return;
+          if (!subjectList.includes(item.subject)) subjectList.push(item.subject);
+          nextMap[item.subject] = item.id;
         });
-        
-        setEnrolledSubjects(subjects);
-        setClassIdMap(map);
-        if (subjects.length > 0) {
-            setSelectedSubject(subjects[0]); 
+
+        setEnrolledSubjects(subjectList);
+        setClassIdMap(nextMap);
+        if (subjectList.length) {
+          setSelectedSubject((prev) => prev || subjectList[0]);
         }
-      } catch (error) {
-        console.error("Lỗi lấy thông tin môn học:", error);
+      } catch {
+        setEnrolledSubjects([]);
       } finally {
         setLoadingSubjects(false);
       }
     };
-    
-    fetchEnrolledClasses();
-  }, []);
+    void fetchEnrolledClasses();
+  }, [apiBaseUrl, userId]);
 
-  // LẤY THỐNG KÊ KHI ĐÃ CHỌN ĐƯỢC MÔN HỌC
   useEffect(() => {
-    if (selectedSubject) {
-        fetchHistory();
-        fetchEvaluationScores();
-    }
-  }, [selectedSubject]);
+    const loadExamples = async () => {
+      try {
+        const res = await apiClient.get("/api/evaluation/chat/examples", {
+          baseURL: apiBaseUrl,
+        });
+        setExamples(Array.isArray(res.data?.examples) ? res.data.examples : []);
+      } catch {
+        setExamples([
+          "Thành tích học tập của tôi hiện nay thế nào?",
+          "Môn nào tôi đang yếu nhất?",
+          "Tài liệu nào tôi nên ôn tập lại trước kỳ thi?",
+        ]);
+      }
+    };
+    void loadExamples();
+  }, [apiBaseUrl]);
 
   const fetchHistory = async () => {
+    if (!userId || !selectedSubject) return;
     setLoadingStats(true);
     try {
-      const storedId = localStorage.getItem('userId') || localStorage.getItem('user_id');
-      const userId = storedId ? parseInt(storedId, 10) : null;
-
-      if (!userId) return; 
-
-        const res = await axios.get(`${apiBaseUrl}/api/stats/learning-stats`, {
+      const res = await axios.get(`${apiBaseUrl}/api/stats/learning-stats`, {
         params: {
-          user_id: userId, 
-          subject: selectedSubject
-        }
+          user_id: userId,
+          subject: selectedSubject,
+        },
       });
-
-      const data = res.data.history_list || [];
+      const data = Array.isArray(res.data?.history_list) ? res.data.history_list : [];
       setHistory(data);
-      
-      setStats({ 
-        avg: res.data.avgScore || 0, 
-        total: res.data.totalTests || 0, 
-        best: res.data.bestScore || 0 
+      setStats({
+        avg: Number(res.data?.avgScore || 0),
+        total: Number(res.data?.totalTests || 0),
+        best: Number(res.data?.bestScore || 0),
       });
-
-    } catch (error) {
-      console.error("Lỗi fetch stats:", error);
+    } catch {
       setHistory([]);
       setStats({ avg: 0, total: 0, best: 0 });
     } finally {
@@ -139,249 +163,276 @@ export default function EvaluationPage() {
   };
 
   const fetchEvaluationScores = async () => {
+    if (!userId || !selectedSubject) return;
     const classId = classIdMap[selectedSubject];
-    const storedId = localStorage.getItem('userId') || localStorage.getItem('user_id');
-    const userId = storedId ? parseInt(storedId, 10) : null;
-    if (!classId || !userId) return;
+    if (!classId) {
+      setEvalScores(null);
+      return;
+    }
 
     try {
-        // Lấy điểm Evaluation Agent từ API danh sách lớp
       const res = await axios.get(`${apiBaseUrl}/api/classroom/members/${classId}`);
-        const members = res.data || [];
-        const myData = members.find((m: any) => m.id === userId);
-        
-        if (myData && myData.final_score !== undefined) {
-            setEvalScores({
-                test_score: myData.test_score,
-                effort_score: myData.effort_score,
-                progress_score: myData.progress_score,
-                final_score: myData.final_score
-            });
-        } else {
-            setEvalScores(null);
-        }
-    } catch (e) {
-        console.error("Lỗi lấy điểm Evaluation:", e);
+      const members = Array.isArray(res.data) ? res.data : [];
+      const me = members.find((member: { id?: number }) => member.id === userId);
+      if (me && me.final_score !== undefined) {
+        setEvalScores({
+          test_score: Number(me.test_score || 0),
+          effort_score: Number(me.effort_score || 0),
+          progress_score: Number(me.progress_score || 0),
+          final_score: Number(me.final_score || 0),
+        });
+      } else {
         setEvalScores(null);
+      }
+    } catch {
+      setEvalScores(null);
     }
   };
 
-  const formatDateTime = (dateStr: string): string => {
-    if(!dateStr) return "N/A";
-    if (dateStr.includes('-') && !dateStr.includes('T')) return dateStr;
+  useEffect(() => {
+    if (!userId || !selectedSubject) return;
+    void fetchHistory();
+    void fetchEvaluationScores();
+  }, [selectedSubject, userId]);
+
+  const sendEvaluationMessage = async (content: string) => {
+    if (!userId || !content.trim()) return;
+    const message = content.trim();
+    setChatMessages((prev) => [...prev, { role: "user", content: message }]);
+    setChatInput("");
+    setSending(true);
 
     try {
-        const isoString = dateStr.endsWith('Z') ? dateStr : `${dateStr}Z`;
-        const d = new Date(isoString);
-        if (isNaN(d.getTime())) return dateStr; 
-        
-        return d.toLocaleString('vi-VN', {
-          hour: '2-digit', minute: '2-digit',
-          day: '2-digit', month: '2-digit', year: 'numeric'
-        });
-    } catch {
-        return dateStr;
+      const res = await runLongRequest(
+        () =>
+          apiClient.post(
+            "/api/evaluation/chat",
+            {
+              user_id: userId,
+              subject: null,
+              message,
+            },
+            {
+              ...longRequestConfig,
+              baseURL: apiBaseUrl,
+            }
+          ),
+        { onSlowStateChange: setSlowNotice, slowDelayMs: 3500 }
+      );
+      const reply = String(res.data?.reply || "Evaluation Agent đã phản hồi.");
+      setChatMessages((prev) => [...prev, { role: "assistant", content: reply }]);
+    } catch (error: unknown) {
+      const fallback = normalizeApiError(error, "Evaluation Agent chưa thể phân tích lúc này.");
+      setChatMessages((prev) => [...prev, { role: "assistant", content: `Lỗi: ${fallback}` }]);
+    } finally {
+      setSending(false);
     }
   };
 
-  const formatDuration = (val: string | number): string => {
-    if (!val) return "0 giây";
-    if (typeof val === 'string') return val; 
-    
-    const numVal = Number(val);
-    const m = Math.floor(numVal / 60);
-    const s = numVal % 60;
-    
-    if (m > 0) return `${m} phút ${s} giây`;
-    return `${s} giây`;
+  const formatDateTime = (value: string) => {
+    if (!value) return "N/A";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString("vi-VN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
   };
+
+  const formatDuration = (value: string | number) => {
+    if (!value) return "0 giây";
+    if (typeof value === "string") return value;
+    const numberValue = Number(value);
+    const minutes = Math.floor(numberValue / 60);
+    const seconds = numberValue % 60;
+    if (minutes > 0) return `${minutes} phút ${seconds} giây`;
+    return `${seconds} giây`;
+  };
+
+  const performanceLabel = useMemo(() => {
+    const score = Number(evalScores?.final_score || 0);
+    if (score >= 80) return "Xuất sắc. Bạn đang duy trì phong độ rất tốt.";
+    if (score >= 50) return "Khá ổn, nhưng vẫn còn dư địa để tăng tốc.";
+    return "Cần tập trung ôn tập và cải thiện những môn đang yếu.";
+  }, [evalScores]);
 
   return (
-    <>
-    <div className="page-shell text-slate-800">
-      <div className="max-w-6xl mx-auto px-2 sm:px-4 space-y-8">
-        
-        {/* HEADER */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-          <div>
-            <h1 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-3">
-              <TrendingUp className="w-8 h-8 text-indigo-600" />
-              Phân tích năng lực
-            </h1>
-            <p className="text-sm text-slate-500 font-medium mt-1">Đánh giá AI & Lịch sử học tập</p>
-          </div>
-
-          <div className="relative min-w-[250px]">
-            <select 
-              value={selectedSubject}
-              onChange={(e) => setSelectedSubject(e.target.value)}
-              disabled={enrolledSubjects.length === 0 || loadingSubjects}
-              className="w-full p-3 pl-4 pr-10 bg-white border border-slate-200 rounded-xl text-sm font-bold text-slate-800 shadow-sm outline-none focus:border-indigo-500 appearance-none cursor-pointer disabled:opacity-50"
-            >
-              {loadingSubjects ? (
-                  <option value="">Đang tải...</option>
-              ) : enrolledSubjects.length === 0 ? (
-                  <option value="">Chưa có môn học</option>
-              ) : (
-                  enrolledSubjects.map(sub => <option key={sub} value={sub}>{sub}</option>)
-              )}
-            </select>
-            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-          </div>
-        </div>
-
-        {/* NẾU CHƯA CÓ LỚP NÀO -> HIỂN THỊ MÀN HÌNH KHÓA */}
-        {!loadingSubjects && enrolledSubjects.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-20 bg-white rounded-[2rem] border border-dashed border-gray-300 shadow-sm max-w-3xl mx-auto mt-10">
-              <LockKeyhole className="w-16 h-16 text-gray-300 mb-4" />
-              <h3 className="text-xl font-black text-gray-600 uppercase mb-2">Hệ thống phân tích đang bị khóa</h3>
-              <p className="text-sm text-gray-500 mb-6 max-w-md text-center">Bạn cần tham gia ít nhất một lớp học để hệ thống có thể theo dõi và phân tích năng lực học tập của bạn.</p>
-              <button 
-                onClick={() => window.location.href = '/adaptive'} 
-                className="px-6 py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
-              >
-                Nhập mã lớp học ngay
-              </button>
+    <div className="page-shell px-4 pb-8 text-slate-800">
+      <div className="mx-auto max-w-7xl space-y-6">
+        <section className="overflow-hidden rounded-[2.25rem] border border-slate-200 bg-[linear-gradient(135deg,#dbeafe,white_42%,#eef2ff)] shadow-[0_30px_80px_rgba(15,23,42,0.08)]">
+          <div className="grid gap-6 px-6 py-7 lg:grid-cols-[1.25fr_0.75fr]">
+            <div>
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/70 bg-white/70 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-indigo-800">
+                <Sparkles size={13} />
+                Tab đánh giá
+              </div>
+              <h1 className="mt-4 text-2xl font-black tracking-tight text-slate-950">Evaluation Agent và phân tích kết quả học tập</h1>
+              <p className="mt-2 max-w-2xl text-[13px] font-medium leading-6 text-slate-600">
+                Agent đánh giá nhận lịch sử điểm số, ngày thi và trạng thái tài liệu để phân tích thành tích của bạn, chỉ ra môn đang yếu và gợi ý cách ôn tập tiếp theo.
+              </p>
             </div>
-        ) : (
-            <>
-              {/* EVALUATION AGENT SCORE PANEL */}
-              {evalScores && (
-                 <div className="bg-gradient-to-r from-slate-900 to-indigo-900 p-8 rounded-3xl shadow-xl text-white relative overflow-hidden animate-in zoom-in duration-500">
-                    <Sparkles className="absolute top-4 right-4 w-24 h-24 text-indigo-400 opacity-20" />
-                    
-                    <div className="flex flex-col lg:flex-row items-center justify-between gap-8 relative z-10">
-                        <div className="w-full lg:w-1/3 text-center lg:text-left border-b lg:border-b-0 lg:border-r border-indigo-700/50 pb-6 lg:pb-0 lg:pr-8">
-                           <p className="text-indigo-300 font-black uppercase tracking-widest text-xs mb-2">Evaluation Agent Score</p>
-                           <h2 className="text-5xl font-black text-amber-400 mb-2">{evalScores.final_score} <span className="text-lg text-indigo-200">/ 100</span></h2>
-                           <p className="text-sm font-medium text-indigo-100">
-                              {evalScores.final_score >= 80 ? "Xuất sắc! Bạn đang làm rất tốt." : evalScores.final_score >= 50 ? "Khá! Cố gắng cải thiện thêm nhé." : "Cần nỗ lực nhiều hơn."}
-                           </p>
-                        </div>
-                        
-                        <div className="w-full lg:w-2/3 grid grid-cols-3 gap-4">
-                           <div className="bg-indigo-950/40 p-4 rounded-2xl border border-indigo-700/30 text-center">
-                              <p className="text-[10px] text-indigo-300 font-black uppercase mb-1">Học lực (50%)</p>
-                              <p className="text-2xl font-black text-blue-300">{evalScores.test_score}</p>
-                           </div>
-                           <div className="bg-indigo-950/40 p-4 rounded-2xl border border-indigo-700/30 text-center">
-                              <p className="text-[10px] text-indigo-300 font-black uppercase mb-1">Nỗ lực (30%)</p>
-                              <p className="text-2xl font-black text-emerald-300">{evalScores.effort_score}</p>
-                           </div>
-                           <div className="bg-indigo-950/40 p-4 rounded-2xl border border-indigo-700/30 text-center">
-                              <p className="text-[10px] text-indigo-300 font-black uppercase mb-1">Tiến bộ (20%)</p>
-                              <p className="text-2xl font-black text-purple-300">{evalScores.progress_score}</p>
-                           </div>
-                        </div>
-                    </div>
-                 </div>
-              )}
 
-              {/* STATS OVERVIEW */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <StatCard icon={<History className="w-5 h-5 text-blue-600" />} label="Tổng số bài thi" value={stats.total} bg="bg-blue-50" />
-                <StatCard icon={<BarChart3 className="w-5 h-5 text-indigo-600" />} label="Điểm thi trung bình" value={`${stats.avg}%`} bg="bg-indigo-50" />
-                <StatCard icon={<Award className="w-5 h-5 text-emerald-600" />} label="Thành tích tốt nhất" value={`${stats.best}%`} bg="bg-emerald-50" />
+            <div className="relative min-w-[250px] self-end">
+              <select
+                value={selectedSubject}
+                onChange={(event) => setSelectedSubject(event.target.value)}
+                disabled={enrolledSubjects.length === 0 || loadingSubjects}
+                className="h-12 w-full appearance-none rounded-2xl border border-white/70 bg-white/82 px-4 pr-10 text-sm font-bold text-slate-800 outline-none focus:border-indigo-500 disabled:opacity-50"
+              >
+                {loadingSubjects ? (
+                  <option value="">Đang tải...</option>
+                ) : enrolledSubjects.length === 0 ? (
+                  <option value="">Chưa có môn học</option>
+                ) : (
+                  enrolledSubjects.map((subject) => (
+                    <option key={subject} value={subject}>
+                      {subject}
+                    </option>
+                  ))
+                )}
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+            </div>
+          </div>
+        </section>
+
+        {!loadingSubjects && enrolledSubjects.length === 0 ? (
+          <section className="mx-auto flex max-w-3xl flex-col items-center justify-center rounded-[2rem] border border-dashed border-slate-300 bg-white px-6 py-16 text-center shadow-sm">
+            <LockKeyhole className="mb-4 h-14 w-14 text-slate-300" />
+            <h2 className="text-xl font-black text-slate-700">Chưa có dữ liệu để đánh giá</h2>
+            <p className="mt-2 max-w-xl text-sm font-medium text-slate-500">
+              Bạn cần tham gia ít nhất một lớp học và làm bài kiểm tra để hệ thống có thể theo dõi năng lực học tập của bạn.
+            </p>
+          </section>
+        ) : (
+          <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+            <div className="space-y-5">
+              {evalScores ? (
+                <div className="relative overflow-hidden rounded-[2rem] bg-[linear-gradient(135deg,#0f172a,#312e81,#0f172a)] p-7 text-white shadow-[0_24px_64px_rgba(15,23,42,0.25)]">
+                  <Sparkles className="absolute right-5 top-5 h-20 w-20 text-indigo-300/25" />
+                  <div className="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
+                    <div className="border-b border-white/10 pb-4 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-6">
+                      <p className="text-[10px] font-black uppercase tracking-[0.22em] text-indigo-200">Evaluation score</p>
+                      <h2 className="mt-3 text-5xl font-black text-amber-300">
+                        {evalScores.final_score}
+                        <span className="ml-2 text-lg text-indigo-100">/ 100</span>
+                      </h2>
+                      <p className="mt-3 text-sm font-medium text-indigo-100">{performanceLabel}</p>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <MetricCard label="Học lực" value={evalScores.test_score} accent="text-sky-300" />
+                      <MetricCard label="Nỗ lực" value={evalScores.effort_score} accent="text-emerald-300" />
+                      <MetricCard label="Tiến bộ" value={evalScores.progress_score} accent="text-fuchsia-300" />
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="grid gap-4 md:grid-cols-3">
+                <StatCard icon={<History className="h-5 w-5 text-blue-600" />} label="Tổng số bài thi" value={stats.total} bg="bg-blue-50" />
+                <StatCard icon={<BarChart3 className="h-5 w-5 text-indigo-600" />} label="Điểm trung bình" value={`${stats.avg}%`} bg="bg-indigo-50" />
+                <StatCard icon={<Award className="h-5 w-5 text-emerald-600" />} label="Thành tích tốt nhất" value={`${stats.best}%`} bg="bg-emerald-50" />
               </div>
 
-              {/* MAIN TABLE */}
-              <div className="hero-panel overflow-hidden">
-                <div className="p-6 border-b border-slate-100 flex justify-between items-center">
-                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                    <Calendar className="w-4 h-4 text-slate-400" />
-                    Nhật ký làm bài: {selectedSubject || "Đang tải..."}
+              <div className="overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-sm">
+                <div className="flex items-center justify-between border-b border-slate-100 px-6 py-5">
+                  <h3 className="flex items-center gap-2 text-lg font-black text-slate-900">
+                    <Calendar size={16} className="text-slate-400" />
+                    Nhật ký làm bài {selectedSubject ? `- ${selectedSubject}` : ""}
                   </h3>
                 </div>
 
                 {loadingStats ? (
-                  <div className="p-12 text-center">
-                    <div className="w-8 h-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
-                    <p className="text-xs font-bold text-slate-400">Đang tải dữ liệu phân tích...</p>
-                  </div>
+                  <div className="p-12 text-center text-sm font-semibold text-slate-500">Đang tải dữ liệu phân tích...</div>
                 ) : history.length === 0 ? (
-                  <div className="p-12 text-center flex flex-col items-center">
-                    <div className="w-16 h-16 bg-slate-50 rounded-2xl flex items-center justify-center mb-4">
-                      <Target className="w-8 h-8 text-slate-300" />
+                  <div className="flex flex-col items-center p-12 text-center">
+                    <div className="mb-4 rounded-2xl bg-slate-50 p-4">
+                      <Target className="h-8 w-8 text-slate-300" />
                     </div>
-                    <p className="text-slate-500 font-bold">Chưa có bài kiểm tra nào.</p>
+                    <p className="font-bold text-slate-600">Chưa có bài kiểm tra nào.</p>
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse min-w-[600px]">
+                    <table className="min-w-[680px] w-full border-collapse text-left text-sm">
                       <thead>
-                        <tr className="bg-slate-50/50 text-[10px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-100">
-                          <th className="p-4">Thời điểm nộp bài</th>
+                        <tr className="border-b border-slate-100 bg-slate-50/80 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">
+                          <th className="p-4">Thời điểm</th>
                           <th className="p-4">Loại bài</th>
-                          <th className="p-4">Thời gian làm</th>
+                          <th className="p-4">Thời gian</th>
                           <th className="p-4">Cấp độ</th>
                           <th className="p-4">Tiến bộ</th>
                           <th className="p-4 text-right">Điểm số</th>
                         </tr>
                       </thead>
-                      <tbody className="text-sm">
-                        {history.map((item: AssessmentItem, idx: number) => (
-                          <tr key={item.id || idx} className="border-b border-slate-50 hover:bg-slate-50/30 transition-colors">
-                            
-                            {/* CỘT 1: NGÀY GIỜ */}
+                      <tbody>
+                        {history.map((item, index) => (
+                          <tr key={item.id || index} className="border-b border-slate-50 transition hover:bg-slate-50/50">
                             <td className="p-4">
                               <div className="flex items-center gap-2 font-medium text-slate-600">
-                                  <Calendar className="w-3.5 h-3.5 text-slate-400" />
-                                  {formatDateTime(item.date)}
+                                <Calendar className="h-3.5 w-3.5 text-slate-400" />
+                                {formatDateTime(item.date)}
                               </div>
                             </td>
-
-                            {/* CỘT MỚI: LOẠI BÀI */}
                             <td className="p-4">
-                                <span className="text-[10px] font-black px-2 py-1 bg-slate-100 text-slate-500 rounded uppercase">
-                                    {item.test_type === 'baseline' ? 'Đầu vào' : item.test_type === 'final' ? 'Cuối kỳ' : 'Qua bài'}
-                                </span>
-                            </td>
-
-                            {/* CỘT 2: THỜI GIAN LÀM BÀI */}
-                            <td className="p-4">
-                              <div className="flex items-center gap-2 text-slate-700 font-bold">
-                                  <Timer className="w-3.5 h-3.5 text-indigo-500" />
-                                  {formatDuration(item.duration)}
-                              </div>
-                            </td>
-
-                            {/* CỘT 3: CẤP ĐỘ */}
-                            <td className="p-4">
-                              <span className={`text-[10px] font-black px-2 py-1 rounded border uppercase ${
-                                item.level === 'Advanced' ? 'bg-purple-50 text-purple-600 border-purple-100' :
-                                item.level === 'Intermediate' ? 'bg-blue-50 text-blue-600 border-blue-100' :
-                                'bg-slate-100 text-slate-500 border-slate-200'
-                              }`}>
-                                {item.level || 'Beginner'}
+                              <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black uppercase text-slate-500">
+                                {item.test_type === "baseline" ? "Đầu vào" : item.test_type === "final" ? "Cuối kỳ" : "Qua bài"}
                               </span>
                             </td>
-
-                            {/* CỘT 4: TIẾN BỘ */}
                             <td className="p-4">
-                              {idx === history.length - 1 ? (
-                                    <span className="text-xs text-slate-400 font-bold flex items-center gap-1">
-                                      <Minus className="w-4 h-4" /> Bài đầu tiên
-                                    </span>
+                              <div className="flex items-center gap-2 font-bold text-slate-700">
+                                <Timer className="h-3.5 w-3.5 text-indigo-500" />
+                                {formatDuration(item.duration)}
+                              </div>
+                            </td>
+                            <td className="p-4">
+                              <span
+                                className={`rounded-full border px-2 py-1 text-[10px] font-black uppercase ${
+                                  item.level === "Advanced"
+                                    ? "border-purple-100 bg-purple-50 text-purple-600"
+                                    : item.level === "Intermediate"
+                                      ? "border-blue-100 bg-blue-50 text-blue-600"
+                                      : "border-slate-200 bg-slate-100 text-slate-500"
+                                }`}
+                              >
+                                {item.level || "Beginner"}
+                              </span>
+                            </td>
+                            <td className="p-4">
+                              {index === history.length - 1 ? (
+                                <span className="flex items-center gap-1 text-xs font-bold text-slate-400">
+                                  <Minus className="h-4 w-4" /> Bài đầu tiên
+                                </span>
                               ) : (
-                                  <div className={`flex items-center gap-2 font-bold ${
-                                      (item.trend || 0) > 0 ? 'text-emerald-600' : 
-                                      (item.trend || 0) < 0 ? 'text-red-500' : 'text-slate-400'
-                                  }`}>
-                                      {(item.trend || 0) > 0 ? <ArrowUpRight className="w-4 h-4" /> : 
-                                      (item.trend || 0) < 0 ? <ArrowDownRight className="w-4 h-4" /> : 
-                                      <Minus className="w-4 h-4" />}
-                                      {(item.trend || 0) > 0 ? `Tăng ${item.trend}đ` : (item.trend || 0) < 0 ? `Giảm ${Math.abs(item.trend || 0)}đ` : 'Không đổi'}
-                                  </div>
+                                <div
+                                  className={`flex items-center gap-2 font-bold ${
+                                    (item.trend || 0) > 0 ? "text-emerald-600" : (item.trend || 0) < 0 ? "text-red-500" : "text-slate-400"
+                                  }`}
+                                >
+                                  {(item.trend || 0) > 0 ? (
+                                    <ArrowUpRight className="h-4 w-4" />
+                                  ) : (item.trend || 0) < 0 ? (
+                                    <ArrowDownRight className="h-4 w-4" />
+                                  ) : (
+                                    <Minus className="h-4 w-4" />
+                                  )}
+                                  {(item.trend || 0) > 0
+                                    ? `Tăng ${item.trend}đ`
+                                    : (item.trend || 0) < 0
+                                      ? `Giảm ${Math.abs(item.trend || 0)}đ`
+                                      : "Không đổi"}
+                                </div>
                               )}
                             </td>
-
-                            {/* CỘT 5: ĐIỂM SỐ */}
                             <td className="p-4 text-right">
-                              <span className={`text-xl font-black ${
-                                  item.score >= 80 ? 'text-emerald-600' : 
-                                  item.score >= 50 ? 'text-indigo-600' : 'text-red-500'
-                              }`}>
-                                  {Math.round(item.score)}
+                              <span
+                                className={`text-xl font-black ${
+                                  item.score >= 80 ? "text-emerald-600" : item.score >= 50 ? "text-indigo-600" : "text-red-500"
+                                }`}
+                              >
+                                {Math.round(item.score)}
                               </span>
                             </td>
                           </tr>
@@ -391,30 +442,47 @@ export default function EvaluationPage() {
                   </div>
                 )}
               </div>
-            </>
+            </div>
+
+            <AgentConversationCard
+              badge="Evaluation Agent"
+              title="Hỏi về kết quả học tập"
+              subtitle="Agent sẽ đọc lịch sử điểm, ngày kiểm tra, trạng thái tài liệu và hạn kế hoạch để phân tích đúng vào dữ liệu của bạn."
+              accentClassName="bg-[linear-gradient(135deg,#dbeafe,#eef2ff_45%,#ede9fe)]"
+              placeholder="Ví dụ: Thành tích học tôi thế nào, môn nào tôi kém, tài liệu nào cần ôn tập lại trước kỳ thi..."
+              inputValue={chatInput}
+              sending={sending}
+              slowNotice={slowNotice}
+              messages={chatMessages}
+              suggestions={examples}
+              onInputChange={setChatInput}
+              onSuggestionClick={(value) => setChatInput(value)}
+              onSend={() => void sendEvaluationMessage(chatInput)}
+            />
+          </section>
         )}
       </div>
     </div>
-    <OrbitPanel
-      userId={orbitUserId}
-      classId={classIdMap[selectedSubject] || null}
-      selectedSubject={selectedSubject}
-      enrolledClasses={enrolledSubjects.map((subject) => ({ subject, id: classIdMap[subject] }))}
-      apiBaseUrl={apiBaseUrl}
-    />
-    </>
   );
 }
 
-const StatCard: React.FC<StatCardProps> = ({ icon, label, value, bg, subtitle }) => (
-  <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-4">
-    <div className={`p-3 rounded-xl ${bg}`}>{icon}</div>
-    <div>
-      <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">{label}</p>
-      <div className="flex items-baseline gap-2">
-         <p className="text-2xl font-black text-slate-800">{value}</p>
-         {subtitle && <span className="text-[10px] font-bold text-slate-400 uppercase">{subtitle}</span>}
+function StatCard({ icon, label, value, bg }: StatCardProps) {
+  return (
+    <div className="flex items-center gap-4 rounded-[1.6rem] border border-slate-200 bg-white p-5 shadow-sm">
+      <div className={`rounded-2xl p-3 ${bg}`}>{icon}</div>
+      <div>
+        <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">{label}</p>
+        <p className="text-2xl font-black text-slate-900">{value}</p>
       </div>
     </div>
-  </div>
-);
+  );
+}
+
+function MetricCard({ label, value, accent }: { label: string; value: number; accent: string }) {
+  return (
+    <div className="rounded-[1.4rem] border border-white/10 bg-white/5 p-4 text-center backdrop-blur">
+      <p className="text-[10px] font-black uppercase tracking-[0.16em] text-indigo-200">{label}</p>
+      <p className={`mt-2 text-2xl font-black ${accent}`}>{value}</p>
+    </div>
+  );
+}

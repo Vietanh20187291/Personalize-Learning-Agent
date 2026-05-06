@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { toast } from 'react-hot-toast';
 import {
@@ -19,6 +19,7 @@ import {
 import { useRouter, useSearchParams } from 'next/navigation';
 import FileUploader from '@/components/FileUploader';
 import DocumentManager from '@/components/DocumentManager';
+import { confirmAlert } from '@/services/alerts';
 
 type SubjectItem = {
   id: number;
@@ -60,10 +61,10 @@ const SUBJECT_ICON_OPTIONS = [
   '📡',
 ];
 
-export default function TeacherSubjectsPage() {
+function TeacherSubjectsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8010';
   const [subjects, setSubjects] = useState<SubjectItem[]>([]);
   const [classes, setClasses] = useState<ClassroomItem[]>([]);
   const [loadingSubjects, setLoadingSubjects] = useState(true);
@@ -189,6 +190,14 @@ export default function TeacherSubjectsPage() {
       setSelectedClassId(null);
     }
   }, [selectedSubjectId]);
+
+  useEffect(() => {
+    if (selectedClassId) {
+      // lớp được chọn sẽ được truyền xuống DocumentManager để CRUD tài liệu
+    } else {
+      // giữ nguyên trạng thái rỗng khi chưa chọn lớp
+    }
+  }, [selectedClassId]);
 
   useEffect(() => {
     if (subjects.length === 0) return;
@@ -317,7 +326,14 @@ export default function TeacherSubjectsPage() {
       toast.error('Thiếu token xác thực. Vui lòng đăng nhập lại.');
       return;
     }
-    if (!window.confirm(`Xóa môn học "${s.name}"?`)) return;
+    const confirmed = await confirmAlert({
+      title: "Xóa môn học",
+      message: `Xóa môn học "${s.name}"?`,
+      confirmText: "Xóa môn",
+      cancelText: "Hủy",
+      tone: "danger",
+    });
+    if (!confirmed) return;
 
     try {
       await axios.delete(`${apiBaseUrl}/api/subjects/${s.id}`, { headers: authHeaders });
@@ -374,7 +390,8 @@ export default function TeacherSubjectsPage() {
 
   const handleCopyClassCode = (code: string) => {
     navigator.clipboard.writeText(code);
-    setCopiedClassId(code ? parseInt(code) : null);
+    const matched = classes.find((item) => item.class_code === code);
+    setCopiedClassId(matched?.id ?? null);
     toast.success('Đã copy mã lớp');
     setTimeout(() => setCopiedClassId(null), 2000);
   };
@@ -409,7 +426,14 @@ export default function TeacherSubjectsPage() {
       return;
     }
 
-    if (!window.confirm(`Xóa lớp "${item.name}"? Tài liệu của lớp sẽ bị xóa theo.`)) return;
+    const confirmed = await confirmAlert({
+      title: "Xóa lớp học",
+      message: `Xóa lớp "${item.name}"? Tài liệu của lớp sẽ bị xóa theo.`,
+      confirmText: "Xóa lớp",
+      cancelText: "Hủy",
+      tone: "danger",
+    });
+    if (!confirmed) return;
 
     setSavingClass(true);
     try {
@@ -435,17 +459,47 @@ export default function TeacherSubjectsPage() {
     <div className="min-h-[calc(100vh-4rem)] app-bg p-4 md:p-8">
       <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6">
         <section className="lg:col-span-4 space-y-6">
-          <div className="bg-white rounded-3xl border border-slate-200 p-6 flex items-center gap-4">
-            <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
-              <LibraryBig size={24} />
+          <div className="bg-white rounded-[2rem] border border-slate-200 p-6 shadow-sm">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                <LibraryBig size={24} />
+              </div>
+              <div>
+                <p className="text-[11px] font-black uppercase tracking-[0.24em] text-slate-400">Môn học</p>
+                <h1 className="text-2xl font-black text-slate-800">Không gian quản lý học phần</h1>
+                <p className="text-sm text-slate-500 font-medium mt-1">Chọn môn, tạo lớp, nạp tài liệu và điều phối học liệu theo từng học phần.</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-2xl font-black text-slate-800">Quản Lý Môn Học</h1>
-              <p className="text-sm text-slate-500 font-medium">Chọn môn để quản lý lớp và tài liệu của môn đó</p>
+
+            <div className="mt-5 grid grid-cols-3 gap-3">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <p className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-400">Môn học</p>
+                <p className="mt-1 text-xl font-black text-slate-900">{subjects.length}</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <p className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-400">Lớp học</p>
+                <p className="mt-1 text-xl font-black text-slate-900">{classes.length}</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <p className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-400">Đang chọn</p>
+                <p className="mt-1 truncate text-sm font-black text-slate-900">{selectedSubject?.name || 'Chưa chọn'}</p>
+              </div>
             </div>
           </div>
 
-          <form onSubmit={handleSaveSubject} className="bg-white rounded-3xl border border-slate-200 p-6 space-y-3">
+          <div className="bg-white rounded-[2rem] border border-slate-200 p-6 shadow-sm">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+              <LibraryBig size={24} />
+              </div>
+              <div>
+                <h2 className="text-lg font-black text-slate-800">Tạo hoặc cập nhật môn học</h2>
+                <p className="text-sm text-slate-500 font-medium">Tên môn, icon và mô tả sẽ được dùng xuyên suốt toàn bộ khu vực giảng viên.</p>
+              </div>
+            </div>
+          </div>
+
+          <form onSubmit={handleSaveSubject} className="bg-white rounded-[2rem] border border-slate-200 p-6 shadow-sm space-y-3">
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -490,21 +544,30 @@ export default function TeacherSubjectsPage() {
             </div>
           </form>
 
-          <div className="bg-white rounded-3xl border border-slate-200 p-4">
+          <div className="bg-white rounded-[2rem] border border-slate-200 p-4 shadow-sm">
+            <div className="mb-4 flex items-center justify-between gap-3 px-1">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-400">Danh sách môn</p>
+                <h3 className="mt-1 text-base font-black text-slate-900">Chọn môn để làm việc</h3>
+              </div>
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">
+                {subjects.length} môn
+              </span>
+            </div>
             {loadingSubjects ? (
               <div className="py-10 text-center text-slate-400 font-bold text-xs uppercase">Đang tải môn học...</div>
             ) : subjects.length === 0 ? (
               <div className="py-10 text-center text-slate-400 font-bold text-xs uppercase">Chưa có môn học</div>
             ) : (
-              <div className="space-y-2 max-h-[420px] overflow-auto pr-1">
+              <div className="max-h-[520px] space-y-2 overflow-auto pr-1">
                 {subjects.map((s) => (
                   <button
                     key={s.id}
                     onClick={() => setSelectedSubjectId(s.id)}
-                    className={`w-full text-left p-4 rounded-2xl border transition-all ${
+                    className={`w-full text-left rounded-2xl border p-4 transition-all ${
                       selectedSubjectId === s.id
-                        ? 'bg-indigo-50 border-indigo-200'
-                        : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
+                        ? 'border-indigo-200 bg-indigo-50'
+                        : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
                     }`}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -662,7 +725,7 @@ export default function TeacherSubjectsPage() {
               <div className="bg-white rounded-3xl border border-slate-200 p-6 space-y-4">
                 <div className="flex items-center gap-2 text-slate-800">
                   <FileText size={20} className="text-indigo-600" />
-                  <h2 className="text-lg font-black">Quản lý học liệu của môn</h2>
+                  <h2 className="text-lg font-black">Quản lý học liệu của lớp</h2>
                 </div>
                 <p className="text-sm font-medium text-slate-500">
                   Chọn lớp trong môn để thêm/xóa tài liệu. Luồng upload vẫn gắn theo class_id để AI agents truy cập đúng kho tri thức.
@@ -693,5 +756,21 @@ export default function TeacherSubjectsPage() {
         </section>
       </div>
     </div>
+  );
+}
+
+export default function TeacherSubjectsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="page-shell">
+          <div className="page-container hero-panel flex min-h-[40vh] items-center justify-center">
+            <Loader2 className="animate-spin text-[#8c3b2e]" size={28} />
+          </div>
+        </div>
+      }
+    >
+      <TeacherSubjectsContent />
+    </Suspense>
   );
 }

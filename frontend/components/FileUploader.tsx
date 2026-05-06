@@ -66,7 +66,7 @@ export default function FileUploader({ onUploadSuccess, teacherId, classId, exte
     formData.append("file", selectedFile);
 
     try {
-      const res = await axios.post("http://localhost:8000/api/upload/analyze-subject", formData);
+      const res = await axios.post("http://localhost:8010/api/upload/analyze-subject", formData);
       const suggested = res.data.suggested_subject;
         if (suggested && currentClassSubject && suggested.toLowerCase().trim() === currentClassSubject.toLowerCase().trim()) {
           toast.success(`AI xác nhận tài liệu thuộc môn: ${currentClassSubject}.`);
@@ -118,7 +118,7 @@ export default function FileUploader({ onUploadSuccess, teacherId, classId, exte
     formData.append("class_id", classId.toString()); // Truyền class_id của lớp đang chọn bên trái
 
     try {
-      await axios.post("http://localhost:8000/api/upload/upload", formData, {
+      await axios.post("http://localhost:8010/api/upload/upload", formData, {
         headers: { "Content-Type": "multipart/form-data" },
         onUploadProgress: (ev) => {
           const total = ev.total || file.size || 1;

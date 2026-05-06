@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   AlertCircle
 } from 'lucide-react';
+import { toast } from 'react-hot-toast';
 
 export default function CreateTeacherPage() {
   const [fullname, setFullname] = useState('');
@@ -32,7 +33,7 @@ export default function CreateTeacherPage() {
         throw new Error('Không tìm thấy Token xác thực. Vui lòng đăng nhập lại với quyền Admin!');
       }
 
-      const res = await fetch('http://localhost:8000/api/admin/create-user', {
+      const res = await fetch('http://localhost:8010/api/admin/create-user', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -75,7 +76,7 @@ export default function CreateTeacherPage() {
       navigator.clipboard.writeText(
         `Kính gửi thầy/cô ${newAccount.fullname},\nĐây là tài khoản hệ thống của thầy/cô:\n- Tài khoản: ${newAccount.email}\n- Mật khẩu: ${newAccount.password}\nVui lòng đăng nhập và đổi mật khẩu!`
       );
-      alert('Đã copy thông tin tài khoản thành công!');
+      toast.success('Đã copy thông tin tài khoản thành công!');
     }
   };
 

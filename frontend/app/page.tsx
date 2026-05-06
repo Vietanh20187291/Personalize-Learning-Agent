@@ -1,128 +1,181 @@
 "use client";
-import React from 'react';
-import Link from 'next/link';
-import { 
-  BrainCircuit, 
-  Sparkles, 
-  BookOpen, 
-  GraduationCap, 
-  ArrowRight, 
-  Zap,
-  ShieldCheck,
-  Layout
-} from 'lucide-react';
+
+import Link from "next/link";
+import {
+  ArrowRight,
+  BookOpen,
+  BrainCircuit,
+  ChartNoAxesCombined,
+  Layers3,
+  Sparkles,
+  Target,
+  Users,
+} from "lucide-react";
+
+const featureCards = [
+  {
+    icon: BrainCircuit,
+    title: "Tác nhân theo ngữ cảnh thật",
+    description: "Agent phản hồi theo tài liệu, buổi học, lịch sử điểm và trạng thái học thay vì một hộp chat chung chung.",
+  },
+  {
+    icon: BookOpen,
+    title: "Ngân hàng câu hỏi gắn với tài liệu",
+    description: "Mỗi câu hỏi có thể truy vết nguồn tài liệu và được sinh thêm theo từng bộ đề, từng chương, từng lớp.",
+  },
+  {
+    icon: ChartNoAxesCombined,
+    title: "Đánh giá tiến độ liền mạch",
+    description: "Điểm, nỗ lực và mức độ hoàn thành được ghép lại để hiển thị một nhịp học sát với tình hình thật.",
+  },
+];
+
+const studioBlocks = [
+  { label: "Học viên", value: "Orbit, lộ trình, quiz và thư viện tài liệu hiện diện trong một dòng trải nghiệm liên tục." },
+  { label: "Giảng viên", value: "Quản lý lớp, tài liệu, đề thi và kho câu hỏi từ cùng một mặt bằng điều phối." },
+  { label: "Admin", value: "Cấp tài khoản và giữ được bộ khung vận hành gọn sạch, rõ quyền và dễ mở rộng." },
+];
 
 export default function HomePage() {
   return (
-    <div className="min-h-screen app-bg font-sans text-slate-900 selection:bg-teal-100 selection:text-teal-800">
-      
-      {/* 1. THANH ĐIỀU HƯỚNG TINH GỌN */}
-      <nav className="fixed top-0 w-full bg-white/70 backdrop-blur-xl border-b border-slate-200 z-50 px-6 py-3">
-        <div className="max-w-6xl mx-auto flex justify-between items-center">
-          <div className="flex items-center gap-2 group cursor-pointer">
-            <div className="w-8 h-8 bg-gradient-to-br from-teal-600 to-sky-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-teal-200 group-hover:rotate-6 transition-transform">
-              <BrainCircuit size={18} />
-            </div>
-            <h1 className="display-font text-sm font-black text-slate-800 uppercase tracking-tighter">
-              AI Learning Agent
-            </h1>
-          </div>
-          
-          <div className="flex items-center gap-2">
-            <Link href="/auth" className="text-[11px] font-bold text-slate-500 hover:text-teal-700 uppercase tracking-widest px-4 py-2 transition-all">
-              Đăng nhập
-            </Link>
-            <Link 
-              href="/auth?mode=register" 
-              className="px-5 py-2 bg-slate-900 text-white rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-teal-700 transition-all shadow-xl active:scale-95"
-            >
-              Đăng ký
-            </Link>
-          </div>
-        </div>
-      </nav>
-
-      {/* 2. HERO SECTION - THU NHỎ & TINH TẾ */}
-      <header className="pt-32 pb-16 px-6">
-        <div className="max-w-4xl mx-auto text-center space-y-6">
-          <div className="inline-flex items-center gap-2 px-3 py-1 bg-white/70 text-teal-700 rounded-full border border-teal-100 shadow-sm animate-in fade-in slide-in-from-top-4 duration-700">
-            <Sparkles size={12} />
-            <span className="text-[9px] font-black uppercase tracking-[0.2em]">Hệ thống tri thức cá nhân hóa</span>
-          </div>
-
-          <h2 className="display-font text-4xl md:text-6xl font-black text-slate-900 tracking-tight leading-[1.1]">
-            Học tập đột phá cùng <br/>
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-teal-600 to-sky-600">
-              Trợ lý AI Agent
-            </span>
-          </h2>
-
-          <p className="text-slate-500 text-sm md:text-base font-medium max-w-xl mx-auto leading-relaxed">
-            Kết nối tri thức từ giáo viên và sức mạnh AI để xây dựng lộ trình vá lỗ hổng kiến thức chuẩn xác cho từng học sinh.
-          </p>
-
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-4">
-            <Link 
-              href="/auth?mode=register" 
-              className="w-full sm:w-auto flex items-center justify-center gap-2 px-8 py-3.5 bg-teal-700 text-white rounded-full text-[11px] font-black uppercase tracking-widest hover:bg-slate-900 transition-all shadow-2xl shadow-teal-100 group active:scale-95"
-            >
-              Bắt đầu hành trình <ArrowRight size={16} className="group-hover:translate-x-1 transition-transform" />
-            </Link>
-            <button className="w-full sm:w-auto px-8 py-3.5 bg-white/80 backdrop-blur text-slate-600 border border-slate-200 rounded-full text-[11px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all active:scale-95">
-              Xem bản demo
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* 3. TÍNH NĂNG - GRID NHỎ GỌN */}
-      <section className="py-20 border-t border-slate-200/70 bg-white/40 backdrop-blur-sm">
-        <div className="max-w-6xl mx-auto px-6">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            
-            {/* Feature 1 */}
-            <div className="bg-white/85 backdrop-blur p-8 rounded-[2rem] border border-slate-200/60 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 group">
-              <div className="w-10 h-10 bg-teal-50 text-teal-700 rounded-xl flex items-center justify-center mb-6 group-hover:bg-teal-700 group-hover:text-white transition-all shadow-inner">
-                <Zap size={20} />
+    <div className="page-shell">
+      <div className="page-container space-y-8">
+        <section className="hero-panel overflow-hidden px-6 py-8 md:px-9 md:py-10">
+          <div className="grid gap-8 xl:grid-cols-[1.15fr_0.85fr]">
+            <div className="space-y-8">
+              <div className="command-badge">
+                <Sparkles size={14} />
+                Nova Campus
               </div>
-              <h3 className="text-sm font-black text-slate-800 mb-3 uppercase tracking-tight">AI Adaptive Learning</h3>
-              <p className="text-[12px] text-slate-500 font-medium leading-relaxed">
-                Phân tích lỗi sai từ bài thi để tự động thiết lập lộ trình học tập tối ưu nhất.
-              </p>
-            </div>
 
-            {/* Feature 2 */}
-            <div className="bg-white/85 backdrop-blur p-8 rounded-[2rem] border border-slate-200/60 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 group">
-              <div className="w-10 h-10 bg-sky-50 text-sky-700 rounded-xl flex items-center justify-center mb-6 group-hover:bg-sky-700 group-hover:text-white transition-all shadow-inner">
-                <BookOpen size={20} />
+              <div className="space-y-5">
+                <h1 className="display-font max-w-4xl text-5xl font-semibold leading-[0.94] text-slate-950 md:text-7xl">
+                  Một không gian học tập sáng, sạch và có cảm giác như một sản phẩm cao cấp.
+                </h1>
+                <p className="max-w-2xl text-base leading-8 text-slate-600 md:text-lg">
+                  Nền tảng gom agent, tài liệu, quiz và phân tích thành một không gian học tập thống nhất. Người học thao tác trên
+                  một giao diện nhẹ, rõ, có nhịp điệu như một ứng dụng sản phẩm thay vì một dashboard giáo dục cũ.
+                </p>
               </div>
-              <h3 className="text-sm font-black text-slate-800 mb-3 uppercase tracking-tight">Kho tài liệu RAG</h3>
-              <p className="text-[12px] text-slate-500 font-medium leading-relaxed">
-                Dữ liệu được trích xuất từ tài liệu chính thống của giáo viên, đảm bảo độ tin cậy.
-              </p>
-            </div>
 
-            {/* Feature 3 */}
-            <div className="bg-white/85 backdrop-blur p-8 rounded-[2rem] border border-slate-200/60 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 group">
-              <div className="w-10 h-10 bg-orange-50 text-orange-600 rounded-xl flex items-center justify-center mb-6 group-hover:bg-orange-600 group-hover:text-white transition-all shadow-inner">
-                <Layout size={20} />
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <Link href="/auth" className="app-btn-primary px-6">
+                  Đăng nhập
+                  <ArrowRight size={18} />
+                </Link>
+                <Link href="/auth?mode=register" className="app-btn-dark px-6">
+                  Tạo tài khoản mới
+                </Link>
               </div>
-              <h3 className="text-sm font-black text-slate-800 mb-3 uppercase tracking-tight">Quản lý lớp học</h3>
-              <p className="text-[12px] text-slate-500 font-medium leading-relaxed">
-                Dễ dàng tạo lớp, chia sẻ mã tham gia và theo dõi sự tiến bộ của từng học sinh.
-              </p>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                {studioBlocks.map((item) => (
+                  <div key={item.label} className="metric-panel px-5 py-5">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">{item.label}</p>
+                    <p className="mt-3 text-sm leading-7 text-slate-700">{item.value}</p>
+                  </div>
+                ))}
+              </div>
             </div>
 
+            <div className="section-panel relative overflow-hidden p-6 md:p-7">
+              <div className="absolute inset-x-0 top-0 h-28 bg-[radial-gradient(circle_at_top,rgba(0,113,227,0.18),transparent_72%)]" />
+              <div className="relative space-y-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">Bản xem trước</p>
+                    <h2 className="mt-2 text-2xl font-semibold text-slate-950">Giao diện theo nhịp sử dụng</h2>
+                  </div>
+                  <div className="rounded-full bg-[rgba(0,113,227,0.08)] px-3 py-1 text-[11px] font-semibold text-[var(--brand)]">
+                    Cảm hứng Apple
+                  </div>
+                </div>
+
+                <div className="grid gap-3">
+                  <div className="ghost-panel p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-slate-400">Navbar</p>
+                        <p className="mt-2 text-sm font-semibold text-slate-900">Floating, bo tròn, trong suốt và tập trung điều hướng.</p>
+                      </div>
+                      <div className="flex gap-2">
+                        <span className="h-3 w-3 rounded-full bg-slate-200" />
+                        <span className="h-3 w-3 rounded-full bg-slate-300" />
+                        <span className="h-3 w-3 rounded-full bg-[var(--brand)]/70" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="metric-panel p-4">
+                      <Layers3 className="h-5 w-5 text-[var(--brand)]" />
+                      <p className="mt-4 text-sm font-semibold text-slate-950">Card và container được phân lớp rõ ràng.</p>
+                    </div>
+                    <div className="metric-panel p-4">
+                      <Target className="h-5 w-5 text-[var(--brand)]" />
+                      <p className="mt-4 text-sm font-semibold text-slate-950">Hành động chính được đưa lên bằng button dạng capsule.</p>
+                    </div>
+                  </div>
+
+                  <div className="soft-grid ghost-panel p-5">
+                    <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-center">
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-slate-400">Bề mặt tương tác</p>
+                        <p className="mt-2 text-sm leading-7 text-slate-700">
+                          Dropdown, menu và notification panel hiện như những sheet nhỏ, mềm, sáng và tách khỏi nền thay vì khối hộp cứng.
+                        </p>
+                      </div>
+                      <div className="rounded-[1.5rem] bg-white/86 px-4 py-4 shadow-[0_18px_34px_rgba(15,23,42,0.08)]">
+                        <p className="text-[11px] font-semibold text-slate-500">Nhịp phản hồi</p>
+                        <p className="mt-1 text-3xl font-semibold text-slate-950">Mượt và gọn</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      {/* 4. FOOTER */}
-      <footer className="py-10 text-center border-t border-slate-200/70">
-        <p className="text-[9px] font-black text-slate-300 uppercase tracking-[0.4em]">
-          Dự án Học tập Cá nhân hóa • 2026
-        </p>
-      </footer>
+        <section className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+          <div className="grid gap-4 md:grid-cols-3">
+            {featureCards.map((item) => (
+              <article key={item.title} className="section-panel p-6">
+                <div className="flex h-11 w-11 items-center justify-center rounded-full bg-[rgba(0,113,227,0.1)] text-[var(--brand)]">
+                  <item.icon size={20} />
+                </div>
+                <h2 className="mt-5 text-xl font-semibold text-slate-950">{item.title}</h2>
+                <p className="mt-3 text-sm leading-7 text-slate-600">{item.description}</p>
+              </article>
+            ))}
+          </div>
+
+          <div className="hero-panel p-6 md:p-7">
+            <div className="flex items-center gap-3">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[linear-gradient(180deg,#0f172a,#2563eb)] text-white">
+                <Users size={20} />
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">Cảm giác sử dụng</p>
+                <h2 className="mt-1 text-2xl font-semibold text-slate-950">Từ dashboard sang sản phẩm</h2>
+              </div>
+            </div>
+
+            <div className="mt-6 space-y-3">
+              {[
+                "Khoảng trắng rộng hơn, nhìn thoáng và dễ tập trung.",
+                "Màu trắng, xám xanh và blue accent thay cho cảm giác template chung.",
+                "Navbar không còn là thanh điều hướng thẳng; nó là một floating control bar.",
+                "Card, panel, dropdown và action được bố trí mềm, phân cấp rõ và nhất quán.",
+              ].map((item) => (
+                <div key={item} className="ghost-panel px-4 py-4 text-sm leading-7 text-slate-700">
+                  {item}
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
   );
 }

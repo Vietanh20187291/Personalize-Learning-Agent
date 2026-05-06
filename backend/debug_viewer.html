@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Debug Viewer - Real-time</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0d1117;
+            color: #e6edf3;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        header {
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 16px;
+            flex-shrink: 0;
+        }
+
+        h1 {
+            font-size: 18px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #f85149;
+            animation: pulse-off 1s infinite;
+        }
+
+        .status-indicator.connected {
+            background: #3fb950;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        @keyframes pulse-off {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 0.2; }
+        }
+
+        .stats {
+            font-size: 12px;
+            color: #8b949e;
+            margin-top: 4px;
+        }
+
+        .logs-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            background: #0d1117;
+        }
+
+        .log-entry {
+            margin-bottom: 16px;
+            padding: 12px;
+            background: #161b22;
+            border-left: 3px solid #30363d;
+            border-radius: 4px;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .log-entry.request {
+            border-left-color: #1f6feb;
+        }
+
+        .log-entry.response {
+            border-left-color: #3fb950;
+        }
+
+        .log-entry.error {
+            border-left-color: #f85149;
+        }
+
+        .log-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 12px;
+            color: #8b949e;
+        }
+
+        .log-type {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-right: 8px;
+        }
+
+        .log-type.request {
+            background: rgba(31, 111, 235, 0.2);
+            color: #79c0ff;
+        }
+
+        .log-type.response {
+            background: rgba(63, 185, 80, 0.2);
+            color: #79f0a0;
+        }
+
+        .log-type.error {
+            background: rgba(248, 81, 73, 0.2);
+            color: #ff7b72;
+        }
+
+        .log-timestamp {
+            color: #666;
+            font-size: 11px;
+        }
+
+        .log-content {
+            background: #0d1117;
+            padding: 10px;
+            border-radius: 3px;
+            font-size: 12px;
+            line-height: 1.4;
+            word-wrap: break-word;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .log-content::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .log-content::-webkit-scrollbar-track {
+            background: #0d1117;
+        }
+
+        .log-content::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 3px;
+        }
+
+        .log-content::-webkit-scrollbar-thumb:hover {
+            background: #444c56;
+        }
+
+        .log-label {
+            color: #79c0ff;
+            font-weight: 600;
+            margin-top: 4px;
+        }
+
+        .log-label:first-child {
+            margin-top: 0;
+        }
+
+        .log-value {
+            color: #c9d1d9;
+            margin-left: 8px;
+            word-break: break-all;
+        }
+
+        .duration {
+            display: inline-block;
+            padding: 2px 6px;
+            background: rgba(177, 186, 196, 0.1);
+            border-radius: 3px;
+            color: #8b949e;
+            font-size: 11px;
+            margin-left: 8px;
+        }
+
+        .no-logs {
+            color: #8b949e;
+            text-align: center;
+            padding: 40px;
+            font-style: italic;
+        }
+
+        footer {
+            background: #161b22;
+            border-top: 1px solid #30363d;
+            padding: 8px 16px;
+            font-size: 11px;
+            color: #666;
+            flex-shrink: 0;
+        }
+
+        /* Scrollbar styling for main logs container */
+        .logs-container::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .logs-container::-webkit-scrollbar-track {
+            background: #0d1117;
+        }
+
+        .logs-container::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 4px;
+        }
+
+        .logs-container::-webkit-scrollbar-thumb:hover {
+            background: #444c56;
+        }
+
+        .error-box {
+            background: rgba(248, 81, 73, 0.1);
+            border: 1px solid #f85149;
+            padding: 12px;
+            border-radius: 4px;
+            margin: 16px;
+            color: #ff7b72;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>
+                <span class="status-indicator" id="statusIndicator"></span>
+                LLM Debug Viewer
+            </h1>
+            <div class="stats">
+                Status: <span id="connectionStatus">Connecting...</span> | 
+                Requests: <span id="requestCount">0</span> | 
+                Responses: <span id="responseCount">0</span>
+            </div>
+        </header>
+
+        <div class="logs-container" id="logsContainer">
+            <div class="no-logs">Waiting for LLM events...</div>
+        </div>
+
+        <footer>
+            Real-time LLM debugging with Server-Sent Events (SSE) • Logs are kept in memory
+        </footer>
+    </div>
+
+    <script>
+        const API_BASE = "http://localhost:8000";
+        const logsContainer = document.getElementById("logsContainer");
+        const statusIndicator = document.getElementById("statusIndicator");
+        const connectionStatus = document.getElementById("connectionStatus");
+        const requestCount = document.getElementById("requestCount");
+        const responseCount = document.getElementById("responseCount");
+
+        let requests = 0;
+        let responses = 0;
+        let isConnected = false;
+
+        function connect() {
+            const eventSource = new EventSource(`${API_BASE}/debug/stream`);
+
+            eventSource.onopen = function () {
+                console.log("Connected to debug stream");
+                isConnected = true;
+                connectionStatus.textContent = "Connected";
+                statusIndicator.classList.add("connected");
+                clearNoLogsMessage();
+            };
+
+            eventSource.onmessage = function (event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    displayLog(data);
+                } catch (e) {
+                    console.error("Failed to parse event data:", e);
+                }
+            };
+
+            eventSource.onerror = function () {
+                console.error("EventSource error");
+                isConnected = false;
+                connectionStatus.textContent = "Disconnected";
+                statusIndicator.classList.remove("connected");
+                eventSource.close();
+
+                // Attempt to reconnect after 3 seconds
+                setTimeout(connect, 3000);
+            };
+        }
+
+        function clearNoLogsMessage() {
+            if (logsContainer.querySelector(".no-logs")) {
+                logsContainer.innerHTML = "";
+            }
+        }
+
+        function displayLog(data) {
+            const entry = document.createElement("div");
+            entry.className = `log-entry ${data.type}`;
+
+            const timestamp = new Date(data.timestamp);
+            const timeStr = timestamp.toLocaleTimeString();
+
+            let content = "";
+
+            if (data.type === "llm_request") {
+                requests++;
+                requestCount.textContent = requests;
+                content = `
+                    <div class="log-header">
+                        <div>
+                            <span class="log-type request">➜ Request</span>
+                            <span class="log-timestamp">${timeStr}</span>
+                        </div>
+                    </div>
+                    <div class="log-content">
+                        ${data.system_prompt ? `
+                            <div class="log-label">System Prompt:</div>
+                            <div class="log-value">${escapeHtml(data.system_prompt)}</div>
+                        ` : ""}
+                        ${data.prompt ? `
+                            <div class="log-label" ${data.system_prompt ? 'style="margin-top: 8px;"' : ''}>User Prompt:</div>
+                            <div class="log-value">${escapeHtml(data.prompt)}</div>
+                        ` : ""}
+                    </div>
+                `;
+            } else if (data.type === "llm_response") {
+                responses++;
+                responseCount.textContent = responses;
+                content = `
+                    <div class="log-header">
+                        <div>
+                            <span class="log-type response">⬅ Response</span>
+                            <span class="log-timestamp">${timeStr}</span>
+                        </div>
+                        <span class="duration">${data.duration_ms}ms</span>
+                    </div>
+                    <div class="log-content">
+                        <div class="log-label">Response:</div>
+                        <div class="log-value">${escapeHtml(data.response)}</div>
+                    </div>
+                `;
+            } else if (data.type === "llm_error") {
+                content = `
+                    <div class="log-header">
+                        <div>
+                            <span class="log-type error">✕ Error</span>
+                            <span class="log-timestamp">${timeStr}</span>
+                        </div>
+                        <span class="duration">${data.duration_ms}ms</span>
+                    </div>
+                    <div class="log-content">
+                        <div class="log-label">Error:</div>
+                        <div class="log-value">${escapeHtml(data.error)}</div>
+                    </div>
+                `;
+            }
+
+            entry.innerHTML = content;
+            logsContainer.appendChild(entry);
+
+            // Auto-scroll to bottom
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement("div");
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Start connection on page load
+        connect();
+    </script>
+</body>
+</html>

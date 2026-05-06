@@ -2,10 +2,11 @@ import os
 import json
 import re
 from datetime import datetime
+from typing import Optional
 from groq import Groq
 from dotenv import load_dotenv
 from sqlalchemy import func
-from db.models import QuestionBank, UserLoginSession
+from db.models import AssessmentHistory, Document, QuestionBank, StudentDocumentEvaluation, StudentDocumentScoreHistory, StudentLearningPlanStep, UserLoginSession
 from rag.vector_store import get_vector_store
 from services.score_metrics import compute_subject_score_metrics
 
@@ -61,6 +62,137 @@ class EvaluationAgent:
             "total_minutes": total_minutes,
             "session_count": counted_sessions,
         }
+
+    def chat_about_progress(self, user_id: int, message: str, subject: Optional[str] = None):
+        clean_message = str(message or "").strip()
+        clean_subject = str(subject or "").strip()
+        if not clean_message:
+            return "Hãy đặt câu hỏi cụ thể về thành tích học tập của bạn."
+
+        history_query = self.db.query(AssessmentHistory).filter(AssessmentHistory.user_id == user_id)
+        score_query = self.db.query(StudentDocumentScoreHistory).filter(StudentDocumentScoreHistory.user_id == user_id)
+        eval_query = self.db.query(StudentDocumentEvaluation).filter(StudentDocumentEvaluation.user_id == user_id)
+        doc_query = self.db.query(Document)
+
+        if clean_subject:
+            history_query = history_query.filter(AssessmentHistory.subject == clean_subject)
+            doc_query = doc_query.filter(Document.subject == clean_subject)
+
+        doc_rows = doc_query.all()
+        doc_ids = [int(item.id) for item in doc_rows]
+        if clean_subject:
+            if doc_ids:
+                score_query = score_query.filter(StudentDocumentScoreHistory.document_id.in_(doc_ids))
+                eval_query = eval_query.filter(StudentDocumentEvaluation.document_id.in_(doc_ids))
+            else:
+                score_query = score_query.filter(StudentDocumentScoreHistory.document_id.in_([-1]))
+                eval_query = eval_query.filter(StudentDocumentEvaluation.document_id.in_([-1]))
+
+        history_rows = history_query.order_by(AssessmentHistory.timestamp.desc()).limit(20).all()
+        score_rows = score_query.order_by(StudentDocumentScoreHistory.tested_at.desc()).limit(40).all()
+        document_ids = sorted({int(item.document_id) for item in score_rows})
+        if document_ids:
+            eval_query = eval_query.filter(StudentDocumentEvaluation.document_id.in_(document_ids))
+        eval_rows = eval_query.order_by(StudentDocumentEvaluation.updated_at.desc()).all()
+        plan_step_query = self.db.query(StudentLearningPlanStep).filter(StudentLearningPlanStep.user_id == user_id)
+        if document_ids:
+            plan_step_query = plan_step_query.filter(StudentLearningPlanStep.document_id.in_(document_ids))
+        plan_rows = plan_step_query.order_by(
+            StudentLearningPlanStep.updated_at.desc(),
+            StudentLearningPlanStep.id.desc(),
+        ).all()
+        doc_name_map = {
+            int(item.id): str(item.title or item.filename or f"Tai lieu {item.id}")
+            for item in doc_rows
+        }
+        latest_plan_by_doc = {}
+        for item in plan_rows:
+            latest_plan_by_doc.setdefault(int(item.document_id), item)
+
+        avg_score = 0.0
+        best_score = 0.0
+        if history_rows:
+            avg_score = round(sum(float(item.score or 0.0) for item in history_rows) / len(history_rows), 2)
+            best_score = round(max(float(item.score or 0.0) for item in history_rows), 2)
+
+        recent_tests = [
+            {
+                "subject": str(item.subject or ""),
+                "score": float(item.score or 0.0),
+                "test_type": str(item.test_type or ""),
+                "date": item.timestamp.isoformat() if item.timestamp else None,
+            }
+            for item in history_rows
+        ]
+        document_scores = [
+            {
+                "document_id": int(item.document_id),
+                "document_title": doc_name_map.get(int(item.document_id), f"Tai lieu {item.document_id}"),
+                "score": float(item.score or 0.0),
+                "test_type": str(item.test_type or ""),
+                "tested_at": item.tested_at.isoformat() if item.tested_at else None,
+            }
+            for item in score_rows
+        ]
+        document_status = [
+            {
+                "document_id": int(item.document_id),
+                "document_title": doc_name_map.get(int(item.document_id), f"Tai lieu {item.document_id}"),
+                "latest_score": float(item.latest_score or 0.0),
+                "attempts": int(item.attempts or 0),
+                "is_completed": bool(item.is_completed),
+                "last_test_at": item.last_test_at.isoformat() if item.last_test_at else None,
+                "planned_date": latest_plan_by_doc.get(int(item.document_id)).planned_date.isoformat()
+                if latest_plan_by_doc.get(int(item.document_id)) and latest_plan_by_doc.get(int(item.document_id)).planned_date
+                else None,
+                "deadline_date": latest_plan_by_doc.get(int(item.document_id)).deadline_date.isoformat()
+                if latest_plan_by_doc.get(int(item.document_id)) and latest_plan_by_doc.get(int(item.document_id)).deadline_date
+                else None,
+            }
+            for item in eval_rows
+        ]
+
+        fallback = (
+            f"Bạn đã có {len(recent_tests)} lần kiểm tra"
+            f"{' cho môn ' + clean_subject if clean_subject else ''}. "
+            f"Điểm trung bình hiện tại là {avg_score:.1f}, điểm cao nhất là {best_score:.1f}. "
+            "Nếu bạn muốn, tôi có thể chỉ rõ môn hoặc tài liệu đang yếu nhất của bạn."
+        )
+
+        try:
+            prompt = f"""
+Ban la Evaluation Agent cho sinh vien.
+Hay tra loi bang tieng Viet, ngan gon, dua tren du lieu, khong noi chung chung.
+Neu co the, chi ro mon hoac tai lieu dang yeu va de xuat buoc tiep theo.
+Tra loi toi da 6 cau.
+
+Mon dang xem: {clean_subject or "Tat ca"}
+Cau hoi cua sinh vien: {clean_message}
+
+Tom tat nhanh:
+- So bai kiem tra gan day: {len(recent_tests)}
+- Diem trung binh: {avg_score}
+- Diem cao nhat: {best_score}
+
+Lich su bai kiem tra:
+{json.dumps(recent_tests, ensure_ascii=False)}
+
+Lich su diem theo tai lieu:
+{json.dumps(document_scores, ensure_ascii=False)}
+
+Trang thai tai lieu:
+{json.dumps(document_status, ensure_ascii=False)}
+""".strip()
+            completion = self.client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=self.model,
+                temperature=0.3,
+                max_tokens=500,
+            )
+            reply = str(completion.choices[0].message.content or "").strip()
+            return reply or fallback
+        except Exception:
+            return fallback
 
     def evaluate_performance(self, user_id: int, subject: str, current_score: float, test_type: str):
         """

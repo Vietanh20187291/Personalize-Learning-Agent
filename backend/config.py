@@ -1,9 +1,18 @@
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load file .env
-load_dotenv()
+# Load file .env and let it override stale shell variables.
+load_dotenv(override=True)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 
 class Settings:
    
@@ -19,6 +28,14 @@ class Settings:
     else:
         DATABASE_URL = _raw_database_url
     CHROMA_DB_DIR = "chroma_db"
+    REQUEST_SLOW_LOG_SECONDS = float(
+        os.getenv("REQUEST_SLOW_LOG_SECONDS", os.getenv("REQUEST_TIMEOUT_SECONDS", "75"))
+    )
+    PREVIEW_CACHE_TTL_SECONDS = int(os.getenv("PREVIEW_CACHE_TTL_SECONDS", "900"))
+    ADAPTIVE_AGENT_TIMEOUT_SECONDS = float(os.getenv("ADAPTIVE_AGENT_TIMEOUT_SECONDS", "18") or 18)
+    RAG_EMBEDDINGS_ENABLED = _env_flag(
+        "RAG_EMBEDDINGS_ENABLED",
+        default=not sys.platform.startswith("win"),
+    )
 
 settings = Settings()
-

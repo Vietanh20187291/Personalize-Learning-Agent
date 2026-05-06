@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
 import { Send, Minimize2, Flame, Smile, MessageSquare } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+
+import { apiClient, longRequestConfig, normalizeApiError, runLongRequest } from '../services/api';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -12,7 +13,8 @@ interface PendingOrbitAction {
   action_type?: string;
   confirm_button_text?: string;
   should_auto_execute?: boolean;
-  params?: Record<string, any>;
+  session_id?: number | null;
+  params?: Record<string, unknown>;
 }
 
 interface OrbitPanelSnapshot {
@@ -27,6 +29,11 @@ interface OrbitPanelSnapshot {
 
 const orbitPanelCache = new Map<string, OrbitPanelSnapshot>();
 
+interface EnrolledClassSummary {
+  id?: number | null;
+  subject?: string;
+}
+
 interface OrbitPanelProps {
   userId: number;
   classId?: number | null;
@@ -34,7 +41,7 @@ interface OrbitPanelProps {
   sourceFile?: string;
   selectedSubject?: string;
   onAction?: (actionMetadata: PendingOrbitAction) => Promise<void>;
-  enrolledClasses?: any[];
+  enrolledClasses?: EnrolledClassSummary[];
   apiBaseUrl: string;
 }
 
@@ -55,6 +62,7 @@ export default function OrbitPanel({
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loadingChat, setLoadingChat] = useState(false);
+  const [slowChatNotice, setSlowChatNotice] = useState(false);
   const [pendingOrbitAction, setPendingOrbitAction] = useState<PendingOrbitAction | null>(null);
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [hydrated, setHydrated] = useState(false);
@@ -137,12 +145,20 @@ export default function OrbitPanel({
     const fetchHistory = async () => {
       try {
         const params = sessionId ? { session_id: sessionId, limit: 40 } : { limit: 40 };
-        const res = await axios.get(`${apiBaseUrl}/api/orbit/history/${userId}`, { params });
-        const serverMessages = Array.isArray(res.data?.messages)
-          ? res.data.messages
-              .map((item: any) => ({ role: item?.role, content: item?.content }))
-              .filter((item: any) => (item.role === 'user' || item.role === 'assistant') && typeof item.content === 'string')
+        const res = await apiClient.get(`/api/orbit/history/${userId}`, {
+          params,
+          baseURL: apiBaseUrl,
+          timeout: 12000,
+        });
+        const rawMessages = Array.isArray(res.data?.messages)
+          ? (res.data.messages as Array<{ role?: unknown; content?: unknown }>)
           : [];
+        const serverMessages = rawMessages
+          .map((item) => ({ role: item?.role, content: item?.content }))
+          .filter(
+            (item): item is Message =>
+              (item.role === 'user' || item.role === 'assistant') && typeof item.content === 'string'
+          );
         if (serverMessages.length > 0) {
           setMessages(serverMessages.slice(-40));
         }
@@ -190,21 +206,36 @@ export default function OrbitPanel({
     try {
       const fallbackSubject = selectedSubject || enrolledClasses[0]?.subject || 'all';
       const fallbackClassId = enrolledClasses.find((c) => c.subject === fallbackSubject)?.id || classId || null;
-      
-      const res = await axios.post(`${apiBaseUrl}/api/orbit/chat`, {
-        subject: fallbackSubject,
-        message,
-        user_id: userId,
-        class_id: fallbackClassId,
-        document_id: documentId || null,
-        source_file: sourceFile || '',
-        session_id: sessionId,
-      });
 
+      const res = await runLongRequest(
+        () =>
+          apiClient.post(
+            '/api/orbit/chat',
+            {
+              subject: fallbackSubject,
+              message,
+              user_id: userId,
+              class_id: fallbackClassId,
+              document_id: documentId || null,
+              source_file: sourceFile || '',
+              session_id: sessionId,
+            },
+            {
+              ...longRequestConfig,
+              baseURL: apiBaseUrl,
+            }
+          ),
+        {
+          onSlowStateChange: setSlowChatNotice,
+          slowDelayMs: 4500,
+        }
+      );
+
+      const nextSessionId = typeof res.data?.session_id === 'number' ? res.data.session_id : sessionId;
       if (typeof res.data?.session_id === 'number') {
         setSessionId(res.data.session_id);
       }
-      
+
       setMessages((prev) => [...prev, { role: 'assistant', content: res.data.reply }]);
       if (res.data?.orbit_mode === 'angry' || res.data?.orbit_mode === 'happy') {
         setOrbitMode(res.data.orbit_mode);
@@ -212,18 +243,19 @@ export default function OrbitPanel({
       if (res.data?.orbit_status_text) {
         setOrbitStatusText(String(res.data.orbit_status_text));
       }
-      if (res.data?.action_metadata?.should_auto_execute) {
-        await executeOrbitAction(res.data.action_metadata);
+      const actionMetadata = res.data?.action_metadata
+        ? { ...res.data.action_metadata, session_id: nextSessionId }
+        : null;
+      if (actionMetadata?.should_auto_execute) {
+        await executeOrbitAction(actionMetadata);
         setPendingOrbitAction(null);
-      } else if (res.data?.action_metadata?.action_type === 'open_document') {
-        setPendingOrbitAction(res.data.action_metadata);
+      } else if (actionMetadata?.action_type === 'open_document') {
+        setPendingOrbitAction(actionMetadata);
       } else {
         setPendingOrbitAction(null);
       }
     } catch (e: unknown) {
-      const realError = axios.isAxiosError(e)
-        ? (e.response?.data?.detail as string) || e.message || 'Lỗi đường truyền API'
-        : 'Lỗi đường truyền API';
+      const realError = normalizeApiError(e, 'Orbit tạm thời chưa thể phản hồi.');
       setMessages((prev) => [...prev, { role: 'assistant', content: `❌ **Hệ thống báo lỗi:** ${String(realError)}` }]);
     } finally {
       setLoadingChat(false);
@@ -257,32 +289,33 @@ export default function OrbitPanel({
       {orbitCollapsed && (
         <button
           onClick={() => setOrbitCollapsed(false)}
-          className="nova-launcher fixed bottom-5 right-5 z-[80]"
+          className={`agent-launcher fixed bottom-5 right-5 z-[80] ${isOrbitAngry ? 'agent-launcher--orbit-angry' : 'agent-launcher--orbit'}`}
           title="Mở Orbit"
           aria-label="Mở Orbit"
         >
-          <span className="nova-launcher-glow" />
+          <span className="agent-launcher-shimmer" />
+          <span className="agent-launcher-core" />
           <img
             src={orbitMascot}
             alt="Orbit"
-            className="h-11 w-11 rounded-full object-cover border border-white/70"
+            className="agent-launcher-image h-10 w-10 rounded-full border border-white/65 object-cover shadow-[0_0_18px_rgba(255,255,255,0.18)]"
           />
           <span className="sr-only">Mở Orbit</span>
         </button>
       )}
 
       {!orbitCollapsed && (
-        <div className={`fixed right-4 top-[96px] z-30 w-[430px] max-w-[92vw] h-[calc(100vh-120px)] flex flex-col bg-white rounded-2xl border shadow-2xl overflow-hidden ${orbitPanelClass}`}>
-          <div className={`border-b flex items-end justify-between px-3 py-2 bg-gradient-to-r shrink-0 ${orbitHeaderBg}`}>
-            <div className="flex items-end gap-2">
+        <div className={`fixed right-4 top-[96px] z-30 flex h-[calc(100vh-136px)] w-[372px] max-w-[90vw] flex-col overflow-hidden rounded-[1.35rem] border bg-white shadow-2xl ${orbitPanelClass}`}>
+          <div className={`border-b flex items-center justify-between px-4 py-3 bg-gradient-to-r shrink-0 ${orbitHeaderBg}`}>
+            <div className="flex items-center gap-3">
               <img
                 src={orbitMascot}
                 alt="Orbit Teacher"
-                className="h-12 w-auto object-contain"
+                className="h-9 w-auto object-contain"
               />
               <div>
-                <h3 className={`text-xs font-black uppercase tracking-tight ${orbitHeaderTitle}`}>Orbit Agent</h3>
-                <p className={`text-[9px] font-bold uppercase tracking-widest flex items-center gap-1 ${orbitStatusTextClass}`}>
+                <h3 className={`text-[13px] font-black tracking-[-0.02em] ${orbitHeaderTitle}`}>Orbit Agent</h3>
+                <p className={`text-[9px] font-semibold uppercase tracking-[0.14em] flex items-center gap-1.5 ${orbitStatusTextClass}`}>
                   <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${orbitStatusDot}`}></span> {orbitStatusText}
                 </p>
               </div>
@@ -297,24 +330,24 @@ export default function OrbitPanel({
             </button>
           </div>
 
-          <div className={`flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar ${orbitBodyBg}`}>
+          <div className={`flex-1 overflow-y-auto p-3 space-y-2.5 custom-scrollbar ${orbitBodyBg}`}>
             {messages.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center opacity-30 text-center">
-                <MessageSquare size={48} className="mb-4" />
-                <p className="text-xs font-bold uppercase tracking-widest">Không gian tri thức AI</p>
-                <p className="text-[10px] font-medium mt-1">Bấm Gửi ở bên dưới để bắt đầu</p>
+                <MessageSquare size={42} className="mb-4" />
+                <p className="text-[14px] font-bold tracking-[0.03em]">Không gian tri thức AI</p>
+                <p className="mt-1 text-[11px] font-medium">Bấm Gửi ở bên dưới để bắt đầu</p>
               </div>
             ) : (
               messages.map((msg, idx) => (
                 <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   {msg.role === 'assistant' && (
-                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 shadow-sm border ${orbitAssistantAvatar}`}>
-                      {isOrbitAngry ? <Flame size={16} /> : <Smile size={16} />}
+                    <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-xl border shadow-sm ${orbitAssistantAvatar}`}>
+                      {isOrbitAngry ? <Flame size={15} /> : <Smile size={15} />}
                     </div>
                   )}
-                  <div className={`max-w-[85%] p-4 rounded-2xl text-[13px] leading-relaxed shadow-sm ${msg.role === 'user' ? orbitUserBubble : orbitAssistantBubble}`}>
+                  <div className={`max-w-[88%] rounded-[1.05rem] px-3 py-2.5 text-[12px] leading-5 shadow-sm ${msg.role === 'user' ? orbitUserBubble : orbitAssistantBubble}`}>
                     {msg.role === 'assistant' ? (
-                      <ReactMarkdown components={{ strong: ({ ...props }) => <span className={`font-bold ${isOrbitAngry ? 'text-red-700' : 'text-emerald-700'}`} {...props} />, ul: ({ ...props }) => <ul className="list-disc pl-4 space-y-1.5 my-2" {...props} />, p: ({ ...props }) => <p className="mb-2 last:mb-0" {...props} /> }}>
+                      <ReactMarkdown components={{ strong: ({ ...props }) => <span className={`font-bold ${isOrbitAngry ? 'text-red-700' : 'text-emerald-700'}`} {...props} />, ul: ({ ...props }) => <ul className="my-2 list-disc space-y-1 pl-4" {...props} />, p: ({ ...props }) => <p className="mb-2 last:mb-0" {...props} /> }}>
                         {msg.content}
                       </ReactMarkdown>
                     ) : (
@@ -325,18 +358,23 @@ export default function OrbitPanel({
               ))
             )}
             {loadingChat && (
-              <div className="flex justify-start">
-                <div className={`bg-white rounded-2xl rounded-tl-none p-3 shadow-sm flex items-center gap-1.5 border ${isOrbitAngry ? 'border-red-100' : 'border-emerald-100'}`}>
+              <div className="flex flex-col items-start gap-2">
+                <div className={`flex items-center gap-1.5 rounded-2xl rounded-tl-none border bg-white p-3 shadow-sm ${isOrbitAngry ? 'border-red-100' : 'border-emerald-100'}`}>
                   <span className={`w-1.5 h-1.5 rounded-full animate-bounce ${isOrbitAngry ? 'bg-red-400' : 'bg-emerald-400'}`}></span>
                   <span className={`w-1.5 h-1.5 rounded-full animate-bounce delay-75 ${isOrbitAngry ? 'bg-red-400' : 'bg-emerald-400'}`}></span>
                   <span className={`w-1.5 h-1.5 rounded-full animate-bounce delay-150 ${isOrbitAngry ? 'bg-red-400' : 'bg-emerald-400'}`}></span>
                 </div>
+                {slowChatNotice && (
+                  <div className={`rounded-xl border px-3 py-2 text-[10px] font-semibold ${isOrbitAngry ? 'border-red-200 bg-white text-red-700' : 'border-emerald-200 bg-white text-emerald-700'}`}>
+                    Yêu cầu vẫn đang được xử lý, Orbit chưa mất kết nối. Vui lòng chờ thêm một chút.
+                  </div>
+                )}
               </div>
             )}
             <div ref={messagesEndRef} />
           </div>
 
-          <div className={`p-4 bg-white border-t shrink-0 ${isOrbitAngry ? 'border-red-100' : 'border-emerald-100'}`}>
+          <div className={`p-3 bg-white border-t shrink-0 ${isOrbitAngry ? 'border-red-100' : 'border-emerald-100'}`}>
             <div className={`flex gap-2 items-center p-1.5 rounded-2xl border focus-within:ring-2 transition-all ${orbitInputWrap}`}>
               <input
                 type="text"
@@ -345,10 +383,10 @@ export default function OrbitPanel({
                 onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
                 placeholder={'Nhắn cho Orbit Agent...'}
                 disabled={loadingChat}
-                className="flex-1 bg-transparent border-none outline-none text-[13px] font-medium px-3 h-10 disabled:opacity-50 text-slate-900 placeholder:text-slate-400"
+                className="h-9 flex-1 border-none bg-transparent px-3 text-[12px] font-medium text-slate-900 outline-none placeholder:text-slate-400 disabled:opacity-50"
               />
-              <button onClick={handleSendMessage} disabled={loadingChat || !input.trim()} className={`w-10 h-10 text-white rounded-xl flex items-center justify-center shadow-lg active:scale-90 transition-all disabled:opacity-30 disabled:active:scale-100 shrink-0 ${orbitSendBtn}`}>
-                <Send size={16} />
+              <button onClick={handleSendMessage} disabled={loadingChat || !input.trim()} className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white shadow-lg transition-all active:scale-90 disabled:opacity-30 disabled:active:scale-100 ${orbitSendBtn}`}>
+                <Send size={14} />
               </button>
             </div>
             <div className="mt-2 flex flex-wrap gap-2">
@@ -358,7 +396,7 @@ export default function OrbitPanel({
                   type="button"
                   onClick={() => handleQuickPromptPaste(prompt)}
                   disabled={loadingChat}
-                  className={`px-2.5 py-1.5 rounded-lg bg-white text-[10px] font-bold transition-all disabled:opacity-50 ${isOrbitAngry ? 'border border-red-200 text-red-700 hover:bg-red-100' : 'border border-emerald-200 text-emerald-700 hover:bg-emerald-100'}`}
+                  className={`rounded-2xl bg-white px-2.5 py-1.5 text-[10px] font-semibold transition-all disabled:opacity-50 ${isOrbitAngry ? 'border border-red-200 text-red-700 hover:bg-red-100' : 'border border-emerald-200 text-emerald-700 hover:bg-emerald-100'}`}
                 >
                   {prompt}
                 </button>
@@ -366,7 +404,7 @@ export default function OrbitPanel({
             </div>
             {pendingOrbitAction?.action_type === 'open_document' && (
               <div className={`mt-2 rounded-xl border p-2.5 ${isOrbitAngry ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
-                <p className={`text-[10px] font-black uppercase tracking-wider mb-2 ${isOrbitAngry ? 'text-red-700' : 'text-emerald-700'}`}>Orbit đề xuất tài liệu học</p>
+                <p className={`mb-2 text-[10px] font-black uppercase tracking-[0.14em] ${isOrbitAngry ? 'text-red-700' : 'text-emerald-700'}`}>Orbit đề xuất tài liệu học</p>
                 <button
                   onClick={async () => {
                     await executeOrbitAction(pendingOrbitAction);
@@ -377,7 +415,7 @@ export default function OrbitPanel({
                     ]);
                   }}
                   disabled={loadingChat}
-                  className={`w-full px-3 py-2 rounded-lg text-white text-[11px] font-black uppercase tracking-wide disabled:opacity-50 ${isOrbitAngry ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+                  className={`w-full rounded-2xl px-3 py-2 text-[11px] font-bold tracking-[0.02em] text-white disabled:opacity-50 ${isOrbitAngry ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}
                 >
                   {String(pendingOrbitAction?.confirm_button_text || 'OK, mở tài liệu đề xuất')}
                 </button>

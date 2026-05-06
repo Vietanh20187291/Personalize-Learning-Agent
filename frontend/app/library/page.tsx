@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { FileText, Trash2, Filter, Search, FolderOpen, Loader2, Download } from 'lucide-react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
+import { confirmAlert } from '@/services/alerts';
 
 // 1. ĐỊNH NGHĨA KIỂU DỮ LIỆU
 interface DocumentData {
@@ -15,7 +16,7 @@ interface DocumentData {
 }
 
 export default function DocumentLibrary() {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8010';
   // Gán kiểu DocumentData[] cho state
   const [documents, setDocuments] = useState<DocumentData[]>([]);
   const [filterSubject, setFilterSubject] = useState('all');
@@ -40,7 +41,14 @@ export default function DocumentLibrary() {
 
   // 2. HÀM XỬ LÝ XÓA TÀI LIỆU
   const handleDelete = async (id: number, title: string) => {
-    if (!window.confirm(`Bạn có chắc muốn xóa tài liệu: ${title}?`)) return;
+    const confirmed = await confirmAlert({
+      title: "Xóa tài liệu",
+      message: `Bạn có chắc muốn xóa tài liệu: ${title}?`,
+      confirmText: "Xóa ngay",
+      cancelText: "Hủy",
+      tone: "danger",
+    });
+    if (!confirmed) return;
     
     setDeleteId(id);
     try {

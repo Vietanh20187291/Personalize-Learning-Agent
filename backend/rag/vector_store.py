@@ -1,39 +1,59 @@
+import logging
 import os
-from langchain_chroma import Chroma
-from rag.embedder import get_embeddings
-from config import settings
+import threading
+from typing import Optional
 
-# Đường dẫn lưu Database
+from langchain_chroma import Chroma
+
+from rag.embedder import get_embeddings
+
+
+logger = logging.getLogger("app.rag.vector_store")
+
 ABS_PATH = os.path.dirname(os.path.abspath(__file__))
 DB_DIR = os.path.join(ABS_PATH, "../chroma_db")
-
-# Tên Collection cố định để quản lý dữ liệu tập trung
 COLLECTION_NAME = "ai_learning_collection"
 
-# Hàm 1: Lấy Database để tìm kiếm và Xóa
-def get_vector_store():
-    # Đảm bảo thư mục lưu trữ tồn tại
-    if not os.path.exists(DB_DIR):
-        os.makedirs(DB_DIR)
-        
-    embedding_fn = get_embeddings()
-    if embedding_fn is None:
-        raise RuntimeError("Embedding model chưa sẵn sàng. Vui lòng thử lại sau.")
+_vector_store: Optional[Chroma] = None
+_vector_store_lock = threading.Lock()
 
-    vector_store = Chroma(
-        persist_directory=DB_DIR,
-        embedding_function=embedding_fn,
-        collection_name=COLLECTION_NAME # Thêm tên collection cố định ở đây
-    )
-    return vector_store
 
-# Hàm 2: Lưu tài liệu vào Database
+def get_vector_store() -> Chroma:
+    global _vector_store
+    if _vector_store is not None:
+        return _vector_store
+
+    with _vector_store_lock:
+        if _vector_store is not None:
+            return _vector_store
+
+        if not os.path.exists(DB_DIR):
+            os.makedirs(DB_DIR)
+
+        embedding_fn = get_embeddings()
+        if embedding_fn is None:
+            raise RuntimeError(
+                "Vector store is disabled or embedding model is unavailable in this runtime."
+            )
+
+        _vector_store = Chroma(
+            persist_directory=DB_DIR,
+            embedding_function=embedding_fn,
+            collection_name=COLLECTION_NAME,
+        )
+        logger.info(
+            "Vector store initialized. collection=%s persist_directory=%s",
+            COLLECTION_NAME,
+            DB_DIR,
+        )
+
+    return _vector_store
+
+
 def add_documents_to_db(docs):
     if not docs:
         return
-        
+
     vector_store = get_vector_store()
-    
-    # Đảm bảo mỗi doc đều có metadata source là tên file để sau này xóa được
     vector_store.add_documents(docs)
-    print(f"✅ Đã lưu {len(docs)} đoạn văn vào ChromaDB (Collection: {COLLECTION_NAME}).")
+    logger.info("Added %s document chunks to ChromaDB.", len(docs))
