@@ -1,7 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from __future__ import annotations
+
 import copy
 import io
 import json
@@ -10,26 +8,50 @@ import random
 import re
 import time
 import unicodedata
-from typing import List
+from typing import List, Optional
 
 from docx import Document
-from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-from docx.shared import Pt
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from db import models
 from db.database import get_db
+from services.exam_doc_utils import (
+    DEFAULT_DEPARTMENT_NAME,
+    DEFAULT_EXAM_TITLE,
+    DEFAULT_EXAM_TYPE_LABEL,
+    DEFAULT_SCHOOL_NAME,
+    add_answer_key_section,
+    add_answer_sheet,
+    add_candidate_block,
+    add_exam_info_table,
+    add_exam_instruction_block,
+    add_multiple_choice_questions,
+    add_school_header,
+    apply_document_style,
+)
 
 router = APIRouter()
 logger = logging.getLogger("app.exam")
+DEFAULT_EXAM_TYPE = "trắc nghiệm"
 
 
 class ExamRequest(BaseModel):
     class_id: int
     subject: str
-    exam_type: str
+    exam_type: Optional[str] = None
     num_questions: int
     num_versions: int
     level: str
+    duration_minutes: int = 60
+    semester: str = "Học kỳ II"
+    academic_year: str = "Năm học 2025 - 2026"
+    exam_date: str = "....... / ....... / ............"
+    school_name: str = DEFAULT_SCHOOL_NAME
+    department_name: str = DEFAULT_DEPARTMENT_NAME
+    exam_title: str = DEFAULT_EXAM_TITLE
 
 
 def _strip_option_prefix(value: str) -> str:
@@ -98,104 +120,46 @@ def _build_fallback_exam_questions(req: ExamRequest, context_summary: str, chunk
         sentences = [f"Môn {req.subject} yêu cầu nắm chắc các khái niệm và nguyên lý cốt lõi."]
 
     result: List[dict] = []
-    if req.exam_type == "trắc nghiệm":
-        for idx in range(needed):
-            sentence = sentences[idx % len(sentences)]
-            question = f"Theo học liệu môn {req.subject}, phát biểu nào đúng nhất với ý sau: \"{sentence[:120]}\"?"
-            correct = sentence[:180]
-            distractors = [
-                (sentence[:120] + " nhưng áp dụng trong ngữ cảnh khác của môn học.")[:180],
-                f"Nội dung này không liên quan trực tiếp đến trọng tâm của {req.subject}.",
-                f"Đây chỉ là một ví dụ phụ, không phải kết luận chính về {req.subject}.",
-            ]
-            result.append(
-                {
-                    "q": question,
-                    "options": [correct] + distractors,
-                    "ans": "A",
-                    "exp": "Câu bổ sung tự động khi ngân hàng câu hỏi chưa đủ.",
-                }
-            )
-    else:
-        for idx in range(needed):
-            sentence = sentences[idx % len(sentences)]
-            result.append(
-                {
-                    "q": f"Trình bày và phân tích nội dung sau trong môn {req.subject}: {sentence[:160]}",
-                    "ans": "Nêu đúng khái niệm, ý chính, cách vận dụng và kết luận.",
-                    "exp": "Gợi ý chấm theo các ý chính của học liệu.",
-                }
-            )
+    for idx in range(needed):
+        sentence = sentences[idx % len(sentences)]
+        question = f"Theo học liệu môn {req.subject}, phát biểu nào đúng nhất với ý sau: \"{sentence[:120]}\"?"
+        correct = sentence[:180]
+        distractors = [
+            (sentence[:120] + " nhưng áp dụng trong ngữ cảnh khác của môn học.")[:180],
+            f"Nội dung này không liên quan trực tiếp đến trọng tâm của {req.subject}.",
+            f"Đây chỉ là một ví dụ phụ, không phải kết luận chính về {req.subject}.",
+        ]
+        result.append(
+            {
+                "q": question,
+                "options": [correct] + distractors,
+                "ans": "A",
+                "exp": "Câu bổ sung tự động khi ngân hàng câu hỏi chưa đủ.",
+            }
+        )
     return result
-
-
-def create_exam_header(doc: Document, subject: str, exam_type: str, exam_code: str) -> None:
-    table = doc.add_table(rows=1, cols=2)
-    table.autofit = True
-
-    cell_left = table.cell(0, 0)
-    p_left1 = cell_left.paragraphs[0]
-    p_left1.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    run_left1 = p_left1.add_run("BỘ GIÁO DỤC VÀ ĐÀO TẠO\nTRƯỜNG ĐẠI HỌC XÂY DỰNG HÀ NỘI")
-    run_left1.font.size = Pt(11)
-
-    p_left2 = cell_left.add_paragraph()
-    p_left2.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    run_left2 = p_left2.add_run("KHOA CÔNG NGHỆ THÔNG TIN")
-    run_left2.font.size = Pt(12)
-    run_left2.bold = True
-
-    p_left3 = cell_left.add_paragraph()
-    p_left3.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    p_left3.add_run("-----------------------").bold = True
-
-    cell_right = table.cell(0, 1)
-    p_right1 = cell_right.paragraphs[0]
-    p_right1.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    run_right1 = p_right1.add_run("CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM")
-    run_right1.font.size = Pt(11)
-    run_right1.bold = True
-
-    p_right2 = cell_right.add_paragraph()
-    p_right2.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    run_right2 = p_right2.add_run("Độc lập - Tự do - Hạnh phúc")
-    run_right2.font.size = Pt(12)
-    run_right2.bold = True
-
-    p_right3 = cell_right.add_paragraph()
-    p_right3.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    p_right3.add_run("-----------------------").bold = True
-
-    doc.add_paragraph()
-
-    p_title = doc.add_paragraph()
-    p_title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    run_title = p_title.add_run("ĐỀ THI KẾT THÚC HỌC PHẦN")
-    run_title.font.size = Pt(16)
-    run_title.bold = True
-
-    p_info = doc.add_paragraph()
-    p_info.add_run("Môn thi: ").bold = True
-    p_info.add_run(f"{subject}\n")
-    p_info.add_run("Hình thức thi: ").bold = True
-    p_info.add_run(f"{exam_type.title()}\n")
-    p_info.add_run("Mã đề thi: ").bold = True
-    p_info.add_run(f"{exam_code}\n")
-    p_info.add_run("Họ và tên sinh viên: ..................................................... MSSV: ............................... Lớp: ..................")
-
-    doc.add_paragraph("------------------------------------------------------------------------------------------------------------------------")
 
 
 def remove_accents(input_str: str) -> str:
     safe = str(input_str or "").replace("đ", "d").replace("Đ", "D")
     nfkd_form = unicodedata.normalize("NFKD", safe)
-    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+    return "".join([char for char in nfkd_form if not unicodedata.combining(char)])
 
 
 def _safe_filename_fragment(value: str) -> str:
     ascii_value = remove_accents(value or "")
     ascii_value = re.sub(r"[^A-Za-z0-9_-]+", "_", ascii_value).strip("_")
     return ascii_value or "TaiLieu"
+
+
+def _normalize_exam_type(_: Optional[str]) -> str:
+    return DEFAULT_EXAM_TYPE
+
+
+def _copy_exam_request(req: ExamRequest, **updates) -> ExamRequest:
+    if hasattr(req, "model_copy"):
+        return req.model_copy(update=updates)
+    return req.copy(update=updates)
 
 
 def _build_question_pool(
@@ -254,20 +218,36 @@ def _build_question_pool(
             num_questions=missing_count,
             num_versions=1,
             level=req.level,
+            duration_minutes=req.duration_minutes,
+            semester=req.semester,
+            academic_year=req.academic_year,
+            exam_date=req.exam_date,
+            school_name=req.school_name,
+            department_name=req.department_name,
+            exam_title=req.exam_title,
         )
         question_pool.extend(_build_fallback_exam_questions(fallback_req, context_summary, chunk_texts))
 
     return question_pool
 
 
+def _next_exam_code(used_codes: set[str]) -> str:
+    while True:
+        exam_code = str(random.randint(101, 999))
+        if exam_code not in used_codes:
+            used_codes.add(exam_code)
+            return exam_code
+
+
 @router.post("/generate-word")
 def generate_exam_word(req: ExamRequest, db: Session = Depends(get_db)):
     started_at = time.perf_counter()
+    exam_type = _normalize_exam_type(req.exam_type)
     logger.info(
         "generate_exam_word start class_id=%s subject=%s exam_type=%s num_questions=%s num_versions=%s",
         req.class_id,
         req.subject,
-        req.exam_type,
+        exam_type,
         req.num_questions,
         req.num_versions,
     )
@@ -298,7 +278,7 @@ def generate_exam_word(req: ExamRequest, db: Session = Depends(get_db)):
 
     question_pool = _build_question_pool(
         db=db,
-        req=req,
+        req=_copy_exam_request(req, exam_type=exam_type),
         target_class=target_class,
         docs=docs,
         context_summary=context_summary,
@@ -308,73 +288,73 @@ def generate_exam_word(req: ExamRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Không thể chuẩn bị đủ số câu hỏi để xuất đề thi Word.")
 
     doc = Document()
-    exam_versions = []
+    apply_document_style(doc)
 
-    for _ in range(req.num_versions):
-        exam_code = str(random.randint(101, 999))
+    exam_versions = []
+    used_codes: set[str] = set()
+
+    for version_index in range(req.num_versions):
+        exam_code = _next_exam_code(used_codes)
         selected_questions = copy.deepcopy(random.sample(question_pool, req.num_questions))
         random.shuffle(selected_questions)
+
+        for question in selected_questions:
+            options = copy.deepcopy(question.get("options", []))
+            correct_idx = ord(question.get("ans", "A").upper()) - 65
+            correct_text = options[correct_idx] if 0 <= correct_idx < len(options) else options[0]
+            random.shuffle(options)
+            question["options"] = options
+            question["new_ans"] = ["A", "B", "C", "D"][options.index(correct_text)]
+
         exam_versions.append({"code": exam_code, "questions": selected_questions})
 
-        create_exam_header(doc, req.subject, req.exam_type, exam_code)
-        for idx, question in enumerate(selected_questions, start=1):
-            paragraph = doc.add_paragraph()
-            paragraph.add_run(f"Câu {idx}: ").bold = True
-            paragraph.add_run(question.get("q", ""))
+        add_school_header(
+            doc,
+            school_name=req.school_name,
+            department_name=req.department_name,
+            exam_title=req.exam_title,
+            section_title="ĐỀ THI TRẮC NGHIỆM",
+        )
+        add_exam_info_table(
+            doc,
+            subject=req.subject,
+            class_name=target_class.name,
+            exam_code=exam_code,
+            exam_type_label=DEFAULT_EXAM_TYPE_LABEL,
+            semester=req.semester,
+            academic_year=req.academic_year,
+            exam_date=req.exam_date,
+            duration_minutes=req.duration_minutes,
+        )
+        add_candidate_block(doc)
+        add_exam_instruction_block(doc, exam_type_label=DEFAULT_EXAM_TYPE_LABEL)
+        add_multiple_choice_questions(doc, selected_questions)
+        add_answer_sheet(
+            doc,
+            school_name=req.school_name,
+            department_name=req.department_name,
+            exam_title=req.exam_title,
+            subject=req.subject,
+            class_name=target_class.name,
+            exam_code=exam_code,
+            exam_type_label=DEFAULT_EXAM_TYPE_LABEL,
+            semester=req.semester,
+            academic_year=req.academic_year,
+            exam_date=req.exam_date,
+            duration_minutes=req.duration_minutes,
+            num_questions=req.num_questions,
+        )
 
-            if req.exam_type == "trắc nghiệm":
-                options = copy.deepcopy(question.get("options", []))
-                correct_idx = ord(question.get("ans", "A").upper()) - 65
-                correct_text = options[correct_idx] if 0 <= correct_idx < len(options) else options[0]
-                random.shuffle(options)
-                labels = ["A", "B", "C", "D"]
-                new_correct_label = "A"
-                for option_idx, option_text in enumerate(options):
-                    if option_text == correct_text:
-                        new_correct_label = labels[option_idx]
-                    doc.add_paragraph(f"{labels[option_idx]}. {option_text}")
-                question["new_ans"] = new_correct_label
-            else:
-                for _line in range(4):
-                    doc.add_paragraph("................................................................................................................................")
-            doc.add_paragraph()
+        if version_index < req.num_versions - 1:
+            doc.add_page_break()
 
-        doc.add_page_break()
-
-    answer_heading = doc.add_heading("HƯỚNG DẪN CHẤM VÀ ĐÁP ÁN", 1)
-    answer_heading.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    doc.add_paragraph()
-
-    for version in exam_versions:
-        doc.add_paragraph(f"MÃ ĐỀ: {version['code']}").bold = True
-        if req.exam_type == "trắc nghiệm":
-            table = doc.add_table(rows=1, cols=6)
-            table.style = "Table Grid"
-            for idx in range(6):
-                table.rows[0].cells[idx].text = "Câu - Đáp án"
-
-            row_cells = table.add_row().cells
-            col_idx = 0
-            for question_idx, question in enumerate(version["questions"], start=1):
-                if col_idx > 5:
-                    row_cells = table.add_row().cells
-                    col_idx = 0
-                row_cells[col_idx].text = f"Câu {question_idx}: {question.get('new_ans', question.get('ans', 'A'))}"
-                col_idx += 1
-            doc.add_paragraph()
-        else:
-            for question_idx, question in enumerate(version["questions"], start=1):
-                paragraph = doc.add_paragraph()
-                paragraph.add_run(f"Câu {question_idx}: ").bold = True
-                doc.add_paragraph(question.get("ans", ""))
-                doc.add_paragraph(f"Gợi ý chấm: {question.get('exp', '')}").italic = True
-        doc.add_paragraph("----------------------------------------------------------------")
+    add_answer_key_section(doc, exam_versions, exam_type_label=DEFAULT_EXAM_TYPE_LABEL)
 
     file_stream = io.BytesIO()
     doc.save(file_stream)
     file_stream.seek(0)
 
-    filename = f"DeThi_{_safe_filename_fragment(req.subject)}_{_safe_filename_fragment(req.exam_type)}.docx"
+    filename = f"DeThi_{_safe_filename_fragment(req.subject)}_TracNghiem.docx"
     logger.info(
         "generate_exam_word done class_id=%s subject=%s duration_ms=%.2f pool_size=%s versions=%s",
         req.class_id,

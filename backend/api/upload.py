@@ -8,6 +8,7 @@ from db.database import get_db
 from db import models
 from agents.content_agent import content_agent 
 from rag.vector_store import get_vector_store
+from services.test_ocr_storage import TEMP_UPLOADS_DIR
 
 router = APIRouter()
 
@@ -31,11 +32,11 @@ def validate_file_extension(filename: str):
 @router.post("/analyze-subject")
 async def analyze_document_subject(file: UploadFile = File(...)):
     validate_file_extension(file.filename) 
-    temp_dir = "temp_uploads"
-    os.makedirs(temp_dir, exist_ok=True)
+    temp_dir = TEMP_UPLOADS_DIR
+    temp_dir.mkdir(parents=True, exist_ok=True)
     
     safe_filename = file.filename.replace(" ", "_")
-    file_path = os.path.join(temp_dir, safe_filename)
+    file_path = str((temp_dir / safe_filename).resolve())
     
     try:
         with open(file_path, "wb") as buffer:
@@ -72,9 +73,9 @@ async def upload_document(
     subject_name = classroom.subject
 
     safe_filename = file.filename.replace(" ", "_")
-    temp_dir = "temp_uploads"
-    os.makedirs(temp_dir, exist_ok=True)
-    file_path = os.path.join(temp_dir, safe_filename)
+    temp_dir = TEMP_UPLOADS_DIR
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    file_path = str((temp_dir / safe_filename).resolve())
     
     try:
         with open(file_path, "wb") as buffer:

@@ -407,3 +407,52 @@ class Notification(Base):
     metadata_json = Column(JSON, nullable=True)
     is_read = Column(Boolean, default=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class TestOCRExamBatch(Base):
+    __tablename__ = "test_ocr_exam_batches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    class_id = Column(Integer, ForeignKey("classrooms.id"), nullable=False, index=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=False, index=True)
+    subject_name = Column(String, nullable=False, index=True)
+    exam_type = Column(String, nullable=False, default="trac_nghiem")
+    level = Column(String, nullable=True)
+    num_questions = Column(Integer, nullable=False, default=20)
+    num_versions = Column(Integer, nullable=False, default=1)
+    batch_code = Column(String, unique=True, nullable=False, index=True)
+    generated_docx_path = Column(String, nullable=True)
+    answer_key_json = Column(JSON, nullable=False, default=list)
+    omr_layout_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class TestOCRGradingRun(Base):
+    __tablename__ = "test_ocr_grading_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Integer, ForeignKey("test_ocr_exam_batches.id"), nullable=False, index=True)
+    uploaded_pdf_path = Column(String, nullable=True)
+    page_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class TestOCRGradingResult(Base):
+    __tablename__ = "test_ocr_grading_results"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(Integer, ForeignKey("test_ocr_grading_runs.id"), nullable=False, index=True)
+    batch_id = Column(Integer, ForeignKey("test_ocr_exam_batches.id"), nullable=False, index=True)
+    page_number = Column(Integer, nullable=False, default=1)
+    source_image_path = Column(String, nullable=True)
+    student_name_image_path = Column(String, nullable=True)
+    detected_student_id = Column(String, nullable=True, index=True)
+    detected_exam_code = Column(String, nullable=True, index=True)
+    detected_answers_json = Column(JSON, nullable=False, default=list)
+    correct_count = Column(Integer, nullable=False, default=0)
+    total_questions = Column(Integer, nullable=False, default=0)
+    score = Column(Float, nullable=False, default=0.0)
+    grading_status = Column(String, nullable=False, default="pending", index=True)
+    debug_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

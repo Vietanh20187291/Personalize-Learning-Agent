@@ -10,9 +10,10 @@ except Exception:
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager # Thư viện quản lý vòng đời (lifespan)
-from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, exam_generator, subject, teacher_agent, orbit, planning, notification, debug, evaluation
+from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, exam_generator, exam_ocr, subject, teacher_agent, orbit, planning, notification, debug, evaluation, ops
 from config import settings
 from services.orbit_reminders import start_weekly_orbit_reminder_loop
+from services.system_health import build_health_snapshot
 from logging_config import RequestLoggingMiddleware, error_json_response, get_current_request_id, setup_logging
 # --- IMPORT DATABASE VÀ MODELS ---
 from db import models
@@ -23,15 +24,17 @@ from db.models import User, Subject
 from api.auth import hash_password 
 
 # --- IMPORT CÁC ROUTER API ---
-from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent, orbit, planning, notification, evaluation
+from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent, orbit, planning, notification, evaluation, ops
 
 from fastapi.staticfiles import StaticFiles
 import os
 import json
 import re
 import threading
+from pathlib import Path
 from datetime import datetime, timedelta
 from agents.assessment_agent import AssessmentAgent
+from services.test_ocr_storage import TEMP_UPLOADS_DIR
 
 setup_logging()
 logger = logging.getLogger("app.main")
@@ -399,8 +402,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-os.makedirs("temp_uploads", exist_ok=True) # Đảm bảo thư mục tồn tại để không báo lỗi
-app.mount("/temp_uploads", StaticFiles(directory="temp_uploads"), name="temp_uploads")
+TEMP_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/temp_uploads", StaticFiles(directory=str(TEMP_UPLOADS_DIR.resolve())), name="temp_uploads")
 
 # --- ĐĂNG KÝ ROUTER ---
 
@@ -434,6 +437,7 @@ app.include_router(subject.router, prefix="/api/subjects", tags=["Subject"])
 
 # 8. Exam Generator (Sinh đề thi file Word)
 app.include_router(exam_generator.router, prefix="/api/exam", tags=["Exam"])
+app.include_router(exam_ocr.router, prefix="/api/exam/ocr", tags=["Exam OCR"])
 
 # 9. Teacher Agent (Hỗ trợ giảng viên)
 app.include_router(teacher_agent.router, prefix="/api/teacher", tags=["Teacher AI"])
@@ -450,6 +454,7 @@ app.include_router(notification.router, prefix="/api/notifications", tags=["Noti
 # 13. Debug (Real-time LLM debugging via SSE)
 app.include_router(debug.router, tags=["Debug"])
 app.include_router(debug.router, prefix="/api", tags=["Debug"])
+app.include_router(ops.router, prefix="/api/ops", tags=["Operations"])
 
 @app.get("/")
 def read_root():
