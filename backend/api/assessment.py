@@ -1,7 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from db.database import SessionLocal, get_db, engine, Base
-from db.models import LearnerProfile, QuestionBank, AssessmentHistory, StudentLearningProgress, StudentDocumentEvaluation, StudentDocumentScoreHistory, User, Document, LearningRoadmap, Classroom, Subject, UserLoginSession
+from db.models import LearnerProfile, QuestionBank, AssessmentHistory, StudentLearningProgress, StudentDocumentEvaluation, StudentDocumentScoreHistory, User, Document, LearningRoadmap, Classroom, Subject, UserLoginSession, WrongAnswerRecord
 from pydantic import BaseModel
 from datetime import datetime
 from typing import List, Optional
@@ -591,7 +591,10 @@ def submit_quiz(req: SubmitRequest, background_tasks: BackgroundTasks, db: Sessi
             wrong_questions_log.append({
                 "question": _sanitize_question_bank_text(q.content),
                 "student_choice": user_choice,
-                "correct_answer": q.correct_answer
+                "correct_answer": q.correct_answer,
+                "options": _normalize_question_bank_options(q.options),
+                "explanation": q.explanation,
+                "question_bank_id": q.id,
             })
 
         detailed_results.append({
@@ -749,6 +752,23 @@ def submit_quiz(req: SubmitRequest, background_tasks: BackgroundTasks, db: Sessi
                 correct_count=correct_count,
                 tested_at=datetime.utcnow(),
             ))
+
+            # --- LƯU CÁC CÂU SAI CHO TAB "HỌC TẬP" ---
+            if wrong_questions_log:
+                for wq in wrong_questions_log:
+                    db.add(WrongAnswerRecord(
+                        user_id=req.user_id,
+                        document_id=related_doc.id,
+                        subject_id=subject_id,
+                        class_id=target_class.id if target_class else None,
+                        question_bank_id=wq.get("question_bank_id"),
+                        question_text=wq.get("question", ""),
+                        options_json=wq.get("options"),
+                        student_choice=wq.get("student_choice", ""),
+                        correct_answer=wq.get("correct_answer", ""),
+                        explanation=wq.get("explanation"),
+                        assessment_history_id=history.id,
+                    ))
 
     progress = db.query(StudentLearningProgress).filter(StudentLearningProgress.user_id == req.user_id).first()
     if not progress:
@@ -947,10 +967,28 @@ def save_quiz_result(req: SaveQuizResultRequest, db: Session = Depends(get_db)):
             tested_at=datetime.utcnow(),
         ))
 
+        # --- LƯU CÁC CÂU SAI CHO TAB "HỌC TẬP" ---
+        wrong_pairs = [p for p in question_answer_pairs if not p["is_correct"]]
+        if wrong_pairs:
+            for wp in wrong_pairs:
+                db.add(WrongAnswerRecord(
+                    user_id=req.user_id,
+                    document_id=related_doc.id,
+                    subject_id=related_doc.subject_id,
+                    class_id=related_doc.class_id,
+                    question_bank_id=wp.get("question_id"),
+                    question_text=wp.get("question_text", ""),
+                    options_json=wp.get("options"),
+                    student_choice=wp.get("user_answer", ""),
+                    correct_answer=wp.get("correct_answer", ""),
+                    explanation=wp.get("explanation"),
+                    assessment_history_id=history.id,
+                ))
+
     db.commit()
-    
+
     is_passed = correct_count >= 5  # Cần 5/15 để pass
-    
+
     return {
         "score": score_percent,
         "correct_count": correct_count,

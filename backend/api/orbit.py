@@ -503,6 +503,7 @@ def _reply_with_open_document_context(
         source_file=(selected_doc.filename or "").strip(),
         history=history,
         document_id=selected_doc.id,
+        user_id=user.id,
     )
     return str(response or "").strip()
 

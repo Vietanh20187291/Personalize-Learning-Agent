@@ -7,8 +7,10 @@ import clsx from "clsx";
 import {
   Bell,
   BookOpen,
+  BookOpenCheck,
   BrainCircuit,
   ChevronDown,
+  FlaskConical,
   FileText,
   GraduationCap,
   KeyRound,
@@ -148,6 +150,7 @@ export default function Navbar() {
       return [
         { name: "Cấp tài khoản", href: "/admin/teachers", icon: UserPlus },
         { name: "Người dùng", href: "/admin/users", icon: Users },
+        { name: "Thực nghiệm", href: "/test", icon: FlaskConical },
       ];
     }
 
@@ -159,6 +162,7 @@ export default function Navbar() {
         { name: "Ngân hàng câu hỏi", href: "/teacher/question-bank", icon: LibraryBig },
         { name: "Học viên", href: "/teacher/members", icon: Users },
         { name: "Đề thi", href: "/teacher/exam", icon: FileText },
+        { name: "Thực nghiệm", href: "/test", icon: FlaskConical },
       ];
     }
 
@@ -166,9 +170,11 @@ export default function Navbar() {
       return [
         { name: "Gia sư", href: "/adaptive", icon: GraduationCap },
         { name: "Lộ trình", href: "/planning", icon: BrainCircuit },
+        { name: "Học tập", href: "/my-learning", icon: BookOpenCheck },
         { name: "Kiểm tra", href: "/assessment", icon: FileText },
         { name: "Đánh giá", href: "/evaluation", icon: LineChart },
         { name: "Thư viện", href: "/library", icon: BookOpen },
+        { name: "Thực nghiệm", href: "/test", icon: FlaskConical },
       ];
     }
 

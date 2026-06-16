@@ -163,17 +163,18 @@ def chat_with_adaptive_tutor(req: TutorChatRequest, db: Session = Depends(get_db
         if not allowed_filenames:
             return {"reply": "Giáo viên hiện chưa tải tài liệu lên hệ thống."}
 
-        # 3. Gọi Agent xử lý
+        # 3. Gọi Agent xử lý (truyền user_id để cá nhân hóa)
         agent = AdaptiveAgent(db)
         response = agent.chat_with_tutor(
-            subject=req.subject, 
-            user_message=req.message, 
-            roadmap_context=req.roadmap_context, 
+            subject=req.subject,
+            user_message=req.message,
+            roadmap_context=req.roadmap_context,
             allowed_filenames=allowed_filenames,
             session_topic=req.session_topic,
             source_file=requested_file,
             document_id=req.document_id,
-            history=req.history
+            history=req.history,
+            user_id=req.user_id,
         )
 
         response_text = str(response or "").strip()

@@ -14,7 +14,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
-import AgentConversationCard from "@/components/AgentConversationCard";
+import StudentOrbitAgent from "@/components/StudentOrbitAgent";
 import { apiClient, longRequestConfig, normalizeApiError, runLongRequest } from "@/services/api";
 import { confirmAlert } from "@/services/alerts";
 
@@ -340,7 +340,7 @@ export default function PlanningPage() {
 
   return (
     <div className="page-shell px-4 pb-8">
-      <div className="mx-auto grid max-w-7xl gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+      <div className="mx-auto grid max-w-7xl gap-6 grid-cols-1">
         <section className="space-y-5">
           <div className="rounded-[2.2rem] border border-slate-200 bg-[linear-gradient(135deg,#ecfeff,white_44%,#ecfdf5)] p-6 shadow-[0_28px_80px_rgba(15,23,42,0.08)]">
             <div className="flex items-start justify-between gap-4">
@@ -523,23 +523,11 @@ export default function PlanningPage() {
             </div>
           </div>
         </section>
-
-        <AgentConversationCard
-          badge="Planning Agent"
-          title="Điều chỉnh lịch học bằng prompt"
-          subtitle="Agent nhận tất cả tài liệu chưa hoàn thành, điểm hiện tại và estimated end date để sắp xếp lại lộ trình."
-          accentClassName="bg-[linear-gradient(135deg,#e0e7ff,#eef2ff_45%,#ecfeff)]"
-          placeholder="Ví dụ: Đưa các tài liệu môn Lập trình hướng đối tượng lên học trước, hoặc sắp xếp lại lịch để kịp thi..."
-          inputValue={chatInput}
-          sending={sending}
-          slowNotice={slowNotice}
-          messages={chatMessages}
-          suggestions={examples}
-          onInputChange={setChatInput}
-          onSuggestionClick={(value) => setChatInput(value)}
-          onSend={() => void sendPlanningMessage(chatInput)}
-        />
       </div>
+
+      <StudentOrbitAgent
+        userId={userId}
+      />
     </div>
   );
 }

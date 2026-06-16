@@ -372,7 +372,7 @@ export default function TeacherPage() {
                 >
                   <span className="flex items-center gap-2">
                     <Sparkles className="h-4 w-4" />
-                    Sinh đề thi
+                    Tạo đề & chấm OMR
                   </span>
                   <ArrowRight className="h-4 w-4" />
                 </Link>
@@ -419,8 +419,8 @@ export default function TeacherPage() {
             accentClass="bg-violet-50"
           />
           <TeacherModuleCard
-            title="Sinh đề thi"
-            description="Tạo đề Word theo lớp và môn đang dạy, có thể cấu hình mức độ, số câu và số mã đề."
+            title="Tạo đề & chấm OMR"
+            description="Tạo đề trắc nghiệm Word, tải phiếu OMR, biểu mẫu đáp án Excel và chấm bài bằng PDF hoặc ảnh trên cùng một màn hình."
             href="/teacher/exam"
             icon={<FileText className="h-5 w-5 text-rose-700" />}
             metric={allClasses.length ? `${allClasses.length} lớp dùng được` : "Chưa có lớp"}

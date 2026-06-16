@@ -10,7 +10,7 @@ except Exception:
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager # Thư viện quản lý vòng đời (lifespan)
-from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, exam_generator, exam_ocr, subject, teacher_agent, orbit, planning, notification, debug, evaluation, ops
+from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, exam_generator, exam_ocr, subject, teacher_agent, orbit, planning, notification, debug, evaluation, ops, research, my_learning
 from config import settings
 from services.orbit_reminders import start_weekly_orbit_reminder_loop
 from services.system_health import build_health_snapshot
@@ -24,7 +24,7 @@ from db.models import User, Subject
 from api.auth import hash_password 
 
 # --- IMPORT CÁC ROUTER API ---
-from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent, orbit, planning, notification, evaluation, ops
+from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent, orbit, planning, notification, evaluation, ops, research, my_learning
 
 from fastapi.staticfiles import StaticFiles
 import os
@@ -74,6 +74,19 @@ def ensure_orbit_login_tracking_column():
                 with engine.begin() as connection:
                     connection.execute(text("ALTER TABLE student_learning_plan_steps ADD COLUMN deadline_date DATE"))
                     print("✅ Đã bổ sung cột deadline_date cho student_learning_plan_steps")
+
+        # Bổ sung cột target_documents_json / applied_at cho orbit_coach_directives
+        # (hỗ trợ yêu cầu "thêm tài liệu" từ giảng viên và tự áp dụng vào plan).
+        if "orbit_coach_directives" in tables:
+            directive_columns = [column["name"] for column in inspector.get_columns("orbit_coach_directives")]
+            if "target_documents_json" not in directive_columns:
+                with engine.begin() as connection:
+                    connection.execute(text("ALTER TABLE orbit_coach_directives ADD COLUMN target_documents_json JSON"))
+                    print("✅ Đã bổ sung cột target_documents_json cho orbit_coach_directives")
+            if "applied_at" not in directive_columns:
+                with engine.begin() as connection:
+                    connection.execute(text("ALTER TABLE orbit_coach_directives ADD COLUMN applied_at DATETIME"))
+                    print("✅ Đã bổ sung cột applied_at cho orbit_coach_directives")
 
         # Backfill lịch sử login cho sinh viên cũ chưa có dòng trong user_login_sessions.
         if "user_login_sessions" in tables and "users" in tables:
@@ -455,6 +468,8 @@ app.include_router(notification.router, prefix="/api/notifications", tags=["Noti
 app.include_router(debug.router, tags=["Debug"])
 app.include_router(debug.router, prefix="/api", tags=["Debug"])
 app.include_router(ops.router, prefix="/api/ops", tags=["Operations"])
+app.include_router(research.router, prefix="/api/research", tags=["Research Evaluation"])
+app.include_router(my_learning.router, prefix="/api/my-learning", tags=["My Learning"])
 
 @app.get("/")
 def read_root():

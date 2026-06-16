@@ -80,7 +80,7 @@ class ActionRouter:
                 "target": "teacher",
                 "tab_name": "exam",
                 "params": {"classroom_id": class_id, "mode": "create"},
-                "message": "Đang mở công cụ tạo đề thi...",
+                "message": "Đang mở công cụ tạo đề trắc nghiệm và chấm OMR...",
                 "should_auto_execute": True,
             }
 

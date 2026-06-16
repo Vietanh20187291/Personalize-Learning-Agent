@@ -47,6 +47,12 @@ def get_student_plan(user_id: int, refresh: bool = False, db: Session = Depends(
                 reference_login_at=datetime.utcnow(),
             )
         else:
+            # Tự động áp dụng chỉ thị chưa xử lý của giảng viên (Nova→Orbit→Planning)
+            # trước khi trả plan, để tài liệu yêu cầu xuất hiện trong lịch học tuần.
+            try:
+                agent.apply_pending_directives(user_id=user_id)
+            except Exception:
+                logger.exception("apply_pending_directives failed user_id=%s", user_id)
             plan = agent.get_active_plan(user_id=user_id)
 
         logger.info(

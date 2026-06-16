@@ -18,13 +18,13 @@ $pythonPath = Join-Path $rootPath ".venv\Scripts\python.exe"
 Write-Host "`nStarting backend and frontend..." -ForegroundColor Cyan
 
 # Start Backend
-Write-Host "Backend starting on http://127.0.0.1:8000" -ForegroundColor Blue
+Write-Host "Backend starting on http://127.0.0.1:8010" -ForegroundColor Blue
 Start-Process powershell -ArgumentList @(
     "-NoExit",
     "-Command",
     "Set-Location '$rootPath\backend'; " +
     "`$env:PYTHONIOENCODING='utf-8'; " +
-    "& '$pythonPath' -m uvicorn main:app --reload --port 8000"
+    "& '$pythonPath' -m uvicorn main:app --reload --port 8010"
 ) -NoNewWindow
 
 Start-Sleep -Milliseconds 1000

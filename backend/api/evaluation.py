@@ -33,6 +33,10 @@ def evaluation_chat(req: EvaluationChatRequest, db: Session = Depends(get_db)):
         message=req.message,
         subject=req.subject,
     )
+    print(
+        f"ℹ️ Evaluation chat served user_id={req.user_id} subject={req.subject or 'ALL'} "
+        f"message_len={len((req.message or '').strip())} reply_len={len(str(reply or '').strip())}"
+    )
     return {"ok": True, "reply": reply}
 
 

@@ -17,7 +17,7 @@ import {
   ArrowDownRight,
 } from "lucide-react";
 
-import AgentConversationCard from "@/components/AgentConversationCard";
+import StudentOrbitAgent from "@/components/StudentOrbitAgent";
 import { apiClient, longRequestConfig, normalizeApiError, runLongRequest } from "@/services/api";
 
 type AssessmentItem = {
@@ -308,7 +308,7 @@ export default function EvaluationPage() {
             </p>
           </section>
         ) : (
-          <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+          <section className="grid gap-6 grid-cols-1">
             <div className="space-y-5">
               {evalScores ? (
                 <div className="relative overflow-hidden rounded-[2rem] bg-[linear-gradient(135deg,#0f172a,#312e81,#0f172a)] p-7 text-white shadow-[0_24px_64px_rgba(15,23,42,0.25)]">
@@ -443,25 +443,14 @@ export default function EvaluationPage() {
                 )}
               </div>
             </div>
-
-            <AgentConversationCard
-              badge="Evaluation Agent"
-              title="Hỏi về kết quả học tập"
-              subtitle="Agent sẽ đọc lịch sử điểm, ngày kiểm tra, trạng thái tài liệu và hạn kế hoạch để phân tích đúng vào dữ liệu của bạn."
-              accentClassName="bg-[linear-gradient(135deg,#dbeafe,#eef2ff_45%,#ede9fe)]"
-              placeholder="Ví dụ: Thành tích học tôi thế nào, môn nào tôi kém, tài liệu nào cần ôn tập lại trước kỳ thi..."
-              inputValue={chatInput}
-              sending={sending}
-              slowNotice={slowNotice}
-              messages={chatMessages}
-              suggestions={examples}
-              onInputChange={setChatInput}
-              onSuggestionClick={(value) => setChatInput(value)}
-              onSend={() => void sendEvaluationMessage(chatInput)}
-            />
           </section>
         )}
       </div>
+
+      <StudentOrbitAgent
+        userId={userId}
+        selectedSubject={selectedSubject}
+      />
     </div>
   );
 }

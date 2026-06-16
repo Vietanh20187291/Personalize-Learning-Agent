@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from groq import Groq
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from db import models
@@ -520,6 +521,145 @@ Documents:
         if not active:
             return None
         return self._serialize_plan(active)
+
+    # ------------------------------------------------------------------ #
+    #  Áp dụng chỉ thị của giảng viên (Nova → Orbit → Planning)           #
+    # ------------------------------------------------------------------ #
+    def apply_directive_documents(
+        self,
+        user_id: int,
+        document_ids: List[int],
+        reason: str = "Giáo viên yêu cầu học thêm",
+    ) -> Dict[str, object]:
+        """
+        Thêm các tài liệu (do giảng viên yêu cầu qua OrbitCoachDirective) vào plan
+        hoạt động của sinh viên. Nếu chưa có plan → tạo mới. Bỏ qua tài liệu đã có
+        trong plan (unique constraint plan_id + document_id).
+        """
+        if not document_ids:
+            return {"added_count": 0, "skipped_count": 0}
+
+        plan_row = (
+            self.db.query(models.StudentLearningPlan)
+            .filter(
+                models.StudentLearningPlan.user_id == user_id,
+                models.StudentLearningPlan.status == "active",
+            )
+            .order_by(models.StudentLearningPlan.generated_at.desc())
+            .first()
+        )
+        # Nếu chưa có plan active → tạo plan rỗng rồi thêm tài liệu chỉ thị vào.
+        if plan_row is None:
+            now = datetime.utcnow()
+            plan_row = models.StudentLearningPlan(
+                user_id=user_id,
+                generated_at=now,
+                generated_for_login_at=None,
+                generation_reason="teacher_directive",
+                status="active",
+                notes="Kế hoạch khởi tạo từ chỉ thị của giảng viên.",
+            )
+            self.db.add(plan_row)
+            self.db.flush()
+
+        existing_steps = (
+            self.db.query(models.StudentLearningPlanStep)
+            .filter(models.StudentLearningPlanStep.plan_id == plan_row.id)
+            .all()
+        )
+        existing_by_doc = {int(step.document_id): step for step in existing_steps}
+        existing_doc_ids = set(existing_by_doc.keys())
+        max_order = (
+            self.db.query(func.max(models.StudentLearningPlanStep.step_order))
+            .filter(models.StudentLearningPlanStep.plan_id == plan_row.id)
+            .scalar()
+            or 0
+        )
+
+        docs = self.db.query(models.Document).filter(
+            models.Document.id.in_(document_ids),
+        ).all()
+        docs_by_id = {int(d.id): d for d in docs}
+
+        now = datetime.utcnow()
+        today = now.date()
+        end_of_week = today + timedelta(days=(6 - today.weekday()))  # Chủ nhật cùng tuần
+
+        added = 0
+        skipped = 0
+        promoted = 0
+        for doc_id in document_ids:
+            doc = docs_by_id.get(int(doc_id))
+            if doc is None:
+                skipped += 1
+                continue
+            # Nếu document đã có trong plan → nâng ưu tiên lên teacher_directive + dời lên tuần này.
+            if int(doc_id) in existing_doc_ids:
+                step = existing_by_doc.get(int(doc_id))
+                if step is not None and step.priority_group != "teacher_directive":
+                    step.priority_group = "teacher_directive"
+                    step.planned_date = today
+                    step.deadline_date = end_of_week
+                    step.reason = reason
+                    promoted += 1
+                continue
+            max_order += 1
+            self.db.add(
+                models.StudentLearningPlanStep(
+                    plan_id=plan_row.id,
+                    user_id=user_id,
+                    document_id=doc.id,
+                    subject_id=doc.subject_id,
+                    class_id=doc.class_id,
+                    step_order=max_order,
+                    planned_date=today,
+                    deadline_date=end_of_week,
+                    priority_group="teacher_directive",
+                    latest_score=None,
+                    reason=reason,
+                    subject_name=None,
+                    document_title=doc.title or doc.filename,
+                    document_filename=doc.filename,
+                    is_completed=False,
+                )
+            )
+            existing_doc_ids.add(int(doc_id))
+            added += 1
+
+        self.db.commit()
+        return {"added_count": added, "promoted_count": promoted, "skipped_count": skipped}
+
+    def apply_pending_directives(self, user_id: int) -> Dict[str, object]:
+        """
+        Tự động áp dụng các OrbitCoachDirective chưa xử lý (applied_at IS NULL) của sinh viên
+        có chứa target_documents_json. Trả về tổng số tài liệu đã thêm.
+        """
+        pending = (
+            self.db.query(models.OrbitCoachDirective)
+            .filter(
+                models.OrbitCoachDirective.student_id == user_id,
+                models.OrbitCoachDirective.is_active == True,
+                models.OrbitCoachDirective.applied_at.is_(None),
+            )
+            .all()
+        )
+        total_added = 0
+        total_directives = 0
+        for directive in pending:
+            doc_ids = list(directive.target_documents_json or [])
+            if not doc_ids:
+                continue
+            total_directives += 1
+            result = self.apply_directive_documents(
+                user_id=user_id,
+                document_ids=doc_ids,
+                reason="Giáo viên yêu cầu học thêm (chỉ thị tuần)",
+            )
+            total_added += int(result.get("added_count") or 0) + int(result.get("promoted_count") or 0)
+            directive.applied_at = datetime.utcnow()
+        if total_directives:
+            self.db.commit()
+        return {"directives_applied": total_directives, "documents_added": total_added}
 
     def _normalize_text(self, text: str) -> str:
         normalized = unicodedata.normalize("NFKD", text or "")

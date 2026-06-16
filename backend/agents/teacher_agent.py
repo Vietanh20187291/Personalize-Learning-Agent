@@ -1104,16 +1104,100 @@ class TeacherAgent:
         normalized = self._normalize(message)
         tests = 0
         chapters = 0
+        documents = 0
 
         test_match = re.search(r"(\d+)\s*(?:bài|bai)\s*(?:kiểm tra|kiem tra|test)", normalized)
         if test_match:
             tests = int(test_match.group(1))
 
-        chapter_match = re.search(r"(\d+)\s*(?:chương|chuong|bài|bai)\s*(?:học|hoc)?", normalized)
-        if chapter_match:
-            chapters = int(chapter_match.group(1))
+        # "2 tài liệu" / "2 tai lieu" / "2 học liệu"
+        doc_match = re.search(r"(\d+)\s*(?:tài liệu|tai lieu|học liệu|hoc lieu)", normalized)
+        if doc_match:
+            documents = int(doc_match.group(1))
 
-        return {"target_tests": tests, "target_chapters": chapters}
+        # chapters chỉ parse khi KHÔNG có từ "tài liệu" (tránh đếm trùng "2 bài")
+        if documents == 0:
+            chapter_match = re.search(r"(\d+)\s*(?:chương|chuong|bài|bai)\s*(?:học|hoc)?", normalized)
+            if chapter_match:
+                chapters = int(chapter_match.group(1))
+
+        return {"target_tests": tests, "target_chapters": chapters, "target_documents": documents}
+
+    def _resolve_directive_documents(
+        self,
+        student: Optional[User],
+        classroom: Optional[Classroom],
+        subject: Optional[Subject],
+        message: str,
+        target_count: int,
+    ) -> List[int]:
+        """
+        Chọn tài liệu cụ thể sẽ thêm vào plan của sinh viên.
+        - Nếu teacher nêu tên tài liệu trong message → match filename/title.
+        - Nếu chỉ nêu số lượng → chọn N tài liệu chưa học / điểm thấp nhất của môn.
+        """
+        if target_count <= 0 or student is None:
+            return []
+
+        # Query tài liệu của môn (hoặc lớp) mà sinh viên được đăng ký.
+        doc_query = self.db.query(Document).filter(Document.id.isnot(None))
+        if subject is not None:
+            doc_query = doc_query.filter(Document.subject_id == subject.id)
+        if classroom is not None:
+            doc_query = doc_query.filter(Document.class_id == classroom.id)
+        all_docs = doc_query.order_by(Document.id.asc()).all()
+        if not all_docs:
+            return []
+
+        # 1) Match tên tài liệu trong message (nếu teacher nêu tên).
+        normalized_msg = self._normalize(message)
+        # Cắt bỏ phần số lượng để không match nhầm.
+        named: List[Document] = []
+        for doc in all_docs:
+            title = self._normalize(doc.title or "")
+            fname = self._normalize(doc.filename or "")
+            if not title and not fname:
+                continue
+            # Match nếu tên/filename xuất hiện như một cụm trong message.
+            if title and len(title) >= 4 and title in normalized_msg:
+                named.append(doc)
+            elif fname and len(fname) >= 4 and fname in normalized_msg:
+                named.append(doc)
+        if named:
+            return [d.id for d in named[:target_count]]
+
+        # 2) Chọn N tài liệu chưa học / điểm thấp nhất.
+        # Ưu tiên: chưa có evaluation (chưa học) → sau đó theo latest_score tăng dần.
+        from db.models import StudentDocumentEvaluation
+        evals = {
+            int(e.document_id): (int(e.attempts or 0), float(e.latest_score) if e.latest_score is not None else None)
+            for e in self.db.query(StudentDocumentEvaluation).filter(
+                StudentDocumentEvaluation.user_id == student.id,
+                StudentDocumentEvaluation.document_id.in_([d.id for d in all_docs]),
+            ).all()
+        }
+
+        def sort_key(doc: Document):
+            attempts, score = evals.get(doc.id, (0, None))
+            # attempts=0 (chưa học) ưu tiên trước; sau đó score thấp trước.
+            return (attempts, (score if score is not None else 999.0), doc.id)
+
+        ordered = sorted(all_docs, key=sort_key)
+        return [d.id for d in ordered[:target_count]]
+
+    def _document_titles(self, document_ids: List[int]) -> List[str]:
+        if not document_ids:
+            return []
+        rows = self.db.query(Document).filter(Document.id.in_(document_ids)).all()
+        by_id = {r.id: r for r in rows}
+        titles: List[str] = []
+        for doc_id in document_ids:
+            doc = by_id.get(doc_id)
+            if not doc:
+                continue
+            title = self._clean_text(doc.title or doc.filename or f"Tài liệu {doc_id}")
+            titles.append(title)
+        return titles
 
     def _is_orbit_directive_request(self, message: str) -> bool:
         normalized = self._normalize(message)
@@ -1125,6 +1209,7 @@ class TeacherAgent:
         targets = self._extract_orbit_targets(message)
         target_tests = targets["target_tests"]
         target_chapters = targets["target_chapters"]
+        target_documents = targets.get("target_documents", 0)
 
         now = datetime.utcnow()
         week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1151,19 +1236,20 @@ class TeacherAgent:
                 },
             }
 
-        if target_tests <= 0 and target_chapters <= 0:
-            reply = "Tôi đã nhận yêu cầu giao chỉ tiêu Orbit nhưng chưa thấy số lượng cụ thể. Bạn hãy nói rõ: thêm bao nhiêu bài kiểm tra hoặc bao nhiêu chương."
+        if target_tests <= 0 and target_chapters <= 0 and target_documents <= 0:
+            reply = "Tôi đã nhận yêu cầu giao chỉ tiêu Orbit nhưng chưa thấy số lượng cụ thể. Bạn hãy nói rõ: thêm bao nhiêu bài kiểm tra, bao nhiêu chương, hay bao nhiêu tài liệu."
             return {
                 "reply": reply,
                 "suggested_actions": [
                     "Tuần này làm thêm 2 bài kiểm tra",
                     "Tuần này học thêm 2 chương",
-                    "Tuần này làm thêm 2 bài kiểm tra và 2 chương",
+                    "Tuần này học thêm 2 tài liệu",
+                    "Tuần này làm thêm 2 bài kiểm tra và học thêm 2 tài liệu",
                 ],
                 "intent_type": "orbit_directive_missing_target",
                 "confidence": 0.9,
                 "needs_more_info": True,
-                "missing_fields": ["target_tests_or_target_chapters"],
+                "missing_fields": ["target_tests_or_target_chapters_or_documents"],
                 "action_metadata": {
                     "action_type": "none",
                     "target": "teacher",
@@ -1172,6 +1258,12 @@ class TeacherAgent:
                 },
             }
 
+        # Resolve document_ids: nếu teacher nêu tên tài liệu → match tên;
+        # nếu chỉ nêu số lượng → chọn N tài liệu chưa học/điểm thấp nhất của môn.
+        resolved_document_ids: List[int] = []
+        if target_documents > 0:
+            resolved_document_ids = self._resolve_directive_documents(student, classroom, subject, message, target_documents)
+
         directive = OrbitCoachDirective(
             teacher_id=teacher_id,
             student_id=student.id,
@@ -1179,6 +1271,7 @@ class TeacherAgent:
             subject_id=subject.id if subject else None,
             target_tests=target_tests,
             target_chapters=target_chapters,
+            target_documents_json=resolved_document_ids if resolved_document_ids else None,
             note=self._clean_text(message),
             week_start=week_start,
             week_end=week_end,
@@ -1192,18 +1285,26 @@ class TeacherAgent:
             parts.append(f"{target_tests} bài kiểm tra")
         if target_chapters > 0:
             parts.append(f"{target_chapters} chương")
+        if target_documents > 0:
+            doc_titles = self._document_titles(resolved_document_ids)
+            if doc_titles:
+                parts.append(f"{target_documents} tài liệu ({', '.join(doc_titles[:2])}{'…' if len(doc_titles) > 2 else ''})")
+            else:
+                parts.append(f"{target_documents} tài liệu")
         target_text = " và ".join(parts)
 
         reply = (
             f"Đã giao chỉ tiêu tuần này cho Orbit của sinh viên {student_name}: {target_text}. "
             f"Orbit sẽ đốc thúc sát tiến độ, nhắc học nếu chậm, và ghi nhận khen ngợi khi sinh viên cải thiện."
         )
+        if resolved_document_ids:
+            reply += f" Khi sinh viên đăng nhập, hệ thống sẽ tự động thêm {len(resolved_document_ids)} tài liệu này vào lịch học tuần."
 
         self.db.add(Notification(
             recipient_user_id=student.id,
             actor_user_id=teacher_id,
             type="teacher_assignment",
-            title="Giảng viên giao thêm nhiệm vụ học tập",
+            title="Giảng viên yêu cầu bạn học thêm tài liệu" if resolved_document_ids else "Giảng viên giao thêm nhiệm vụ học tập",
             body=f"Tuần này bạn được giao: {target_text}.",
             metadata_json={
                 "directive_id": directive.id,
@@ -1212,6 +1313,7 @@ class TeacherAgent:
                 "subject_id": subject.id if subject else None,
                 "target_tests": target_tests,
                 "target_chapters": target_chapters,
+                "target_document_ids": resolved_document_ids,
             },
             is_read=False,
         ))

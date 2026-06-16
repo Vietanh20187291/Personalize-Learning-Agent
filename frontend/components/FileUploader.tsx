@@ -3,6 +3,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import axios from 'axios';
 import { toast } from 'react-hot-toast';
 import { UploadCloud, FileText, Loader2, X, CheckCircle2, AlertCircle } from 'lucide-react';
+import { failTaskToast, startTaskToast, succeedTaskToast } from '../services/taskToast';
 
 interface Classroom {
   id: number;
@@ -64,6 +65,7 @@ export default function FileUploader({ onUploadSuccess, teacherId, classId, exte
 
     const formData = new FormData();
     formData.append("file", selectedFile);
+    const toastId = startTaskToast("AI đang phân tích tài liệu...");
 
     try {
       const res = await axios.post("http://localhost:8010/api/upload/analyze-subject", formData);

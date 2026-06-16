@@ -297,12 +297,14 @@ class OrbitCoachDirective(Base):
     subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True, index=True)
     target_tests = Column(Integer, default=0)
     target_chapters = Column(Integer, default=0)
+    target_documents_json = Column(JSON, nullable=True)
     note = Column(Text, nullable=True)
     week_start = Column(DateTime, nullable=False)
     week_end = Column(DateTime, nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
 
     classroom = relationship("Classroom", back_populates="orbit_directives")
 
@@ -351,6 +353,27 @@ class StudentDocumentScoreHistory(Base):
     total_questions = Column(Integer, nullable=True)
     correct_count = Column(Integer, nullable=True)
     tested_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class WrongAnswerRecord(Base):
+    """Lưu từng câu trả lời sai của sinh viên theo từng tài liệu."""
+    __tablename__ = "wrong_answer_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=False, index=True)
+    class_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True, index=True)
+    question_bank_id = Column(Integer, ForeignKey("question_bank.id"), nullable=True, index=True)
+
+    question_text = Column(Text, nullable=False)
+    options_json = Column(JSON, nullable=True)
+    student_choice = Column(String, nullable=True)
+    correct_answer = Column(String, nullable=True)
+    explanation = Column(Text, nullable=True)
+
+    assessment_history_id = Column(Integer, ForeignKey("assessment_history.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 class StudentLearningPlan(Base):
@@ -455,4 +478,77 @@ class TestOCRGradingResult(Base):
     score = Column(Float, nullable=False, default=0.0)
     grading_status = Column(String, nullable=False, default="pending", index=True)
     debug_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ResearchEvaluationCase(Base):
+    __tablename__ = "research_evaluation_cases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    component = Column(String, nullable=False, index=True)
+    agent_key = Column(String, nullable=True, index=True)
+    suite_key = Column(String, nullable=True, index=True)
+    name = Column(String, nullable=False, index=True)
+    description = Column(Text, nullable=True)
+    dataset_name = Column(String, nullable=True, index=True)
+    input_json = Column(JSON, nullable=False, default=dict)
+    expected_output_text = Column(Text, nullable=True)
+    expected_json = Column(JSON, nullable=True)
+    evaluation_config_json = Column(JSON, nullable=False, default=dict)
+    ground_truth_json = Column(JSON, nullable=True)
+    source_reference = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ResearchExperimentRun(Base):
+    __tablename__ = "research_experiment_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False, index=True)
+    component = Column(String, nullable=False, index=True)
+    agent_key = Column(String, nullable=True, index=True)
+    suite_key = Column(String, nullable=True, index=True)
+    dataset_name = Column(String, nullable=True, index=True)
+    status = Column(String, nullable=False, default="pending", index=True)
+    config_json = Column(JSON, nullable=False, default=dict)
+    metrics_json = Column(JSON, nullable=True)
+    summary_json = Column(JSON, nullable=True)
+    rq_summary_json = Column(JSON, nullable=True)
+    report_markdown = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=True, index=True)
+    finished_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ResearchExperimentItemResult(Base):
+    __tablename__ = "research_experiment_item_results"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(Integer, ForeignKey("research_experiment_runs.id"), nullable=False, index=True)
+    case_id = Column(Integer, ForeignKey("research_evaluation_cases.id"), nullable=True, index=True)
+    component = Column(String, nullable=False, index=True)
+    agent_key = Column(String, nullable=True, index=True)
+    case_name = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="pending", index=True)
+    input_json = Column(JSON, nullable=False, default=dict)
+    output_json = Column(JSON, nullable=True)
+    metrics_json = Column(JSON, nullable=True)
+    token_usage_json = Column(JSON, nullable=True)
+    latency_ms = Column(Float, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ResearchReportSnapshot(Base):
+    __tablename__ = "research_report_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False, index=True)
+    scope = Column(String, nullable=False, default="chapter5", index=True)
+    component = Column(String, nullable=True, index=True)
+    run_ids_json = Column(JSON, nullable=False, default=list)
+    summary_json = Column(JSON, nullable=True)
+    markdown_content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)

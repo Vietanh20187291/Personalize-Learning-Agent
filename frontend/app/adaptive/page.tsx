@@ -5,7 +5,7 @@ import axios from "axios";
 import { toast } from "react-hot-toast";
 import { BookOpen, FileCheck2, FileText, GraduationCap, Loader2, PlusCircle, Sparkles } from "lucide-react";
 
-import AgentConversationCard from "@/components/AgentConversationCard";
+import StudentOrbitAgent from "@/components/StudentOrbitAgent";
 import { apiClient, longRequestConfig, normalizeApiError, runLongRequest } from "@/services/api";
 
 type EnrolledClass = {
@@ -418,26 +418,6 @@ export default function AdaptiveLearningPage() {
             </section>
 
             <aside className="space-y-5">
-              <AgentConversationCard
-                badge="Tutor Agent"
-                title="Hỏi theo tài liệu đang hiển thị"
-                subtitle="Prompt của bạn sẽ đi kèm tài liệu đang mở, không tự tóm tắt trước khi bạn yêu cầu."
-                accentClassName="bg-[linear-gradient(135deg,#cffafe,#ecfeff_45%,#e2e8f0)]"
-                placeholder="Ví dụ: Tóm tắt tài liệu này, nêu các ý chính trong tài liệu này, giải thích đoạn này..."
-                inputValue={chatInput}
-                sending={sending}
-                slowNotice={slowNotice}
-                messages={activeMessages}
-                suggestions={[
-                  "Tóm tắt tài liệu này",
-                  "Các ý chính trong tài liệu này là gì?",
-                  "Giải thích nội dung tài liệu này dễ hiểu hơn",
-                ]}
-                onInputChange={setChatInput}
-                onSuggestionClick={(value) => setChatInput(value)}
-                onSend={() => void sendTutorMessage(chatInput)}
-              />
-
               <div className="rounded-[2rem] border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center gap-2">
                   <BookOpen size={18} className="text-slate-700" />
@@ -471,6 +451,15 @@ export default function AdaptiveLearningPage() {
           </div>
         )}
       </div>
+
+      <StudentOrbitAgent
+        userId={userId}
+        classId={enrolledClasses[0]?.id ?? null}
+        documentId={activeDocumentId}
+        sourceFile={activeDocument?.filename}
+        selectedSubject={selectedSubject}
+        enrolledClasses={enrolledClasses.map((c) => ({ id: c.id, subject: c.subject }))}
+      />
     </div>
   );
 }

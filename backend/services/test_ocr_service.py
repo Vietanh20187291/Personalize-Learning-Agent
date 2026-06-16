@@ -78,6 +78,7 @@ class TestOCRService:
         return {
             "id": result_row.id,
             "page_number": result_row.page_number,
+            "original_image_url": to_public_temp_path(Path(str(debug_payload.get("original_image_path") or result_row.source_image_path or ""))),
             "student_name_image_url": to_public_temp_path(Path(str(result_row.student_name_image_path or ""))),
             "source_image_url": to_public_temp_path(Path(str(result_row.source_image_path or ""))),
             "detected_student_id": result_row.detected_student_id or "",
@@ -320,9 +321,13 @@ class TestOCRService:
         results: List[Dict[str, object]] = []
         debug_dir = run_dir / "debug"
         debug_dir.mkdir(exist_ok=True)
+        original_dir = run_dir / "originals"
+        original_dir.mkdir(exist_ok=True)
 
         for page_number, loaded_page in enumerate(loaded_pages, start=1):
             candidate_images = loaded_page.candidate_images or [("default", loaded_page.image)]
+            original_candidate = next((item for name, item in candidate_images if name == "original"), None)
+            original_image = original_candidate if original_candidate is not None else loaded_page.image
             best_processed = None
             best_predicted_name = None
             best_candidate_name = "default"
@@ -354,6 +359,8 @@ class TestOCRService:
 
             page_image_path = run_dir / "pages" / f"page_{page_number:03d}.png"
             name_crop_path = run_dir / "crops" / f"name_{page_number:03d}.png"
+            original_image_path = original_dir / f"original_{page_number:03d}.png"
+            Image.fromarray(original_image.astype(np.uint8)).save(original_image_path)
             Image.fromarray(processed.aligned_image.astype(np.uint8)).save(page_image_path)
             Image.fromarray(processed.name_crop.astype(np.uint8)).save(name_crop_path)
 
@@ -395,6 +402,7 @@ class TestOCRService:
                     **loaded_page.debug,
                     **processed.debug,
                     "submission_source_type": loaded_page.source_type,
+                    "original_image_path": str(original_image_path),
                     "selected_image_candidate": best_candidate_name,
                     "predicted_student_name": predicted_name.text,
                     "predicted_student_name_engine": predicted_name.engine,

@@ -745,7 +745,7 @@ const AssessmentForm = () => {
 
              <div className="p-6 md:p-8 bg-white">
                 
-                <h2 className="text-lg md:text-xl font-bold text-gray-800 mb-6 leading-relaxed whitespace-pre-wrap font-mono">{currentQ.content}</h2>
+                <h2 className="text-lg md:text-xl font-bold text-gray-800 mb-6 leading-relaxed whitespace-pre-wrap">{currentQ.content}</h2>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                    
                    {safeOptions.map((opt: string, idx: number) => {
@@ -781,7 +781,7 @@ const AssessmentForm = () => {
                       return (
                           <div key={idx} onClick={() => !reviewMode && setAnswers(prev => ({...prev, [currentQ.id]: label}))} className={`relative p-4 border rounded-xl transition-all flex items-start gap-3 ${cStyle}`}>
                              <span className={`w-6 h-6 rounded flex-shrink-0 flex items-center justify-center text-[10px] font-black mt-0.5 ${bStyle}`}>{label}</span>
-                             <span className={`text-sm font-medium leading-relaxed whitespace-pre-wrap font-mono ${tStyle}`}>{displayContent}</span>
+                             <span className={`text-sm font-medium leading-relaxed whitespace-pre-wrap ${tStyle}`}>{displayContent}</span>
                           </div>
                       );
                    })}

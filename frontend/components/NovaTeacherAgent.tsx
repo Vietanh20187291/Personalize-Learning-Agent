@@ -5,12 +5,10 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   AlertCircle,
   Bot,
-  ChevronRight,
   Loader,
   Minimize2,
   Send,
   Sparkles,
-  WandSparkles,
 } from "lucide-react";
 
 import { apiClient, longRequestConfig, normalizeApiError, runLongRequest } from "../services/api";
@@ -101,7 +99,7 @@ export default function NovaTeacherAgent() {
     "Tóm tắt nhanh tình hình lớp IT1",
     "Tình hình học tập sinh viên ABX thế nào",
     "Môn Lập trình hướng đối tượng hiện có những lớp nào",
-    "Xuất đề trắc nghiệm 20 câu cho môn Lập trình hướng đối tượng",
+    "Xuất đề trắc nghiệm 20 câu cho môn Lập trình hướng đối tượng 2 mã đề",
   ];
 
   useEffect(() => {
@@ -354,9 +352,7 @@ export default function NovaTeacherAgent() {
       aria-label="Nova Agent"
     >
       <div className="pointer-events-none absolute inset-0">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.16),transparent_26%),radial-gradient(circle_at_top_right,rgba(37,99,235,0.18),transparent_28%)]" />
-        <div className="absolute inset-0 opacity-45 [background-image:linear-gradient(rgba(255,255,255,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.03)_1px,transparent_1px)] [background-size:26px_26px]" />
-        <div className="absolute left-0 top-0 h-full w-[90px] bg-[linear-gradient(180deg,rgba(34,211,238,0.08),transparent_70%)]" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.12),transparent_24%),radial-gradient(circle_at_top_right,rgba(37,99,235,0.14),transparent_26%)]" />
       </div>
 
       <header className="relative border-b border-cyan-300/12 px-4 pb-4 pt-4">
@@ -364,11 +360,8 @@ export default function NovaTeacherAgent() {
           <div className="flex min-w-0 gap-3">
             <NovaAvatar imageUrl={NOVA_AGENT_IMAGE} />
             <div className="min-w-0">
-              <div className="inline-flex items-center gap-1 rounded-full border border-cyan-300/16 bg-cyan-400/10 px-2.5 py-1 text-[9px] font-black uppercase tracking-[0.24em] text-cyan-100/85">
-                <WandSparkles size={10} />
-                Nova Console
-              </div>
-              <h3 className="mt-2 text-[16px] font-black tracking-[-0.03em] text-white">Nova Teacher Agent</h3>
+              <h3 className="mt-1 text-[18px] font-bold tracking-[-0.03em] text-white">Nova Teacher Agent</h3>
+              <p className="mt-1 text-[13px] font-medium text-cyan-50/72">Trợ lý giảng viên cho lớp hiện tại</p>
             </div>
           </div>
 
@@ -384,31 +377,14 @@ export default function NovaTeacherAgent() {
       </header>
 
       <div className="relative flex-1 overflow-hidden">
-        <div className="absolute inset-y-0 left-0 w-[3px] bg-[linear-gradient(180deg,rgba(34,211,238,0.9),rgba(59,130,246,0.14),transparent)]" />
-
         <div className="h-full space-y-3 overflow-y-auto px-4 py-4">
           {messages.length === 0 ? (
             <div className="rounded-[1.6rem] border border-cyan-300/14 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.04))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
               <div className="flex items-center gap-2 text-cyan-50">
                 <Bot size={16} className="text-cyan-300" />
-                <p className="nova-copy-compact text-[12px] font-semibold leading-6">
-                  Nova đang đứng trong ngữ cảnh lớp hiện tại và chỉ chờ yêu cầu từ giảng viên.
+                <p className="text-[14px] font-medium leading-6 text-cyan-50/88">
+                  Nova đang sẵn sàng trong ngữ cảnh lớp hiện tại.
                 </p>
-              </div>
-              <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                {suggestedQuestions.map((question) => (
-                  <button
-                    key={question}
-                    type="button"
-                    onClick={() => handleSelectSuggestedQuestion(question)}
-                    className="group rounded-[1.15rem] border border-cyan-300/12 bg-slate-950/42 px-3 py-3 text-left transition hover:border-cyan-300/22 hover:bg-slate-900/60"
-                  >
-                    <span className="flex items-start justify-between gap-3">
-                      <span className="nova-copy-compact text-[11px] font-semibold leading-5 text-cyan-50">{question}</span>
-                      <ChevronRight size={14} className="mt-0.5 shrink-0 text-cyan-300/62 transition-transform group-hover:translate-x-0.5" />
-                    </span>
-                  </button>
-                ))}
               </div>
             </div>
           ) : null}
@@ -416,7 +392,7 @@ export default function NovaTeacherAgent() {
           {error ? (
             <div className="flex gap-2 rounded-[1.2rem] border border-red-400/40 bg-red-500/14 p-3">
               <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-300" />
-              <p className="nova-copy-compact text-[12px] leading-6 text-red-100">{error}</p>
+              <p className="text-[13px] leading-6 text-red-100">{error}</p>
             </div>
           ) : null}
 
@@ -424,20 +400,17 @@ export default function NovaTeacherAgent() {
             const isUser = msg.role === "user";
             return (
               <div key={idx} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-                <div className={`max-w-[88%] ${isUser ? "items-end" : "items-start"} flex flex-col gap-1.5`}>
-                  <span className="px-1 text-[9px] font-bold uppercase tracking-[0.16em] text-cyan-100/38">
-                    {isUser ? "Giảng viên" : "Nova"}
-                  </span>
+                <div className={`max-w-[88%] ${isUser ? "items-end" : "items-start"} flex flex-col gap-1`}>
                   <div
                     className={`rounded-[1.3rem] px-3.5 py-3 text-[13px] leading-6 ${
                       isUser
-                        ? "rounded-br-sm bg-[linear-gradient(135deg,rgba(6,182,212,0.92),rgba(37,99,235,0.88))] text-white shadow-[0_16px_34px_rgba(6,182,212,0.2)]"
-                        : "rounded-bl-sm border border-cyan-300/14 bg-white/8 font-medium text-cyan-50"
+                        ? "rounded-br-sm bg-[linear-gradient(135deg,rgba(6,182,212,0.92),rgba(37,99,235,0.88))] text-[14px] text-white shadow-[0_16px_34px_rgba(6,182,212,0.2)]"
+                        : "rounded-bl-sm border border-cyan-300/14 bg-white/8 text-[14px] font-medium text-cyan-50"
                     }`}
                   >
                     {msg.content}
                   </div>
-                  <span className="px-1 text-[9px] font-medium text-cyan-100/30">{formatTime(msg.timestamp)}</span>
+                  <span className="px-1 text-[10px] font-medium text-cyan-100/30">{formatTime(msg.timestamp)}</span>
                 </div>
               </div>
             );
@@ -447,11 +420,11 @@ export default function NovaTeacherAgent() {
             <div className="flex flex-col items-start gap-2">
               <div className="flex items-center gap-2 rounded-[1.2rem] border border-cyan-300/14 bg-white/8 px-3 py-2.5 text-cyan-50">
                 <Loader size={14} className="animate-spin" />
-                <span className="nova-copy-compact text-[12px] font-medium">Nova đang xử lý yêu cầu...</span>
+                <span className="text-[13px] font-medium">Nova đang xử lý...</span>
               </div>
               {slowNotice ? (
-                <div className="nova-copy-compact rounded-[1rem] border border-cyan-300/14 bg-white/8 px-3 py-2 text-[11px] font-semibold text-cyan-50">
-                  Yêu cầu vẫn đang được xử lý. Nova chưa mất kết nối, vui lòng đợi thêm một chút.
+                <div className="rounded-[1rem] border border-cyan-300/14 bg-white/8 px-3 py-2 text-[12px] font-medium text-cyan-50">
+                  Yêu cầu vẫn đang được xử lý, vui lòng đợi thêm một chút.
                 </div>
               ) : null}
             </div>
@@ -461,22 +434,26 @@ export default function NovaTeacherAgent() {
         </div>
       </div>
 
-      <footer className="relative border-t border-cyan-300/12 px-4 py-4">
-        <div className="mb-3 flex flex-wrap gap-2">
+      <div className="relative border-t border-cyan-300/12 px-4 py-3">
+        <div className="mb-2 flex items-center gap-2 text-cyan-100/70">
+          <Sparkles size={13} className="text-cyan-300" />
+          <span className="text-[11px] font-semibold uppercase tracking-[0.18em]">Gợi ý nhanh</span>
+        </div>
+        <div className="grid gap-2">
           {suggestedQuestions.map((question) => (
             <button
               key={question}
               type="button"
               onClick={() => handleSelectSuggestedQuestion(question)}
-              disabled={loading}
-              className="nova-chip-compact rounded-full border border-cyan-300/16 bg-white/7 px-2.5 py-1.5 text-[9.5px] font-semibold leading-4 text-cyan-100 transition-colors hover:bg-white/12 disabled:opacity-50"
-              title={question}
+              className="rounded-[1.15rem] border border-cyan-300/12 bg-slate-950/42 px-3 py-3 text-left transition hover:border-cyan-300/22 hover:bg-slate-900/60"
             >
-              {question}
+              <span className="text-[13px] font-medium leading-5 text-cyan-50">{question}</span>
             </button>
           ))}
         </div>
+      </div>
 
+      <footer className="relative border-t border-cyan-300/12 px-4 py-4">
         <div className="rounded-[1.6rem] border border-cyan-300/14 bg-[linear-gradient(180deg,rgba(2,6,23,0.82),rgba(15,23,42,0.74))] p-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
           <div className="flex items-end gap-2">
             <input
@@ -490,7 +467,7 @@ export default function NovaTeacherAgent() {
                 }
               }}
               placeholder="Nhập yêu cầu cho Nova..."
-              className="nova-input-compact flex-1 rounded-[1.1rem] border border-transparent bg-transparent px-3 py-3 text-[11px] font-medium text-white outline-none placeholder:text-[10px] placeholder:font-medium placeholder:text-cyan-100/42"
+              className="flex-1 rounded-[1.1rem] border border-transparent bg-transparent px-3 py-3 text-[14px] font-medium text-white outline-none placeholder:text-[13px] placeholder:font-medium placeholder:text-cyan-100/42"
               disabled={loading}
             />
             <button

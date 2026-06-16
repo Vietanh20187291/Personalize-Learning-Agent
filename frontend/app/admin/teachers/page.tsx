@@ -11,6 +11,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
+import { failTaskToast, startTaskToast, succeedTaskToast } from '@/services/taskToast';
 
 export default function CreateTeacherPage() {
   const [fullname, setFullname] = useState('');
@@ -26,6 +27,7 @@ export default function CreateTeacherPage() {
     setLoading(true);
     setError('');
     setNewAccount(null);
+    const toastId = startTaskToast('Đang tạo tài khoản giáo viên...');
 
     try {
       const token = localStorage.getItem('token');
@@ -62,9 +64,11 @@ export default function CreateTeacherPage() {
       // Xóa trắng form 
       setFullname('');
       setEmail('');
+      succeedTaskToast(toastId, `Đã tạo tài khoản cho ${data.fullname}.`);
 
     } catch (err: any) {
       setError(err.message);
+      failTaskToast(toastId, err, 'Không thể tạo tài khoản giáo viên.');
     } finally {
       setLoading(false);
     }

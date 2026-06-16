@@ -1,15 +1,48 @@
+"""
+Orbit Agent — LLM-powered personalized coaching.
+
+Thay vì trả lời bằng template string (if/else), Orbit sử dụng LLM
+để coaching cá nhân hóa dựa trên hồ sơ học sinh thực tế.
+"""
+import os
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
+from dotenv import load_dotenv
+from groq import Groq
 from sqlalchemy.orm import Session
 
 from db import models
+
+load_dotenv()
 
 
 class OrbitAgent:
     def __init__(self, db: Session):
         self.db = db
+        self.api_key = self._resolve_groq_api_key()
+        self.model = "llama-3.3-70b-versatile"
+        self.request_timeout_seconds = 18.0
 
+        if self.api_key and not any(t in self.api_key.lower() for t in ("dummy", "testing", "placeholder")):
+            try:
+                self.client = Groq(api_key=self.api_key, timeout=self.request_timeout_seconds)
+            except TypeError:
+                self.client = Groq(api_key=self.api_key)
+        else:
+            self.client = None
+
+    def _resolve_groq_api_key(self) -> str:
+        for env_name in ["GROQ_KEY_ORBIT", "GROQ_KEY_ADAPTIVE", "GROQ_API_KEY", "GROQ_KEY_DEBUG"]:
+            value = (os.getenv(env_name) or "").strip()
+            if value and not any(t in value.lower() for t in ("dummy", "testing", "placeholder")):
+                return value
+        return (os.getenv("GROQ_KEY_ORBIT") or "").strip()
+
+    # ==========================================
+    # DATA HELPERS
+    # ==========================================
     def _week_bounds(self, now: datetime) -> Tuple[datetime, datetime]:
         start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=7)
@@ -140,17 +173,50 @@ class OrbitAgent:
             "month_chat_sec": month_chat_sec,
         }
 
-    def _discipline_judgement(self, stats: Dict[str, int], days_inactive: Optional[int]) -> str:
-        if days_inactive is not None and days_inactive >= 7:
-            return "Cảnh báo nghiêm trọng: bạn đã mất nhịp học hơn 1 tuần."
-        if stats["week_tests"] == 0 and stats["week_lessons"] == 0:
-            return "Đang học thiếu kỷ luật tuần này: chưa hoàn thành bài kiểm tra/chương nào."
-        if stats["week_study"] < 60:
-            return "Cường độ học tuần này thấp, cần tăng thời lượng học rõ rệt."
-        if stats["week_study"] >= 180 and stats["week_tests"] >= 2:
-            return "Tín hiệu rất tốt: bạn đang học đều và có kiểm tra định kỳ."
-        return "Nhịp học ở mức tạm ổn, nhưng vẫn có thể tăng tốc thêm."
+    def _build_weak_topics_summary(self, user_id: int, subject_name: str) -> str:
+        """Lấy tóm tắt điểm yếu cho context LLM."""
+        parts: List[str] = []
 
+        subject = self.db.query(models.Subject).filter(models.Subject.name.ilike(subject_name)).first()
+        if not subject:
+            return ""
+        subject_id = subject.id
+
+        # Điểm yếu — tài liệu điểm thấp
+        weak_docs = self.db.query(models.StudentDocumentEvaluation).filter(
+            models.StudentDocumentEvaluation.user_id == user_id,
+            models.StudentDocumentEvaluation.subject_id == subject_id,
+            models.StudentDocumentEvaluation.latest_score < 50,
+        ).order_by(models.StudentDocumentEvaluation.latest_score.asc()).limit(5).all()
+
+        if weak_docs:
+            names = []
+            for ev in weak_docs:
+                doc = self.db.query(models.Document).filter(models.Document.id == ev.document_id).first()
+                name = (doc.title or doc.filename or f"Tài liệu {ev.document_id}").strip()
+                names.append(f"{name} (điểm {ev.latest_score:.0f})")
+            parts.append(f"Các phần đang yếu: {', '.join(names)}")
+
+        # Câu sai gần đây
+        recent_wrongs = self.db.query(models.WrongAnswerRecord).filter(
+            models.WrongAnswerRecord.user_id == user_id,
+            models.WrongAnswerRecord.subject_id == subject_id,
+        ).order_by(models.WrongAnswerRecord.created_at.desc()).limit(5).all()
+
+        if recent_wrongs:
+            wrong_items = []
+            for w in recent_wrongs[:3]:
+                snippet = (w.question_text or "")[:60]
+                if snippet:
+                    wrong_items.append(f'"{snippet}" (chọn {w.student_choice}, đúng {w.correct_answer})')
+            if wrong_items:
+                parts.append(f"Hay sai các câu: {'; '.join(wrong_items)}")
+
+        return "\n".join(parts)
+
+    # ==========================================
+    # LLM-POWERED RESPONSE
+    # ==========================================
     def respond(
         self,
         user: models.User,
@@ -158,6 +224,10 @@ class OrbitAgent:
         message: str,
         class_id: Optional[int] = None,
     ) -> str:
+        """
+        Orbit Agent — LLM-powered personalized coaching.
+        Thay vì template if/else, dùng LLM với context cá nhân hóa.
+        """
         now = datetime.utcnow()
         stats = self._build_stats(user.id)
         last_active = self._last_activity_at(user.id)
@@ -166,17 +236,14 @@ class OrbitAgent:
             days_inactive = (now - last_active).days
 
         directives = self._get_active_directives(user.id, now)
-        judgement = self._discipline_judgement(stats, days_inactive)
+        weak_summary = self._build_weak_topics_summary(user.id, subject_name)
 
-        msg_lower = (message or "").lower()
-        asks_progress = any(token in msg_lower for token in [
-            "bao nhiêu bài", "bao nhieu bai", "học bao lâu", "hoc bao lau", "bao nhiêu câu", "bao nhieu cau",
-            "tiến độ", "tien do", "điểm", "diem", "score", "kết quả", "ket qua", "bao nhiêu phút", "bao nhieu phut"
-        ])
-        asks_plan = any(token in msg_lower for token in [
-            "kế hoạch", "ke hoach", "nên học gì", "nen hoc gi", "quên học gì", "quen hoc gi",
-            "học gì tiếp", "hoc gi tiep", "nên học tài liệu nào", "nen hoc tai lieu nao", "đề xuất", "de xuat"
-        ])
+        # Fallback nếu không có LLM
+        if not self.client:
+            return self._fallback_respond(subject_name, stats, days_inactive, directives)
+
+        # Build system prompt cá nhân hóa
+        student_name = (user.full_name or user.username or "bạn").strip()
 
         directive_lines: List[str] = []
         for item in directives:
@@ -189,57 +256,67 @@ class OrbitAgent:
             note = f"; ghi chú: {item.note}" if item.note else ""
             directive_lines.append(f"- Chỉ tiêu tuần từ giảng viên: {goal}{note}")
 
-        praise_line = ""
-        if stats["week_study"] >= 120 and stats["week_tests"] >= 1:
-            praise_line = "Bạn có cải thiện trong tuần này, tôi ghi nhận nỗ lực đó. Tiếp tục giữ nhịp."
+        discipline = ""
+        if days_inactive is not None and days_inactive >= 7:
+            discipline = f"⚠️ NGHỈ QUÁ LÂU: đã {days_inactive} ngày không học. Phải cực kỳ nghiêm khắc, yêu cầu học NGAY."
+        elif stats["week_tests"] == 0 and stats["week_lessons"] == 0:
+            discipline = "TUẦN NÀY CHƯA CÓ HOẠT ĐỘNG: nhắc nhở nghiêm túc."
+        elif stats["week_study"] < 60:
+            discipline = "CƯỜNG ĐỘ HỌC THẤP: khuyên tăng thời lượng rõ rệt."
+        elif stats["week_study"] >= 180 and stats["week_tests"] >= 2:
+            discipline = "TÍN HIỆU TỐT: khen ngợi, khuyến khích giữ nhịp."
 
-        if asks_progress:
-            response = [
-                f"Orbit Agent báo cáo học tập môn {subject_name} cho bạn:",
-                f"- Tổng số bài/chương đã hoàn thành: {stats['total_lessons']} (tuần này: {stats['week_lessons']}, tháng này: {stats['month_lessons']})",
-                f"- Thời gian học: tổng {stats['total_study']} phút, tuần này {stats['week_study']} phút, tháng này {stats['month_study']} phút",
-                f"- Bài kiểm tra đã làm: tổng {stats['total_tests']}, tuần này {stats['week_tests']}, tháng này {stats['month_tests']}",
-                f"- Tương tác với Orbit: tổng {stats['total_msgs']} câu hỏi, {stats['total_chat_sec'] // 60} phút chat; tuần này {stats['week_msgs']} câu, {stats['week_chat_sec'] // 60} phút",
-                f"- Đánh giá kỷ luật học tập: {judgement}",
-            ]
-            if days_inactive is not None and days_inactive >= 7:
-                response.append(f"- Cảnh báo: bạn đã {days_inactive} ngày chưa có hoạt động học tập đáng kể.")
-            if directive_lines:
-                response.append("- Chỉ tiêu giảng viên giao tuần này:")
-                response.extend(directive_lines)
-            if praise_line:
-                response.append(f"- {praise_line}")
-            return "\n".join(response)
+        system_prompt = f"""Bạn là Orbit — AI học tập cá nhân (coach) cho sinh viên {student_name}.
 
-        if asks_plan:
-            plan = [
-                "Kế hoạch học tập tôi giao cho bạn (Orbit - chế độ nghiêm):",
-                "- Mỗi ngày tối thiểu 30 phút đọc lại bài + 15 phút luyện câu hỏi.",
-                "- Tuần này hoàn thành ít nhất 2 phiên học có kiểm tra cuối buổi.",
-                "- Mỗi phiên học phải có ghi chú 3 ý chính bạn đã nắm được.",
-                "- Nếu làm sai >40% câu hỏi, bắt buộc học lại phần sai trong ngày.",
-                f"- Đánh giá hiện tại của bạn: {judgement}",
-            ]
-            if days_inactive is not None and days_inactive >= 7:
-                plan.append("- Bạn đã bỏ học quá lâu. Ưu tiên hôm nay: vào học ngay 1 chương và làm 1 bài test.")
-            if directive_lines:
-                plan.append("- Mục tiêu bắt buộc từ giảng viên:")
-                plan.extend(directive_lines)
-            if praise_line:
-                plan.append(f"- {praise_line}")
-            return "\n".join(plan)
+### THÔNG TIN HỌC SINH:
+- Tên: {student_name}
+- Môn đang theo dõi: {subject_name}
+- Tổng đã học: {stats['total_study']} phút, {stats['total_lessons']} bài/chương đạt, {stats['total_tests']} bài kiểm tra
+- Tuần này: {stats['week_study']} phút, {stats['week_tests']} bài kiểm tra, {stats['week_lessons']} bài đạt
+- Tháng này: {stats['month_study']} phút, {stats['month_tests']} bài kiểm tra
+- Tương tác Orbit: {stats['total_msgs']} câu hỏi, {stats['total_chat_sec'] // 60} phút chat
+- Số ngày không hoạt động: {days_inactive or 0}
+{"- " + weak_summary if weak_summary else ""}
+{"- " + discipline if discipline else ""}
 
-        base = [
-            f"Orbit đang theo dõi tiến độ môn {subject_name} của bạn.",
-            f"- Tuần này bạn đã học {stats['week_study']} phút, làm {stats['week_tests']} bài kiểm tra, hoàn thành {stats['week_lessons']} bài/chương.",
-            f"- Nhận xét: {judgement}",
-            "Bạn có thể hỏi tôi: 'Tôi đã học bao nhiêu bài?', 'Tôi có quên học gì không?', hoặc 'Lập kế hoạch học tuần này cho tôi'.",
+{"### CHỈ TIÊU TUẦN TỪ GIẢNG VIÊN:" + chr(10) + chr(10).join(directive_lines) if directive_lines else ""}
+
+### NHIỆM VỤ:
+- Bạn là COACH, không phải chatbot. Phản hồi phải mang tính cá nhân, như một người hướng dẫn tận tâm.
+- Gọi tên học sinh ({student_name}) ít nhất 1 lần để tạo cảm giác cá nhân hóa.
+- Phân tích dữ liệu, đưa ra nhận xét CỤ THỂ (không nói chung chung).
+- Nếu học sinh yếu phần gì → đề xuất ôn lại phần đó, không chỉ nói "ôn thêm".
+- Nếu học sinh tốt → khen ngợi và đề xuất thử thách nâng cao.
+- Nếu nghỉ lâu → nghiêm khắc nhưng động viên, đưa ra kế hoạch cụ thể cho hôm nay.
+- Đề xuất cụ thể: "ôm lại chương X", "làm thêm 2 bài kiểm tra về Y".
+- Trả lời bằng tiếng Việt, ngắn gọn (3-8 câu), thân thiện nhưng thẳng thắn.
+- KHÔNG lặp lại toàn bộ số liệu — chọn số liệu quan trọng nhất để nói.
+"""
+
+        try:
+            completion = self.client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": message},
+                ],
+                model=self.model,
+                temperature=0.5,
+                max_tokens=800,
+            )
+            response_text = str(completion.choices[0].message.content or "").strip()
+            return response_text or self._fallback_respond(subject_name, stats, days_inactive, directives)
+        except Exception as exc:
+            print(f"⚠️ Orbit LLM fallback: {exc}")
+            return self._fallback_respond(subject_name, stats, days_inactive, directives)
+
+    def _fallback_respond(self, subject_name: str, stats: Dict[str, int], days_inactive, directives) -> str:
+        """Fallback khi LLM không khả dụng — trả về template cơ bản."""
+        parts = [
+            f"Orbit đang theo dõi tiến độ môn {subject_name}.",
+            f"- Tuần này: {stats['week_study']} phút học, {stats['week_tests']} bài kiểm tra, {stats['week_lessons']} bài đạt.",
         ]
         if days_inactive is not None and days_inactive >= 7:
-            base.append("Cảnh báo: hơn 1 tuần bạn chưa học đều. Tôi yêu cầu bạn bắt đầu lại ngay hôm nay.")
-        if directive_lines:
-            base.append("Yêu cầu tuần này từ giảng viên:")
-            base.extend(directive_lines)
-        if praise_line:
-            base.append(praise_line)
-        return "\n".join(base)
+            parts.append(f"- ⚠️ Bạn đã {days_inactive} ngày chưa hoạt động. Cần vào học ngay.")
+        if stats["week_study"] < 60:
+            parts.append("- Cường độ học tuần này thấp. Hãy cố gắng học thêm.")
+        return "\n".join(parts)

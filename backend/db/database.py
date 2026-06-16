@@ -8,11 +8,22 @@ connect_args = {"check_same_thread": False}
 if is_sqlite:
     connect_args["timeout"] = 30
 
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args=connect_args,
-    pool_pre_ping=True,
-)
+engine_kwargs = {
+    "connect_args": connect_args,
+    "pool_pre_ping": bool(getattr(settings, "DATABASE_POOL_PRE_PING", True)),
+}
+if not is_sqlite:
+    engine_kwargs.update(
+        {
+            "pool_size": max(1, int(getattr(settings, "DATABASE_POOL_SIZE", 20) or 20)),
+            "max_overflow": max(0, int(getattr(settings, "DATABASE_MAX_OVERFLOW", 40) or 40)),
+            "pool_timeout": max(5, int(getattr(settings, "DATABASE_POOL_TIMEOUT_SECONDS", 30) or 30)),
+            "pool_recycle": max(60, int(getattr(settings, "DATABASE_POOL_RECYCLE_SECONDS", 1800) or 1800)),
+            "pool_use_lifo": True,
+        }
+    )
+
+engine = create_engine(settings.DATABASE_URL, **engine_kwargs)
 
 
 if is_sqlite:

@@ -733,9 +733,90 @@ NỘI DUNG ĐÃ LÀM SẠCH:
                 return []
 
     # ==========================================
-    # 2. HÀM GIA SƯ AI CHAT 
+    # BUILD PERSONALIZED CONTEXT (Hồ sơ cá nhân hóa)
     # ==========================================
-    def chat_with_tutor(self, subject: str, user_message: str, roadmap_context: str, allowed_filenames: list = None, session_topic: str = "", source_file: str = "", history: list = None, document_id: Optional[int] = None):
+    def _build_student_context(self, user_id: int, subject: str) -> str:
+        """Lấy hồ sơ học tập từ DB để inject vào system prompt Tutor Agent."""
+        parts: List[str] = []
+
+        # 1. Learner Profile — mức năng lực
+        subject_obj = self.db.query(Subject).filter(Subject.name.ilike(subject)).first()
+        subject_id = subject_obj.id if subject_obj else None
+
+        level = "Beginner"
+        if subject_id:
+            profile = self.db.query(LearnerProfile).filter_by(user_id=user_id, subject_id=subject_id).first()
+            if not profile:
+                profile = self.db.query(LearnerProfile).filter_by(user_id=user_id, subject=subject).first()
+            if profile and profile.current_level:
+                level = profile.current_level
+
+        parts.append(f"- Mức năng lực hiện tại: {level}")
+
+        # 2. Điểm yếu — tài liệu có điểm thấp hoặc chưa làm
+        if subject_id:
+            weak_docs = self.db.query(StudentDocumentEvaluation).filter(
+                StudentDocumentEvaluation.user_id == user_id,
+                StudentDocumentEvaluation.subject_id == subject_id,
+                StudentDocumentEvaluation.latest_score < 50,
+            ).order_by(StudentDocumentEvaluation.latest_score.asc()).limit(5).all()
+
+            if weak_docs:
+                weak_names = []
+                for ev in weak_docs:
+                    doc = self.db.query(Document).filter(Document.id == ev.document_id).first()
+                    name = self._clean_text(doc.title or doc.filename or f"Tài liệu {ev.document_id}")
+                    weak_names.append(f"{name} (điểm {ev.latest_score:.0f})")
+                parts.append(f"- Các phần đang yếu: {', '.join(weak_names)}")
+
+            # 3. Misconceptions — câu sai lặp lại gần đây
+            from db.models import WrongAnswerRecord
+            recent_wrongs = self.db.query(WrongAnswerRecord).filter(
+                WrongAnswerRecord.user_id == user_id,
+                WrongAnswerRecord.subject_id == subject_id,
+            ).order_by(WrongAnswerRecord.created_at.desc()).limit(8).all()
+
+            if recent_wrongs:
+                wrong_topics = []
+                for w in recent_wrongs[:5]:
+                    snippet = self._clean_text(w.question_text or "")[:80]
+                    if snippet:
+                        wrong_topics.append(f'"{snippet}" → bạn chọn {w.student_choice}, đáp án đúng {w.correct_answer}')
+                if wrong_topics:
+                    parts.append(
+                        f"- Những câu bạn đã làm sai gần đây:\n"
+                        + "\n".join(f"  + {t}" for t in wrong_topics)
+                    )
+
+            # 4. Strong topics — tài liệu đã vượt qua tốt
+            strong_docs = self.db.query(StudentDocumentEvaluation).filter(
+                StudentDocumentEvaluation.user_id == user_id,
+                StudentDocumentEvaluation.subject_id == subject_id,
+                StudentDocumentEvaluation.latest_score >= 75,
+            ).order_by(StudentDocumentEvaluation.latest_score.desc()).limit(3).all()
+
+            if strong_docs:
+                strong_names = []
+                for ev in strong_docs:
+                    doc = self.db.query(Document).filter(Document.id == ev.document_id).first()
+                    name = self._clean_text(doc.title or doc.filename or f"Tài liệu {ev.document_id}")
+                    strong_names.append(f"{name} ({ev.latest_score:.0f}đ)")
+                parts.append(f"- Các phần đã nắm vững tốt: {', '.join(strong_names)}")
+
+        # 5. Hành vi học — số lần làm bài
+        from db.models import StudentLearningProgress
+        progress = self.db.query(StudentLearningProgress).filter_by(user_id=user_id).first()
+        if progress:
+            total_mins = int(progress.total_study_minutes or 0)
+            if total_mins > 0:
+                parts.append(f"- Tổng thời gian đã học: {total_mins} phút")
+
+        return "\n".join(parts)
+
+    # ==========================================
+    # 2. HÀM GIA SƯ AI CHAT — CÁ NHÂN HÓA
+    # ==========================================
+    def chat_with_tutor(self, subject: str, user_message: str, roadmap_context: str, allowed_filenames: list = None, session_topic: str = "", source_file: str = "", history: list = None, document_id: Optional[int] = None, user_id: Optional[int] = None):
         if history is None:
             history = []
 
@@ -751,16 +832,43 @@ NỘI DUNG ĐÃ LÀM SẠCH:
         if not document_text:
             return "Mình chưa đọc được nội dung của tài liệu đang mở. Hãy mở lại đúng tài liệu này rồi gửi câu hỏi thêm một lần nữa."
 
-        system_prompt = f"""Bạn là Tutor Agent của môn {subject}.
+        # --- CÁ NHÂN HÓA: Lấy hồ sơ học sinh ---
+        student_context = ""
+        if user_id:
+            try:
+                student_context = self._build_student_context(user_id, subject)
+            except Exception as exc:
+                print(f"⚠️ Không lấy được hồ sơ học sinh: {exc}")
 
-Nhiệm vụ:
-- Trả lời đúng câu hỏi người dùng dựa trên tài liệu đang mở.
-- Tài liệu đính kèm ở dưới là ngữ cảnh chính; không cần tự tóm tắt trước nếu người dùng chưa yêu cầu.
+        personalization_block = ""
+        if student_context:
+            personalization_block = f"""
+### HỒ SƠ HỌC SINH (DỰA VÀO DỮ LIỆU THỰC TẾ):
+{student_context}
+
+### HƯỚNG DẪN DẠY HỌC CÁ NHÂN HÓA (BẮT BUỘC TUÂN THỦ):
+- Điều chỉnh mức độ giải thích theo năng lực học sinh (mục Mức năng lực ở trên).
+- Nếu học sinh hỏi về phần đang yếu → giải thích CHẬM, STEP-BY-STEP, cho thêm 1-2 ví dụ minh họa đơn giản.
+- Nếu học sinh hỏi về phần đã nắm vững → có thể đi thẳng vào vấn đề, đưa thêm góc nhìn nâng cao hoặc câu hỏi phản biện.
+- Nếu câu hỏi liên quan đến misconception đã phát hiện (câu sai gần đây) → CHỦ ĐỘNG kiểm tra xem học sinh có đang hiểu sai không, giải thích sự khác biệt giữa đáp án đúng và sai.
+- Giọng văn:
+  + Beginner: gần gũi, dùng ví dụ đời thường, tránh thuật ngữ phức tạp.
+  + Intermediate: cân bằng giữa lý thuyết và thực hành, khuyến khích tự suy luận.
+  + Advanced: tập trung phân tích sâu, thử thách tư duy phản biện, gợi ý mở rộng.
+- Không cần nhắc lại profile học sinh trong câu trả lời, chỉ CỨNG DẠY KHÁC NHAU.
+"""
+
+        system_prompt = f"""Bạn là Tutor Agent CÁ NHÂN HÓA của môn {subject}.
+
+{personalization_block}
+### NHIỆM VỤ CỐT LÕI:
+- Trả lời đúng câu hỏi dựa trên tài liệu đang mở — đây là nguồn chính.
 - Nếu tài liệu không có đủ thông tin để kết luận, nói rõ là không thấy thông tin đó trong tài liệu hiện tại.
 - Không trả lời kiểu chung chung như "không thể hỗ trợ".
 - Trả lời bằng tiếng Việt, rõ ràng, dễ hiểu, ưu tiên đi thẳng vào yêu cầu.
+- Không cần tự tóm tắt trước nếu người dùng chưa yêu cầu.
 
-Ngữ cảnh phiên học:
+### NGỮ CẢNH PHIÊN HỌC:
 - Buổi học hiện tại: {roadmap_context or session_topic or effective_source or subject}
 - Tài liệu đang mở: {effective_source or "Tài liệu hiện tại"}
 
