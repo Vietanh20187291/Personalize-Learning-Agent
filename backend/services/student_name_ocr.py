@@ -278,7 +278,7 @@ class StudentNameOCRService:
             score=self._score_name(cleaned) + max(mean_confidence, 0.0),
         )
 
-    def _recognize_with_tesseract(self, image: np.ndarray) -> Optional[StudentNameOCRResult]:
+    def _recognize_with_tesseract(self, image: np.ndarray, fast: bool = False) -> Optional[StudentNameOCRResult]:
         try:
             import pytesseract  # type: ignore
         except Exception:
@@ -289,12 +289,28 @@ class StudentNameOCRService:
             return None
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
+        # fast=True: dùng cho chấm thi OCR (tên chỉ để hiển thị, không ảnh hưởng điểm).
+        # Giảm số tổ hợp crop×variant×config từ ~126 xuống ~2-3 lần gọi Tesseract.
+        if fast:
+            configs = [("vie+eng", "--oem 1 --psm 7 -c preserve_interword_spaces=1")]
+            crops = self._candidate_crops(image)[:1]
+            best_result: Optional[StudentNameOCRResult] = None
+            for crop in crops:
+                processed = self._preprocess_variants(crop)[1] if len(self._preprocess_variants(crop)) > 1 else crop
+                for lang, config in configs:
+                    candidate = self._tesseract_candidate(pytesseract, processed, lang=lang, config=config)
+                    if candidate is None:
+                        continue
+                    if best_result is None or candidate.score > best_result.score:
+                        best_result = candidate
+            return best_result
+
         configs = [
             ("vie+eng", "--oem 1 --psm 7 -c preserve_interword_spaces=1"),
             ("vie+eng", "--oem 1 --psm 6 -c preserve_interword_spaces=1"),
             ("eng", "--oem 1 --psm 7 -c preserve_interword_spaces=1"),
         ]
-        best_result: Optional[StudentNameOCRResult] = None
+        best_result = None
 
         for crop in self._candidate_crops(image):
             for processed in self._preprocess_variants(crop):
@@ -306,16 +322,21 @@ class StudentNameOCRService:
                         best_result = candidate
         return best_result
 
-    def recognize(self, image: np.ndarray, fallback_image: Optional[np.ndarray] = None) -> StudentNameOCRResult:
+    def recognize(self, image: np.ndarray, fallback_image: Optional[np.ndarray] = None, fast: bool = False) -> StudentNameOCRResult:
+        # fast=True (mặc định khi chấm thi): chỉ nhận diện nhanh tên để hiển thị.
         images = [candidate for candidate in (image, fallback_image) if isinstance(candidate, np.ndarray) and candidate.size]
         best_result: Optional[StudentNameOCRResult] = None
         for source_image in images or [image]:
-            for recognizer in (self._recognize_with_easyocr, self._recognize_with_tesseract):
-                result = recognizer(source_image)
-                if result is None:
-                    continue
-                if best_result is None or result.score > best_result.score:
-                    best_result = result
+            tesseract_result = self._recognize_with_tesseract(source_image, fast=fast)
+            if tesseract_result is None:
+                continue
+            if best_result is None or tesseract_result.score > best_result.score:
+                best_result = tesseract_result
+            # Trong chế độ fast: bỏ qua EasyOCR (nặng) — tên chỉ để hiển thị.
+            if not fast:
+                easyocr_result = self._recognize_with_easyocr(source_image)
+                if easyocr_result is not None and (best_result is None or easyocr_result.score > best_result.score):
+                    best_result = easyocr_result
         if best_result is not None:
             return best_result
         return StudentNameOCRResult(text="", engine="", score=0.0)

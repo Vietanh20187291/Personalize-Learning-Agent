@@ -284,9 +284,7 @@ export default function TeacherPage() {
                     Không gian điều phối học phần
                   </h1>
                   <p className="mt-3 text-sm leading-7 text-slate-600">
-                    Trang này tổng hợp các khu vực quản lý môn học, lớp học, học viên,
-                    tài liệu, ngân hàng câu hỏi và sinh đề thi. Các thao tác chi tiết sẽ
-                    mở sang đúng trang chức năng thay vì dồn hết vào một màn hình.
+                    Quản lý môn học, lớp, học viên, tài liệu, ngân hàng câu hỏi và đề thi.
                   </p>
                 </div>
               </div>

@@ -9,8 +9,8 @@ from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 
-DEFAULT_SCHOOL_NAME = "TRƯỜNG ĐẠI HỌC XÂY DỰNG HÀ NỘI"
-DEFAULT_DEPARTMENT_NAME = "KHOA CÔNG NGHỆ THÔNG TIN"
+DEFAULT_SCHOOL_NAME = ""
+DEFAULT_DEPARTMENT_NAME = ""
 DEFAULT_EXAM_TITLE = "ĐỀ THI KẾT THÚC HỌC PHẦN"
 DEFAULT_EXAM_TYPE_LABEL = "Trắc nghiệm"
 

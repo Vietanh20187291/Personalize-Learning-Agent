@@ -24,7 +24,7 @@ from db.models import User, Subject
 from api.auth import hash_password 
 
 # --- IMPORT CÁC ROUTER API ---
-from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent, orbit, planning, notification, evaluation, ops, research, my_learning
+from api import assessment, upload, adaptive, stats, auth, classroom, admin, document, teacher_agent, orbit, planning, notification, evaluation, ops, research, my_learning, agent_communication
 
 from fastapi.staticfiles import StaticFiles
 import os
@@ -470,6 +470,7 @@ app.include_router(debug.router, prefix="/api", tags=["Debug"])
 app.include_router(ops.router, prefix="/api/ops", tags=["Operations"])
 app.include_router(research.router, prefix="/api/research", tags=["Research Evaluation"])
 app.include_router(my_learning.router, prefix="/api/my-learning", tags=["My Learning"])
+app.include_router(agent_communication.router, prefix="/api/agent-communication", tags=["Agent Communication"])
 
 @app.get("/")
 def read_root():

@@ -14,11 +14,11 @@ import { toast } from 'react-hot-toast';
 import { failTaskToast, startTaskToast, succeedTaskToast } from '@/services/taskToast';
 
 export default function CreateTeacherPage() {
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
   const [fullname, setFullname] = useState('');
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  
+  const [error, setError] = useState('');  
   // State lưu thông tin tài khoản vừa tạo để hiển thị Popup
   const [newAccount, setNewAccount] = useState<{ email: string; password: string; fullname: string } | null>(null);
 
@@ -35,7 +35,7 @@ export default function CreateTeacherPage() {
         throw new Error('Không tìm thấy Token xác thực. Vui lòng đăng nhập lại với quyền Admin!');
       }
 
-      const res = await fetch('http://localhost:8010/api/admin/create-user', {
+      const res = await fetch(`${apiBaseUrl}/api/admin/create-user`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

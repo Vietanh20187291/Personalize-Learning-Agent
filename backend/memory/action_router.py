@@ -15,6 +15,8 @@ class ActionRouter:
         class_id: int = None,
         student_name: str = None,
         subject_name: str = None,
+        num_questions: int = None,
+        num_versions: int = None,
     ) -> Dict:
         context = context or {}
 
@@ -68,18 +70,25 @@ class ActionRouter:
             return {
                 "action_type": "open_tab",
                 "target": "teacher",
-                "tab_name": "documents",
+                "tab_name": "question-bank",
                 "params": {"classroom_id": class_id, "subject_name": subject_name},
-                "message": "Đang mở tài liệu môn học...",
+                "message": "Đang mở Ngân hàng câu hỏi để nạp/quản lý tài liệu...",
                 "should_auto_execute": True,
             }
 
         if intent_type == IntentClassifier.EXAM_GENERATION:
+            exam_params: Dict = {"classroom_id": class_id, "mode": "create"}
+            # Truyền số câu / số mã đề để frontend tự điền form rồi bấm sinh đề
+            # (mô phỏng thao tác người dùng). Đảm bảo luôn đủ câu dù bank thiếu.
+            if num_questions:
+                exam_params["num_questions"] = int(num_questions)
+            if num_versions:
+                exam_params["num_versions"] = int(num_versions)
             return {
                 "action_type": "open_tab",
                 "target": "teacher",
                 "tab_name": "exam",
-                "params": {"classroom_id": class_id, "mode": "create"},
+                "params": exam_params,
                 "message": "Đang mở công cụ tạo đề trắc nghiệm và chấm OMR...",
                 "should_auto_execute": True,
             }

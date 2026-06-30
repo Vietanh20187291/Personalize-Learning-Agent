@@ -91,6 +91,8 @@ def _build_nova_fallback_response(agent: TeacherAgent, teacher_id: int, class_id
         class_id=classroom.id if classroom else class_id,
         student_name=agent._clean_text(student.full_name or student.username) if student else None,
         subject_name=subject.name if subject else None,
+        num_questions=entities.get("num_questions"),
+        num_versions=entities.get("num_versions"),
     )
     return result
 

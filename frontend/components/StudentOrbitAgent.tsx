@@ -67,15 +67,6 @@ const SUGGESTIONS_BY_ROUTE: Record<string, string[]> = {
   ],
 };
 
-/** Map route → subtitle shown in header */
-const SUBTITLE_BY_ROUTE: Record<string, string> = {
-  adaptive: "Tutor Agent · Học tập cá nhân hóa",
-  planning: "Planning Agent · Lộ trình học tập",
-  "my-learning": "Planning Agent · Lịch học cá nhân",
-  evaluation: "Evaluation Agent · Đánh giá năng lực",
-  _default: "Orbit Agent · Trợ lý học tập AI",
-};
-
 /* ───────── route detection helpers ───────── */
 
 function getRouteKey(pathname: string | null): string {
@@ -104,7 +95,6 @@ export default function StudentOrbitAgent({
 
   const routeKey = useMemo(() => getRouteKey(pathname), [pathname]);
   const suggestions = useMemo(() => SUGGESTIONS_BY_ROUTE[routeKey] || SUGGESTIONS_BY_ROUTE._default, [routeKey]);
-  const subtitle = useMemo(() => SUBTITLE_BY_ROUTE[routeKey] || SUBTITLE_BY_ROUTE._default, [routeKey]);
 
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -292,9 +282,6 @@ export default function StudentOrbitAgent({
           </div>
           <div>
             <h3 className="text-[13px] font-black tracking-[-0.02em] text-white">Orbit Agent</h3>
-            <p className="text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-              {subtitle}
-            </p>
           </div>
         </div>
         <button
@@ -333,7 +320,7 @@ export default function StudentOrbitAgent({
                   </div>
                 )}
                 <div
-                  className={`max-w-[88%] rounded-[1.05rem] px-3.5 py-2.5 text-[12px] leading-[1.6] shadow-sm ${
+                  className={`max-w-[88%] rounded-[1.05rem] px-3.5 py-2.5 text-sm leading-[1.6] shadow-sm ${
                     msg.role === "user"
                       ? "bg-slate-950 text-white rounded-tr-sm"
                       : "border border-slate-200 bg-white text-slate-700 rounded-tl-sm"

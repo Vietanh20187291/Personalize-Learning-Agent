@@ -207,6 +207,58 @@ class ConversationMemory:
         with self._lock:
             self.sessions.pop(session_key, None)
 
+    # ------------------------------------------------------------------ #
+    #  Generic string-keyed history (for student agents: Gia sư / Orbit)  #
+    #  Tách ngữ cảnh theo (user_id + subject + source_file) để mỗi môn/   #
+    #  tài liệu có lịch sử riêng. Không phụ thuộc (teacher_id, class_id). #
+    # ------------------------------------------------------------------ #
+    def _generic_key(self, key: str) -> str:
+        return f"generic:{key}"
+
+    def add_message_generic(self, key: str, role: str, content: str, metadata: Optional[Dict] = None) -> None:
+        """Append a message to a string-keyed conversation history."""
+        session_key = self._generic_key(key)
+        with self._lock:
+            memory = self.sessions.get(session_key)
+            if memory is None:
+                memory = {"conversation_history": [], "context": {}}
+                self.sessions[session_key] = memory
+            message = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "role": role,
+                "content": content,
+                "metadata": metadata or {},
+            }
+            history = list(memory.get("conversation_history", []))
+            history.append(message)
+            if len(history) > self.max_history:
+                history = history[-self.max_history:]
+            memory["conversation_history"] = history
+            memory["last_accessed"] = datetime.utcnow().isoformat()
+
+    def get_history_generic(self, key: str, limit: Optional[int] = None) -> List[Dict[str, str]]:
+        """Return the message history for a string key (newest last)."""
+        session_key = self._generic_key(key)
+        with self._lock:
+            memory = self.sessions.get(session_key)
+            if memory is None:
+                return []
+            history = list(memory.get("conversation_history", []))
+            if memory:
+                memory["last_accessed"] = datetime.utcnow().isoformat()
+        if limit:
+            history = history[-limit:]
+        return [
+            {"role": item.get("role", "user"), "content": str(item.get("content", ""))}
+            for item in history
+            if item.get("role") in {"user", "assistant"} and str(item.get("content", "")).strip()
+        ]
+
+    def clear_history_generic(self, key: str) -> None:
+        session_key = self._generic_key(key)
+        with self._lock:
+            self.sessions.pop(session_key, None)
+
     def cleanup_expired_sessions(self):
         if self.is_distributed():
             return

@@ -4,6 +4,7 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "react-hot-toast";
 import {
   ArrowRightCircle,
+  BookOpen,
   CalendarDays,
   CircleCheck,
   Clock3,
@@ -197,6 +198,35 @@ export default function PlanningPage() {
     });
   }, [plan]);
 
+  // Gom các bước học trong TUẦN NÀY để làm nổi bật kế hoạch gần nhất.
+  const thisWeekSteps = useMemo(() => {
+    const now = new Date();
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - now.getDay()); // Chủ nhật = đầu tuần
+    weekStart.setHours(0, 0, 0, 0);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 7);
+
+    return [...(plan?.steps || [])]
+      .filter((step) => {
+        if (!step.planned_date) return false;
+        const d = new Date(step.planned_date);
+        if (Number.isNaN(d.getTime())) return false;
+        return d >= weekStart && d < weekEnd;
+      })
+      .sort((a, b) => (a.planned_date || "").localeCompare(b.planned_date || ""));
+  }, [plan]);
+
+  const weekRangeLabel = useMemo(() => {
+    const now = new Date();
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - now.getDay());
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+    const fmt = (d: Date) => d.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" });
+    return `${fmt(weekStart)} – ${fmt(weekEnd)}`;
+  }, []);
+
   const formatDate = (value: string | null | undefined) => {
     if (!value) return "Chưa xác định";
     const date = new Date(value);
@@ -367,6 +397,64 @@ export default function PlanningPage() {
               <SummaryCard label="Hoàn thành" value={doneItems.length} tone="emerald" />
               <SummaryCard label="Điểm thấp" value={plan?.summary?.low_score_docs || 0} tone="rose" />
             </div>
+          </div>
+
+          {/* KẾ HOẠCH TUẦN NÀY — làm nổi bật tài liệu cần học trong tuần */}
+          <div className="rounded-[2rem] border-2 border-cyan-200 bg-[linear-gradient(135deg,#ecfeff,white_70%)] p-5 shadow-[0_18px_50px_rgba(8,145,178,0.10)]">
+            <div className="mb-4 flex items-center gap-2">
+              <CalendarDays size={18} className="text-cyan-700" />
+              <h2 className="text-lg font-black text-slate-900">Kế hoạch tuần này</h2>
+              <span className="ml-auto rounded-full bg-cyan-100 px-3 py-1 text-[11px] font-bold text-cyan-700">
+                {weekRangeLabel}
+              </span>
+            </div>
+            {thisWeekSteps.length === 0 ? (
+              <div className="rounded-[1.4rem] border border-dashed border-cyan-300 bg-white/60 p-4 text-center text-xs font-semibold text-slate-500">
+                Tuần này chưa có tài liệu nào trong kế hoạch. Hãy bấm "Làm mới kế hoạch" hoặc chat với Planning Agent để sắp xếp.
+              </div>
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {thisWeekSteps.map((step, idx) => (
+                  <article
+                    key={`week_${step.id}`}
+                    className="flex flex-col rounded-[1.4rem] border border-cyan-200 bg-white p-4 shadow-sm transition hover:shadow-md"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-7 w-7 items-center justify-center rounded-full bg-cyan-600 text-[12px] font-black text-white">
+                        {idx + 1}
+                      </span>
+                      <p className="text-sm font-black leading-5 text-slate-900">
+                        {step.document_title || step.document_filename}
+                      </p>
+                    </div>
+                    <p className="mt-2 text-xs font-medium text-slate-600">
+                      Môn: <span className="font-black text-slate-800">{step.subject_name || "Chưa rõ"}</span>
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                      <Tag icon={<CalendarDays size={12} />} tone="cyan">
+                        {formatDate(step.planned_date)}
+                      </Tag>
+                      <Tag icon={<Clock3 size={12} />} tone="amber">
+                        {step.planned_duration_minutes || 60} phút
+                      </Tag>
+                      {step.priority_group === "low_score" && (
+                        <Tag icon={<TriangleAlert size={12} />} tone="rose">
+                          Điểm thấp{step.latest_score != null ? ` (${step.latest_score.toFixed(1)})` : ""}
+                        </Tag>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => openInTutor(step)}
+                      className="mt-4 inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 px-3 py-2.5 text-[11px] font-black uppercase tracking-[0.12em] text-white shadow-sm transition hover:from-cyan-500 hover:to-blue-500"
+                    >
+                      <BookOpen size={14} />
+                      Học tài liệu
+                      <ArrowRightCircle size={13} />
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="rounded-[2rem] border border-slate-200 bg-white p-5 shadow-sm">

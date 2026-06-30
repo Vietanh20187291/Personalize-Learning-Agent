@@ -33,12 +33,17 @@ def get_embeddings() -> Optional[Any]:
         try:
             from langchain_community.embeddings import HuggingFaceEmbeddings
 
+            # Multilingual model: supports 50+ languages including Vietnamese.
+            # Better semantic retrieval for Vietnamese learning materials than
+            # the English-only all-MiniLM-L6-v2. NOTE: changing the embedding
+            # model changes vector dimensions — the ChromaDB collection must be
+            # re-indexed (see docs / re-upload documents) after this change.
             _embeddings = HuggingFaceEmbeddings(
-                model_name="all-MiniLM-L6-v2",
+                model_name="paraphrase-multilingual-MiniLM-L12-v2",
                 model_kwargs={"device": "cpu"},
                 encode_kwargs={"normalize_embeddings": False},
             )
-            logger.info("Embedding model initialized successfully.")
+            logger.info("Embedding model initialized successfully (paraphrase-multilingual-MiniLM-L12-v2).")
         except Exception as exc:
             logger.exception("Failed to initialize embedding model: %s", exc)
             _embeddings = None

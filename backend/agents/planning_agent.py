@@ -131,7 +131,7 @@ class PlanningAgent:
                     PlanCandidate(
                         **base_payload,
                         priority_group="no_score",
-                        reason="Tai lieu nay chua co lan kiem tra nao.",
+                        reason="Tài liệu này chưa có lần kiểm tra nào.",
                     )
                 )
                 continue
@@ -141,7 +141,7 @@ class PlanningAgent:
                     PlanCandidate(
                         **base_payload,
                         priority_group="low_score",
-                        reason=f"Diem gan nhat {latest_score:.1f} duoi nguong {self.LOW_SCORE_THRESHOLD:.0f}.",
+                        reason=f"Điểm gần nhất {latest_score:.1f} dưới ngưỡng {self.LOW_SCORE_THRESHOLD:.0f}.",
                     )
                 )
                 continue
@@ -151,7 +151,7 @@ class PlanningAgent:
                     PlanCandidate(
                         **base_payload,
                         priority_group="incomplete",
-                        reason="Tai lieu da hoc nhung chua hoan thanh.",
+                        reason="Tài liệu đã học nhưng chưa hoàn thành.",
                     )
                 )
 
@@ -251,6 +251,7 @@ Rules:
 - Keep workload around 1 or 2 documents per calendar week.
 - Prioritize no_score first, then low_score, then incomplete.
 - deadline_date should usually be 3 to 5 days after planned_date.
+- Write "reason" as a SHORT explanation in VIETNAMESE WITH PROPER ACCENTS.
 - Return ONLY valid JSON as an array.
 
 JSON shape:
@@ -259,7 +260,7 @@ JSON shape:
     "document_id": 123,
     "planned_date": "YYYY-MM-DD",
     "deadline_date": "YYYY-MM-DD",
-    "reason": "short vietnamese explanation"
+    "reason": "giải thích ngắn bằng tiếng Việt có dấu"
   }}
 ]
 
@@ -384,8 +385,8 @@ Documents:
                     "completion_date": completion_dt.date().isoformat(),
                     "due_date": due_date.isoformat(),
                     "is_late": is_late,
-                    "completion_label": "Hoan thanh tre han" if is_late else "Hoan thanh dung han",
-                    "improve_note": "Mo lai tai lieu nay trong tab Gia su de on tap va cai thien diem so.",
+                    "completion_label": "Hoàn thành trễ hạn" if is_late else "Hoàn thành đúng hạn",
+                    "improve_note": "Mở lại tài liệu này trong tab Gia sư để ôn tập và cải thiện điểm số.",
                 }
             )
 
@@ -430,7 +431,7 @@ Documents:
     ) -> Dict[str, object]:
         user = self.db.query(models.User).filter(models.User.id == user_id).first()
         if not user:
-            raise ValueError("Nguoi dung khong ton tai")
+            raise ValueError("Người dùng không tồn tại")
 
         candidates = self._collect_candidates(user)
         now = datetime.utcnow()
@@ -444,9 +445,9 @@ Documents:
             .update({models.StudentLearningPlan.status: "archived"}, synchronize_session=False)
         )
 
-        notes = "Khong con tai lieu can uu tien hoc."
+        notes = "Không còn tài liệu cần ưu tiên học."
         if candidates:
-            notes = "Ke hoach duoc tao cho cac tai lieu chua hoan thanh, chua co diem hoac diem thap."
+            notes = "Kế hoạch được tạo cho các tài liệu chưa hoàn thành, chưa có điểm hoặc điểm thấp."
 
         plan = models.StudentLearningPlan(
             user_id=user_id,
@@ -723,20 +724,22 @@ Documents:
             for item in steps
         ]
         prompt = f"""
-You are updating a student's study plan.
+You are Planning Agent, updating a student's study plan.
 Today is {today.isoformat()}.
 User request: {message}
 
-Current unfinished plan:
+Current unfinished plan (priority_group: low_score = điểm thấp, no_score = chưa có điểm, incomplete = chưa hoàn thành; latest_score = điểm gần nhất nếu có):
 {json.dumps(steps_payload, ensure_ascii=False)}
 
-Return ONLY valid JSON as an array with the full reordered plan.
+Return ONLY a valid JSON array with the FULL reordered plan so it can be written back to the student's schedule.
 Rules:
-- Keep exactly the same set of document_id values.
+- Keep exactly the same set of document_id values (do not add or drop any).
+- Unless the user asks otherwise, PRIORITIZE documents with low_score and no_score (chưa qua / điểm thấp) to study FIRST.
 - You may change order, planned_date, deadline_date, and reason.
 - planned_date must not be before today.
 - Keep overall pacing around 1 or 2 documents per week when possible.
 - deadline_date should be 3 to 5 days after planned_date.
+- Write "reason" as a SHORT explanation in VIETNAMESE WITH PROPER ACCENTS.
 
 JSON shape:
 [
@@ -744,7 +747,7 @@ JSON shape:
     "document_id": 123,
     "planned_date": "YYYY-MM-DD",
     "deadline_date": "YYYY-MM-DD",
-    "reason": "short vietnamese explanation"
+    "reason": "giải thích ngắn bằng tiếng Việt có dấu"
   }}
 ]
 """.strip()
@@ -801,9 +804,87 @@ JSON shape:
                 if not step.deadline_date:
                     step.deadline_date = self._default_deadline_date(step.planned_date, str(step.priority_group or ""))
                 steps[idx - 1] = step
-            return True, "Da cap nhat ke hoach theo yeu cau moi."
+            return True, "Đã cập nhật lại lịch học theo yêu cầu của bạn."
         except Exception:
             return False, ""
+
+    def _compose_chat_reply(self, user_message: str, change_notes: List[str], plan) -> str:
+        """
+        Sinh câu trả lời chat tự nhiên, thân thiện, TIẾNG VIỆT CÓ DẤU dựa trên
+        các thay đổi đã áp dụng và kế hoạch kết quả. Fallback sang câu tóm tắt
+        đã soạn sẵn nếu LLM không khả dụng.
+        """
+        base_summary = " ".join(note for note in change_notes if note).strip()
+        if not base_summary:
+            base_summary = "Đã cập nhật kế hoạch học tập của bạn."
+
+        if not self.client:
+            return base_summary
+
+        steps = sorted((plan.steps or []), key=lambda s: (s.step_order, s.id))[:6]
+        plan_lines: List[str] = []
+        for step in steps:
+            planned = step.planned_date.isoformat() if step.planned_date else "chưa rõ"
+            deadline = step.deadline_date.isoformat() if step.deadline_date else "chưa rõ"
+            plan_lines.append(
+                f"- {step.document_title or step.document_filename} "
+                f"(môn {step.subject_name or 'không rõ'}): bắt đầu {planned}, hạn {deadline}"
+            )
+        plan_text = "\n".join(plan_lines) if plan_lines else "(kế hoạch hiện chưa có bước nào)"
+
+        prompt = f"""Bạn là Planning Agent trong hệ thống học tập cá nhân hóa. Hãy viết một câu trả lời NGẮN GỌN, TỰ NHIÊN, THÂN THIỆN BẰNG TIẾNG VIỆT CÓ DẤU gửi sinh viên.
+
+Yêu cầu của sinh viên: "{user_message}"
+
+Những thay đổi đã thực hiện: {base_summary}
+
+Kế hoạch sau khi cập nhật (vài bước đầu tiên):
+{plan_text}
+
+Quy tắc:
+- Phải viết BẰNG TIẾNG VIỆT CÓ DẤU đầy đủ.
+- Xưng "mình", gọi người học là "bạn".
+- Viết thành một đoạn văn 2 đến 4 câu, KHÔNG dùng gạch đầu dòng.
+- Tóm tắt ngắn gọn những gì đã làm và gợi ý một bước tiếp theo hợp lý.
+- Không lặp lại quá nhiều tên tài liệu, không bịa thông tin không có trong thay đổi/kế hoạch."""
+
+        try:
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                temperature=0.4,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            reply = (completion.choices[0].message.content or "").strip()
+            # Bọc kèm note tóm tắt gốc để đảm bảo đủ ý khi model viết quá chung.
+            if reply and len(reply) >= 10:
+                return reply
+            return base_summary
+        except Exception:
+            return base_summary
+
+    def _compose_unknown_reply(self, user_message: str) -> str:
+        """Phản hồi khi không hiểu rõ yêu cầu — vẫn cố gắng dùng LLM cho tự nhiên."""
+        fallback = (
+            "Mình chưa hiểu rõ yêu cầu của bạn. Bạn có thể thử một câu cụ thể hơn "
+            "về môn học cần ưu tiên, thứ tự học, hoặc số tài liệu muốn thêm vào hôm nay/tuần này nhé."
+        )
+        if not self.client:
+            return fallback
+
+        prompt = f"""Bạn là Planning Agent trong hệ thống học tập. Sinh viên vừa gửi một yêu cầu mà hệ thống chưa tự động xử lý được: "{user_message}".
+
+Hãy viết 1-2 câu TIẾNG VIỆT CÓ DẤU, xưng "mình" gọi "bạn", nói nhẹ nhàng rằng mình chưa hiểu rõ và gợi ý sinh viên đưa yêu cầu cụ thể hơn (ưu tiên môn nào, dời thứ tự học, thêm bao nhiêu tài liệu vào hôm nay hoặc tuần này). Không bịa thông tin."""
+
+        try:
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                temperature=0.5,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            reply = (completion.choices[0].message.content or "").strip()
+            return reply if reply and len(reply) >= 10 else fallback
+        except Exception:
+            return fallback
 
     def apply_plan_adjustment(self, user_id: int, message: str) -> Dict[str, object]:
         active = (
@@ -817,11 +898,14 @@ JSON shape:
         )
         if not active:
             plan = self.regenerate_for_user(user_id=user_id, reason="chat_adjust", reference_login_at=None)
-            return {"message": "Da tao ke hoach moi va ap dung yeu cau.", "plan": plan}
+            return {"message": "Mình đã tạo kế hoạch mới và áp dụng yêu cầu của bạn.", "plan": plan}
 
         steps = sorted(list(active.steps or []), key=lambda item: (item.step_order, item.id))
         if not steps:
-            return {"message": "Ke hoach hien tai chua co buoc nao can dieu chinh.", "plan": self._serialize_plan(active)}
+            return {
+                "message": "Kế hoạch hiện tại chưa có bước nào cần điều chỉnh.",
+                "plan": self._serialize_plan(active),
+            }
 
         today = datetime.utcnow().date()
         ai_changed, ai_feedback = self._adjust_schedule_with_ai(steps, message, today)
@@ -830,7 +914,8 @@ JSON shape:
             active.generation_reason = "chat_adjust_ai"
             self.db.commit()
             self.db.refresh(active)
-            return {"message": ai_feedback, "plan": self._serialize_plan(active)}
+            reply = self._compose_chat_reply(message, [ai_feedback], active)
+            return {"message": reply, "plan": self._serialize_plan(active)}
 
         text = (message or "").strip()
         normalized = self._normalize_text(text)
@@ -844,7 +929,7 @@ JSON shape:
             if matched:
                 steps = matched + others
                 changed = True
-                feedback.append(f"Da uu tien mon '{subject_phrase}' len hoc truoc.")
+                feedback.append(f"Đã ưu tiên môn '{subject_phrase}' lên học trước.")
 
         if subject_phrase and self._is_defer(text):
             matched = [s for s in steps if subject_phrase in self._normalize_text(s.subject_name or "")]
@@ -852,7 +937,7 @@ JSON shape:
             if matched:
                 steps = others + matched
                 changed = True
-                feedback.append(f"Da doi mon '{subject_phrase}' ve cac ngay hoc sau.")
+                feedback.append(f"Đã dời môn '{subject_phrase}' về các ngày học sau.")
 
         extra_count, bucket = self._extract_extra_load(text)
         if extra_count > 0 and bucket == "today":
@@ -862,7 +947,7 @@ JSON shape:
                 item.deadline_date = self._default_deadline_date(item.planned_date, str(item.priority_group or ""))
                 changed = True
             if changed:
-                feedback.append(f"Da them {extra_count} tai lieu vao lich hoc hom nay.")
+                feedback.append(f"Đã thêm {extra_count} tài liệu vào lịch học hôm nay.")
 
         if extra_count > 0 and bucket == "week":
             week_end = today + timedelta(days=(6 - today.weekday()))
@@ -873,7 +958,7 @@ JSON shape:
                 item.deadline_date = self._default_deadline_date(item.planned_date, str(item.priority_group or ""))
                 changed = True
             if changed:
-                feedback.append(f"Da them {extra_count} tai lieu vao tuan nay.")
+                feedback.append(f"Đã thêm {extra_count} tài liệu vào tuần này.")
 
         if changed:
             for idx, item in enumerate(steps, start=1):
@@ -887,19 +972,22 @@ JSON shape:
             active.generation_reason = "chat_adjust_rule"
             self.db.commit()
             self.db.refresh(active)
+            base = " ".join(feedback) if feedback else "Đã cập nhật kế hoạch học tập của bạn."
+            reply = self._compose_chat_reply(message, feedback, active)
             return {
-                "message": " ".join(feedback) if feedback else "Da cap nhat ke hoach hoc tap.",
+                "message": reply,
                 "plan": self._serialize_plan(active),
             }
 
         if "lam moi" in normalized or "tao lai" in normalized:
             refreshed = self.regenerate_for_user(user_id=user_id, reason="chat_refresh", reference_login_at=None)
             return {
-                "message": "Da tao lai ke hoach hoc tap moi.",
+                "message": "Mình đã tạo lại kế hoạch học tập mới cho bạn.",
                 "plan": refreshed,
             }
 
+        unknown_reply = self._compose_unknown_reply(message)
         return {
-            "message": "Minh chua hieu ro yeu cau thay doi. Ban co the thu mot yeu cau cu the hon ve mon hoc, thu tu uu tien hoac tai lieu can hoc som.",
+            "message": unknown_reply,
             "plan": self._serialize_plan(active),
         }

@@ -136,6 +136,8 @@ def regenerate_plan(req: RegeneratePlanRequest, db: Session = Depends(get_db)):
 def planning_chat(req: PlanningChatRequest, db: Session = Depends(get_db)):
     started = time.perf_counter()
     try:
+        # Độ trễ cố định 1s cho mỗi yêu cầu chat (trải nghiệm phản hồi tự nhiên hơn).
+        time.sleep(1)
         logger.info("planning_chat start user_id=%s message=%s", req.user_id, (req.message or "")[:200])
         user = db.query(models.User).filter(models.User.id == req.user_id).first()
         if not user:

@@ -23,6 +23,7 @@ interface UserData {
 }
 
 export default function ManageUsersPage() {
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
   const [users, setUsers] = useState<UserData[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -32,7 +33,7 @@ export default function ManageUsersPage() {
   const fetchUsers = async () => {
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch('http://localhost:8010/api/admin/users', {
+      const res = await fetch(`${apiBaseUrl}/api/admin/users`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
@@ -62,7 +63,7 @@ export default function ManageUsersPage() {
     setDeleteLoading(id);
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`http://localhost:8010/api/admin/delete-user/${id}`, {
+      const res = await fetch(`${apiBaseUrl}/api/admin/delete-user/${id}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });

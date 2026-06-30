@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import toast from "react-hot-toast";
+import { useSearchParams } from "next/navigation";
 import {
   BookOpen,
   CheckCircle2,
@@ -101,6 +102,12 @@ export default function TeacherExamOcrPage() {
   const [editedNames, setEditedNames] = useState<Record<number, string>>({});
   const [savingNameIds, setSavingNameIds] = useState<Record<number, boolean>>({});
 
+  // --- Nova Agent auto-generate: khi được mở từ chat Nova với query params ---
+  // /teacher/exam?auto=1&q=20&v=2  ->  tự điền số câu (q) / số mã đề (v) rồi bấm sinh đề,
+  // mô phỏng đúng thao tác người dùng tự điền form rồi tải.
+  const searchParams = useSearchParams();
+  const autoGenerateTriggered = useRef(false);
+
   useEffect(() => {
     const fetchClasses = async () => {
       const teacherId = localStorage.getItem("userId") || localStorage.getItem("user_id");
@@ -123,6 +130,20 @@ export default function TeacherExamOcrPage() {
 
     void fetchClasses();
   }, [apiBaseUrl]);
+
+  // Đọc số câu / số mã đề từ query param (?q=20&v=2) do Nova Agent gửi khi mở trang.
+  useEffect(() => {
+    const q = searchParams.get("q");
+    const v = searchParams.get("v");
+    const parsedQ = q ? Number(q) : NaN;
+    const parsedV = v ? Number(v) : NaN;
+    if (Number.isFinite(parsedQ) && parsedQ > 0) {
+      setNumQuestions(Math.min(40, Math.max(1, Math.floor(parsedQ))));
+    }
+    if (Number.isFinite(parsedV) && parsedV > 0) {
+      setNumVersions(Math.min(4, Math.max(1, Math.floor(parsedV))));
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     setEditedNames(
@@ -274,6 +295,19 @@ export default function TeacherExamOcrPage() {
       setGenerating(false);
     }
   };
+
+  // Tự động bấm "sinh đề" đúng 1 lần khi mở trang từ Nova (?auto=1),
+  // sau khi danh sách lớp + môn đã sẵn sàng (canGenerate true).
+  const autoFromNova = searchParams.get("auto") === "1";
+  useEffect(() => {
+    if (!autoFromNova || autoGenerateTriggered.current || !canGenerate || generating) {
+      return;
+    }
+    autoGenerateTriggered.current = true;
+    toast("Nova đang tự tạo đề theo yêu cầu của bạn...", { icon: "🧪" });
+    void handleGenerateAndDownload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFromNova, canGenerate, generating]);
 
   const handleGradeSubmission = async () => {
     if (submissionMode === "pdf" && !pdfFile) {

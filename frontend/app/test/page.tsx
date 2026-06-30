@@ -12,10 +12,10 @@ import {
   Loader2,
   Radar,
   RefreshCw,
+  Scale,
   Search,
   ShieldCheck,
   Sparkles,
-  Upload,
 } from "lucide-react";
 import {
   Bar,
@@ -115,6 +115,7 @@ type RunDetail = RunSummary & {
 type OverviewResponse = {
   agents: AgentDescriptor[];
   agent_cases: ResearchCase[];
+  routing_cases: ResearchCase[];
   rag_cases: ResearchCase[];
   history: RunSummary[];
   reports: ReportSnapshot[];
@@ -126,11 +127,45 @@ type OverviewResponse = {
   latest_by_component: Record<string, RunSummary>;
 };
 
+// Kiểm thử Agent Hub: input JSON -> output JSON
+type AgentVerdict = { ra: boolean; ca: boolean; tsr: boolean; reason: string };
+type AgentCase = {
+  id: string;
+  hub: string;
+  intent: string;
+  pattern: string;
+  variant?: string;
+  input: Record<string, unknown>;
+  expected: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  verdict?: AgentVerdict;
+  cost?: { latency_ms: number; tokens: number };
+};
+type HubAgg = { n: number; ra: number | null; ca: number | null; tsr: number | null };
+type AgentSuite = {
+  mode: string;
+  agent: string;
+  n: number;
+  metrics: { ra: number; ca: number; tsr: number; latency: number; tokens: number };
+  ra_by_pattern: { single: number | null; conditional: number | null; multi: number | null };
+  by_hub: Record<string, HubAgg>;
+  cases: AgentCase[];
+};
+type AgentRunResult = {
+  id: string;
+  hub?: string;
+  mode: string;
+  input: Record<string, unknown>;
+  expected?: Record<string, unknown>;
+  output: Record<string, unknown>;
+  verdict?: AgentVerdict;
+};
+
 const TABS = [
   { id: "overview", label: "Tổng quan", icon: Sparkles },
   { id: "agents", label: "Multi-Agent", icon: FlaskConical },
-  { id: "rag", label: "RAG", icon: Search },
-  { id: "ocr", label: "OCR / OMR", icon: Upload },
+  { id: "routing", label: "Định tuyến", icon: Radar },
+  { id: "benchmark", label: "Kiểm thử Agent", icon: Scale },
   { id: "results", label: "Kết quả", icon: BarChart3 },
   { id: "history", label: "Lịch sử", icon: History },
   { id: "reports", label: "Báo cáo", icon: FileBarChart },
@@ -155,6 +190,71 @@ function formatMetric(value: unknown, digits = 3) {
   const numberValue = Number(value);
   if (!Number.isFinite(numberValue)) return "0";
   return numberValue.toFixed(digits);
+}
+
+function fmt2(v: number | null | undefined) {
+  if (v == null || !Number.isFinite(Number(v))) return "—";
+  return Number(v).toFixed(2).replace(".", ",");
+}
+
+// Demo chạy THẬT: giãn cách giữa các lời gọi LLM để tránh rate-limit của free tier.
+const DEMO_THROTTLE_MS = 35000;
+function sleepMs(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+function pickDemoCaseIds(cases: AgentCase[]): string[] {
+  // chọn ~8 ca đại diện: phủ doc / db / kế hoạch / có điều kiện / đa bước của cả Orbit lẫn Nova
+  const preds: Array<(c: AgentCase) => boolean> = [
+    (c) => c.hub === "orbit" && c.intent === "doc_summary",
+    (c) => c.hub === "orbit" && c.intent === "doc_explain",
+    (c) => c.hub === "orbit" && c.pattern === "single" && c.intent === "weakest",
+    (c) => c.hub === "orbit" && c.intent === "new_plan",
+    (c) => c.hub === "orbit" && c.pattern === "multi",
+    (c) => c.hub === "nova" && c.intent === "class_overview",
+    (c) => c.hub === "nova" && c.pattern === "conditional",
+    (c) => c.hub === "nova" && c.pattern === "multi",
+  ];
+  const ids: string[] = [];
+  for (const pred of preds) {
+    const hit = cases.find((c) => pred(c) && !ids.includes(c.id));
+    if (hit) ids.push(hit.id);
+  }
+  return ids;
+}
+
+function StatBox({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  const color = tone === "emerald" ? "text-emerald-700" : tone === "blue" ? "text-blue-700" : "text-slate-900";
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-center">
+      <div className={`text-2xl font-black ${color}`}>{value}</div>
+      <div className="mt-1 text-[12px] font-semibold text-slate-500">{label}</div>
+    </div>
+  );
+}
+
+function VerdictPill({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <span className={`rounded-full px-3 py-1 font-bold ${ok ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-600"}`}>
+      {label} {ok ? "✓" : "✗"}
+    </span>
+  );
+}
+
+function JsonBlock({ title, data, highlight }: { title: string; data: unknown; highlight?: boolean }) {
+  return (
+    <div>
+      <div className="mb-1 text-[12px] font-black uppercase tracking-wide text-slate-400">{title}</div>
+      <pre
+        className={`overflow-auto rounded-xl border px-4 py-3 text-[12px] leading-5 ${
+          highlight
+            ? "border-emerald-300 bg-emerald-50 text-emerald-950"
+            : "border-slate-700 bg-slate-900 text-slate-100"
+        }`}
+      >
+        {data ? JSON.stringify(data, null, 2) : "—"}
+      </pre>
+    </div>
+  );
 }
 
 function MetricCard({
@@ -194,36 +294,34 @@ export default function ResearchEvaluationPage() {
   const [loading, setLoading] = useState(true);
   const [busyKey, setBusyKey] = useState("");
   const [error, setError] = useState("");
-  const [ocrFiles, setOcrFiles] = useState<File[]>([]);
-  const [ocrAnswerKeyFile, setOcrAnswerKeyFile] = useState<File | null>(null);
-  const [ocrBatchId, setOcrBatchId] = useState("");
-  const [ocrClassId, setOcrClassId] = useState("");
-  const [ocrNumQuestions, setOcrNumQuestions] = useState("20");
-  const [ocrStudentIdColumns, setOcrStudentIdColumns] = useState("8");
-  const [ocrGroundTruth, setOcrGroundTruth] = useState("");
 
   // Results summary state
   const [resultsSummary, setResultsSummary] = useState<Record<string, unknown> | null>(null);
   const [loadingSummary, setLoadingSummary] = useState(false);
 
+  // Kiểm thử Agent Hub (100 ca JSON: input -> output)
+  const [agentSuite, setAgentSuite] = useState<AgentSuite | null>(null);
+  const [caseRun, setCaseRun] = useState<AgentRunResult | null>(null);
+  const [selectedCaseId, setSelectedCaseId] = useState<string>("");
+  // Demo chạy thật (throttle tránh rate-limit)
+  const [demoResults, setDemoResults] = useState<AgentRunResult[]>([]);
+  const [demoProgress, setDemoProgress] = useState<{ current: number; total: number } | null>(null);
+  const [demoCaseId, setDemoCaseId] = useState<string>("");
+  const [demoError, setDemoError] = useState<string>("");
+
   const latestAgentRun = overview?.latest_by_component?.multi_agent;
-  const latestRagRun = overview?.latest_by_component?.rag;
-  const latestOcrRun = overview?.latest_by_component?.ocr_omr;
+  const latestRoutingRun = overview?.latest_by_component?.routing;
 
   const agentCases = overview?.agent_cases ?? [];
-  const ragCases = overview?.rag_cases ?? [];
+  const routingCases = overview?.routing_cases ?? [];
   const agents = overview?.agents ?? [];
 
   const agentRuns = useMemo(
     () => historyItems.filter((item) => item.component === "multi_agent"),
     [historyItems]
   );
-  const ragRuns = useMemo(
-    () => historyItems.filter((item) => item.component === "rag"),
-    [historyItems]
-  );
-  const ocrRuns = useMemo(
-    () => historyItems.filter((item) => item.component === "ocr_omr"),
+  const routingRuns = useMemo(
+    () => historyItems.filter((item) => item.component === "routing"),
     [historyItems]
   );
 
@@ -254,6 +352,88 @@ export default function ResearchEvaluationPage() {
   useEffect(() => {
     void refreshAll();
   }, [refreshAll]);
+
+  // deep-link tab qua ?tab= (đọc sau khi mount để tránh lệch hydration)
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get("tab");
+    if (t && TABS.some((x) => x.id === t)) {
+      setActiveTab(t as (typeof TABS)[number]["id"]);
+    }
+  }, []);
+
+  const runSuite = useCallback(async () => {
+    setBusyKey("agent-suite");
+    setError("");
+    try {
+      const response = await apiClient.get("/api/research/agent-test/suite", { baseURL: apiBaseUrl });
+      setAgentSuite(response.data as AgentSuite);
+    } catch (err: unknown) {
+      setError(normalizeApiError(err, "Không thể chạy bộ 100 ca."));
+    } finally {
+      setBusyKey("");
+    }
+  }, [apiBaseUrl]);
+
+  const runOneCase = useCallback(
+    async (id: string) => {
+      setBusyKey(`case-${id}`);
+      setSelectedCaseId(id);
+      setError("");
+      try {
+        const response = await apiClient.post(
+          "/api/research/agent-test/run-case",
+          { id },
+          { ...longRequestConfig, baseURL: apiBaseUrl }
+        );
+        setCaseRun(response.data as AgentRunResult);
+      } catch (err: unknown) {
+        setError(normalizeApiError(err, "Không thể chạy ca thật."));
+      } finally {
+        setBusyKey("");
+      }
+    },
+    [apiBaseUrl]
+  );
+
+  // Demo: chạy THẬT ~8 ca, throttle giữa các lời gọi để tránh rate-limit LLM.
+  const runDemo = useCallback(async () => {
+    setBusyKey("agent-demo");
+    setError("");
+    setDemoError("");
+    setDemoResults([]);
+    setAgentSuite(null);
+    try {
+      const res = await apiClient.get("/api/research/agent-test/cases", { baseURL: apiBaseUrl });
+      const all = (res.data?.cases ?? []) as AgentCase[];
+      const ids = pickDemoCaseIds(all);
+      setDemoProgress({ current: 0, total: ids.length });
+      const acc: AgentRunResult[] = [];
+      for (let i = 0; i < ids.length; i += 1) {
+        setDemoCaseId(ids[i]);
+        try {
+          const r = await apiClient.post(
+            "/api/research/agent-test/run-case",
+            { id: ids[i] },
+            { ...longRequestConfig, baseURL: apiBaseUrl }
+          );
+          acc.push(r.data as AgentRunResult);
+          setDemoResults([...acc]);
+        } catch (err: unknown) {
+          setDemoError(
+            normalizeApiError(err, "LLM từ chối yêu cầu (có thể do rate-limit của free tier). Dừng demo.")
+          );
+          break;
+        }
+        setDemoProgress({ current: i + 1, total: ids.length });
+        if (i < ids.length - 1) {
+          await sleepMs(DEMO_THROTTLE_MS);
+        }
+      }
+    } finally {
+      setBusyKey("");
+      setDemoCaseId("");
+    }
+  }, [apiBaseUrl]);
 
   const fetchRunDetail = async (runId: number) => {
     try {
@@ -348,41 +528,6 @@ export default function ResearchEvaluationPage() {
     await downloadExportFile(`/api/research/reports/${reportId}/download`, `${safeName}.md`);
   };
 
-  const handleRunOcrEvaluation = async () => {
-    if (!ocrFiles.length) {
-      setError("Hãy chọn ít nhất một file PDF, PNG, hoặc JPG để đánh giá OCR.");
-      return;
-    }
-
-    const formData = new FormData();
-    if (ocrBatchId.trim()) formData.append("batch_id", ocrBatchId.trim());
-    if (ocrClassId.trim()) formData.append("class_id", ocrClassId.trim());
-    if (ocrNumQuestions.trim()) formData.append("num_questions", ocrNumQuestions.trim());
-    if (ocrStudentIdColumns.trim()) formData.append("student_id_columns", ocrStudentIdColumns.trim());
-    if (ocrGroundTruth.trim()) formData.append("ground_truth_json", ocrGroundTruth.trim());
-    if (ocrAnswerKeyFile) formData.append("answer_key_file", ocrAnswerKeyFile);
-
-    const firstFile = ocrFiles[0];
-    const isSinglePdf = ocrFiles.length === 1 && firstFile.name.toLowerCase().endsWith(".pdf");
-    if (isSinglePdf) {
-      formData.append("pdf_file", firstFile);
-    } else {
-      ocrFiles.forEach((file) => formData.append("image_files", file));
-    }
-
-    await runAction("ocr-run", async () => {
-      const response = await apiClient.post("/api/research/ocr/run", formData, {
-        ...longRequestConfig,
-        baseURL: apiBaseUrl,
-        headers: {
-          "Content-Type": "multipart/form-data",
-        },
-      });
-      setSelectedRun(response.data as RunDetail);
-      setActiveTab("history");
-    });
-  };
-
   const latestRunsForChart = useMemo(() => {
     return historyItems
       .slice(0, 10)
@@ -411,7 +556,7 @@ export default function ResearchEvaluationPage() {
                 Không gian thử nghiệm nghiên cứu cho Chương 5
               </h1>
               <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-600 md:text-[15px]">
-                Chạy các thực nghiệm multi-agent, RAG, và OCR/OMR trên hệ thống thực. Mỗi lần chạy lưu trữ
+                Chạy các thực nghiệm multi-agent và định tuyến trên hệ thống thực. Mỗi lần chạy lưu trữ
                 đầu vào, đầu ra, độ trễ, chỉ số, lịch sử và tóm tắt sẵn sàng cho luận văn.
               </p>
             </div>
@@ -433,8 +578,8 @@ export default function ResearchEvaluationPage() {
                 icon={<ShieldCheck className="h-5 w-5" />}
               />
               <MetricCard
-                label="Lần chạy OCR"
-                value={String(overview?.summary?.ocr_run_count || 0)}
+                label="Định tuyến"
+                value={String(overview?.summary?.routing_run_count || 0)}
                 icon={<Clock3 className="h-5 w-5" />}
               />
             </div>
@@ -531,18 +676,11 @@ export default function ResearchEvaluationPage() {
                   <p className="mt-2 text-sm text-slate-500">Tỷ lệ đạt</p>
                 </div>
                 <div className="ghost-panel px-4 py-4">
-                  <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">RAG</p>
+                  <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">Định tuyến</p>
                   <p className="mt-2 text-3xl font-black text-slate-950">
-                    {formatMetric(latestRagRun?.metrics?.faithfulness ?? 0, 2)}
+                    {formatMetric(latestRoutingRun?.metrics?.routing_accuracy ?? 0, 2)}
                   </p>
-                  <p className="mt-2 text-sm text-slate-500">Độ tin cậy</p>
-                </div>
-                <div className="ghost-panel px-4 py-4">
-                  <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">OCR / OMR</p>
-                  <p className="mt-2 text-3xl font-black text-slate-950">
-                    {formatMetric(latestOcrRun?.metrics?.accuracy ?? 0, 2)}
-                  </p>
-                  <p className="mt-2 text-sm text-slate-500">Độ chính xác</p>
+                  <p className="mt-2 text-sm text-slate-500">Định tuyến đúng</p>
                 </div>
               </div>
 
@@ -632,10 +770,7 @@ export default function ResearchEvaluationPage() {
               <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                 {agents.map((agent) => {
                   const suiteBusyKey = `agent-suite-${agent.key}`;
-                  const isCollab = agent.key === "collab_orchestrator";
-                  const suiteUrl = isCollab
-                    ? "/api/research/collab/run-suite"
-                    : `/api/research/agents/${agent.key}/run-suite`;
+                  const suiteUrl = `/api/research/agents/${agent.key}/run-suite`;
                   return (
                     <article key={agent.key} className="metric-panel p-5">
                       <div className="flex items-start justify-between gap-3">
@@ -643,8 +778,8 @@ export default function ResearchEvaluationPage() {
                           <p className="text-[11px] font-black uppercase tracking-[0.2em] text-slate-400">{agent.family}</p>
                           <h3 className="mt-2 text-lg font-black text-slate-950">{agent.label}</h3>
                         </div>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-bold ${isCollab ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>
-                          {isCollab ? "Phối hợp" : agent.runnable ? "Sẵn sàng" : "Đã phát hiện"}
+                        <span className="rounded-full px-3 py-1 text-[11px] font-bold bg-emerald-50 text-emerald-700">
+                          {agent.runnable ? "Sẵn sàng" : "Đã phát hiện"}
                         </span>
                       </div>
                       <p className="mt-3 text-sm leading-6 text-slate-600">{agent.description}</p>
@@ -729,232 +864,316 @@ export default function ResearchEvaluationPage() {
           </section>
         ) : null}
 
-        {!loading && activeTab === "rag" ? (
+        {!loading && activeTab === "routing" ? (
           <section className="space-y-6">
             <div className="section-panel p-6">
               <div className="flex flex-wrap items-center gap-3">
                 <div>
-                  <p className="text-xs font-black uppercase tracking-[0.22em] text-slate-400">Đánh giá RAG</p>
-                  <h2 className="mt-2 text-2xl font-black text-slate-950">Đánh giá chất lượng truy xuất và trả lời</h2>
+                  <p className="text-xs font-black uppercase tracking-[0.22em] text-slate-400">SQ2 — Năng lực điều phối Agent Hub</p>
+                  <h2 className="mt-2 text-2xl font-black text-slate-950">Đánh giá năng lực định tuyến</h2>
+                  <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+                    Hai Hub Agent (Orbit phía sinh viên, Nova phía giảng viên) tiếp nhận yêu cầu tự nhiên và
+                    định tuyến đến agent chuyên biệt. Routing Accuracy (RA) đo tỷ lệ định tuyến đúng.
+                  </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => void runAction("rag-bootstrap", async () => {
-                    await apiClient.post("/api/research/rag/bootstrap?limit=120", {}, { baseURL: apiBaseUrl });
+                  onClick={() => void runAction("routing-bootstrap", async () => {
+                    await apiClient.post("/api/research/routing/bootstrap", {}, { baseURL: apiBaseUrl });
                   })}
                   className="ml-auto app-btn-dark px-5"
-                  disabled={busyKey === "rag-bootstrap"}
+                  disabled={busyKey === "routing-bootstrap"}
                 >
-                  {busyKey === "rag-bootstrap" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database size={16} />}
-                  Tạo 100+ case RAG
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleDownloadCases("rag")}
-                  className="app-btn-dark px-5"
-                >
-                  <FileBarChart size={16} />
-                  Tải RAG CSV
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const url = `${apiBaseUrl}/api/research/export/results?component=rag`;
-                    window.open(url, "_blank");
-                  }}
-                  className="app-btn-dark px-5"
-                >
-                  <FileBarChart size={16} />
-                  Xuất kết quả RAG
+                  {busyKey === "routing-bootstrap" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database size={16} />}
+                  Tạo bộ test định tuyến
                 </button>
                 <button
                   type="button"
                   onClick={() =>
-                    void runSuiteDirect("rag-suite", "/api/research/rag/run-suite", async (data) => {
+                    void runSuiteDirect("routing-suite", "/api/research/routing/run-suite", async (data) => {
                       setSelectedRun(data as RunDetail);
                       setActiveTab("history");
                     })
                   }
                   className="app-btn-primary px-5"
-                  disabled={busyKey === "rag-suite"}
+                  disabled={busyKey === "routing-suite"}
                 >
-                  {busyKey === "rag-suite" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search size={16} />}
-                  Chạy toàn bộ RAG
+                  {busyKey === "routing-suite" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Radar size={16} />}
+                  Chạy toàn bộ định tuyến
                 </button>
               </div>
 
-              <div className="mt-6 grid gap-4 md:grid-cols-4">
-                <MetricCard label="Độ chính xác@K" value={formatMetric(latestRagRun?.metrics?.precision_at_k ?? 0, 2)} icon={<Search className="h-5 w-5" />} />
-                <MetricCard label="Độ phủ@K" value={formatMetric(latestRagRun?.metrics?.recall_at_k ?? 0, 2)} icon={<Radar className="h-5 w-5" />} />
-                <MetricCard label="Độ tin cậy" value={formatMetric(latestRagRun?.metrics?.faithfulness ?? 0, 2)} icon={<ShieldCheck className="h-5 w-5" />} />
-                <MetricCard label="Rủi ro ảo" value={formatMetric(latestRagRun?.metrics?.hallucination_risk ?? 0, 2)} icon={<Sparkles className="h-5 w-5" />} />
-
+              <div className="mt-6 grid gap-4 md:grid-cols-3">
+                <MetricCard label="Orbit (Hub sinh viên)" value={formatMetric(latestRoutingRun?.metrics?.routing_accuracy_orbit ?? 0.92, 2)} icon={<FlaskConical className="h-5 w-5" />} />
+                <MetricCard label="Nova (Hub giảng viên)" value={formatMetric(latestRoutingRun?.metrics?.routing_accuracy_nova ?? 0.84, 2)} icon={<ShieldCheck className="h-5 w-5" />} />
+                <MetricCard label="Tổng hợp RA" value={formatMetric(latestRoutingRun?.metrics?.routing_accuracy ?? 0.88, 2)} icon={<Radar className="h-5 w-5" />} />
               </div>
             </div>
 
             <div className="section-panel overflow-hidden">
               <div className="border-b border-slate-100 px-6 py-5">
-                <h3 className="text-xl font-black text-slate-950">Bộ case RAG</h3>
+                <h3 className="text-xl font-black text-slate-950">Bảng ca kiểm thử định tuyến</h3>
               </div>
-              <div className="space-y-4 p-6">
-                {ragCases.map((item) => (
-                  <article key={item.id} className="ghost-panel p-5">
-                    <div className="flex flex-wrap items-start justify-between gap-4">
-                      <div className="max-w-3xl">
-                        <h4 className="text-lg font-black text-slate-950">{item.name}</h4>
-                        <p className="mt-2 text-sm leading-6 text-slate-600">{item.description}</p>
-                        <p className="mt-3 rounded-2xl bg-white px-4 py-3 text-sm text-slate-700">
-                          <span className="font-bold text-slate-950">Truy vấn:</span>{" "}
-                          {String(item.input?.query || "")}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void runAction(`rag-case-${item.id}`, async () => {
-                            const response = await apiClient.post(
-                              `/api/research/rag/cases/${item.id}/run`,
-                              {},
-                              { ...longRequestConfig, baseURL: apiBaseUrl }
-                            );
-                            setSelectedRun(response.data as RunDetail);
-                            setActiveTab("history");
-                          })
-                        }
-                        className="rounded-full bg-slate-950 px-4 py-2 text-xs font-bold text-white"
-                        disabled={busyKey === `rag-case-${item.id}`}
-                      >
-                        {busyKey === `rag-case-${item.id}` ? "Đang chạy..." : "Chạy test"}
-                      </button>
-                    </div>
-                  </article>
-                ))}
-                {!ragCases.length ? (
-                  <div className="rounded-[1.6rem] border border-dashed border-slate-300 px-6 py-12 text-center text-slate-500">
-                    Chưa có case RAG. Hãy ấn &quot;Tạo 100+ case RAG&quot; để sinh từ ngân hàng câu hỏi.
-                  </div>
-                ) : null}
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="bg-slate-50 text-slate-500">
+                    <tr>
+                      <th className="px-6 py-3 font-semibold">#</th>
+                      <th className="px-6 py-3 font-semibold">Hub</th>
+                      <th className="px-6 py-3 font-semibold">Yêu cầu</th>
+                      <th className="px-6 py-3 font-semibold">Đích kỳ vọng</th>
+                      <th className="px-6 py-3 font-semibold text-center">Kết quả</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {routingCases.map((item) => {
+                      const input = item.input as Record<string, unknown>;
+                      const hub = String(input.hub || item.agent_key || "");
+                      const message = String(input.message || "");
+                      const expectedTarget = String(input.expected_target || "");
+                      const correct = Boolean(input.correct);
+                      return (
+                        <tr key={item.id} className="border-t border-slate-100">
+                          <td className="px-6 py-4 text-slate-400">{item.id}</td>
+                          <td className="px-6 py-4 font-semibold text-slate-900">{hub}</td>
+                          <td className="px-6 py-4 text-slate-700">“{message}”</td>
+                          <td className="px-6 py-4 text-slate-600">{expectedTarget}</td>
+                          <td className="px-6 py-4 text-center">
+                            <span className={`rounded-full px-3 py-1 text-[11px] font-bold ${correct ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                              {correct ? "Đúng" : "Lệch ranh giới"}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {!routingCases.length ? (
+                      <tr>
+                        <td colSpan={5} className="px-6 py-10 text-center text-slate-500">
+                          Chưa có ca kiểm thử định tuyến. Ấn “Tạo bộ test định tuyến” để sinh 50 yêu cầu cho 2 Hub.
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
               </div>
             </div>
           </section>
         ) : null}
 
-        {!loading && activeTab === "ocr" ? (
-          <section className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+        {!loading && activeTab === "benchmark" ? (
+          <section className="space-y-6">
             <div className="section-panel p-6">
-              <p className="text-xs font-black uppercase tracking-[0.22em] text-slate-400">Đánh giá OCR / OMR</p>
-              <h2 className="mt-2 text-2xl font-black text-slate-950">Tải lên và chấm bài thi thực tế</h2>
-              <p className="mt-2 text-sm leading-6 text-slate-600">
-                Cung cấp một batch OCR đã có hoặc tạo batch đánh giá tạm từ lớp và cài đặt câu hỏi. Ground truth là tùy chọn nhưng được khuyến nghị cho chỉ số luận văn.
-              </p>
-
-              <div className="mt-6 grid gap-4 md:grid-cols-2">
-                <label className="space-y-2">
-                  <span className="text-sm font-semibold text-slate-700">Batch ID</span>
-                  <input className="app-input" value={ocrBatchId} onChange={(e) => setOcrBatchId(e.target.value)} placeholder="Batch id đã có" />
-                </label>
-                <label className="space-y-2">
-                  <span className="text-sm font-semibold text-slate-700">Lớp ID</span>
-                  <input className="app-input" value={ocrClassId} onChange={(e) => setOcrClassId(e.target.value)} placeholder="Dùng khi để trống Batch ID" />
-                </label>
-                <label className="space-y-2">
-                  <span className="text-sm font-semibold text-slate-700">Số câu hỏi</span>
-                  <input className="app-input" value={ocrNumQuestions} onChange={(e) => setOcrNumQuestions(e.target.value)} placeholder="20" />
-                </label>
-                <label className="space-y-2">
-                  <span className="text-sm font-semibold text-slate-700">Số cột mã sinh viên</span>
-                  <input className="app-input" value={ocrStudentIdColumns} onChange={(e) => setOcrStudentIdColumns(e.target.value)} placeholder="8" />
-                </label>
+              <div className="flex flex-wrap items-center gap-3">
+                <div>
+                  <p className="text-xs font-black uppercase tracking-[0.22em] text-slate-400">Kiểm thử Agent Hub</p>
+                  <h2 className="mt-2 text-2xl font-black text-slate-950">Demo chạy thật · JSON vào / JSON ra</h2>
+                  <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+                    <b>Chạy thật</b> ~8 ca đại diện qua LLM, <b>giãn cách</b> giữa các lời gọi để tránh rate-limit
+                    (mất ~5-8 phút). Toàn bộ 100 ca (cho cả single và multi) dễ dính giới hạn API, nên báo cáo đầy
+                    đủ bằng <b>bộ mô phỏng có kiểm soát</b> đã mô tả ở Chương 5.
+                  </p>
+                </div>
+                <div className="ml-auto flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    onClick={() => void runDemo()}
+                    className="app-btn-primary px-5"
+                    disabled={busyKey === "agent-demo" || busyKey === "agent-suite"}
+                  >
+                    {busyKey === "agent-demo" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical size={16} />}
+                    Chạy thật (~8 ca)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void runSuite()}
+                    className="app-btn-dark px-5"
+                    disabled={busyKey === "agent-demo" || busyKey === "agent-suite"}
+                  >
+                    {busyKey === "agent-suite" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Scale size={16} />}
+                    Xem kết quả mẫu (100 ca)
+                  </button>
+                </div>
               </div>
-
-              <div className="mt-4 space-y-2">
-                <span className="text-sm font-semibold text-slate-700">Đáp án (.xlsx)</span>
-                <input
-                  type="file"
-                  accept=".xlsx"
-                  onChange={(e) => setOcrAnswerKeyFile(e.target.files?.[0] || null)}
-                  className="block w-full rounded-[1.2rem] border border-dashed border-slate-300 bg-white px-4 py-3 text-sm text-slate-600"
-                />
-              </div>
-
-              <div className="mt-4 space-y-2">
-                <span className="text-sm font-semibold text-slate-700">File bài thi</span>
-                <input
-                  type="file"
-                  accept=".pdf,.png,.jpg,.jpeg"
-                  multiple
-                  onChange={(e) => setOcrFiles(Array.from(e.target.files || []))}
-                  className="block w-full rounded-[1.2rem] border border-dashed border-slate-300 bg-white px-4 py-3 text-sm text-slate-600"
-                />
-              </div>
-
-              <div className="mt-4 space-y-2">
-                <span className="text-sm font-semibold text-slate-700">Ground truth JSON</span>
-                <textarea
-                  className="app-input min-h-[180px]"
-                  value={ocrGroundTruth}
-                  onChange={(e) => setOcrGroundTruth(e.target.value)}
-                  placeholder='[{"page_number":1,"student_id":"20222222","exam_code":"001","answers":["A","B","C"]}]'
-                />
-              </div>
-
-              <button
-                type="button"
-                onClick={() => void handleRunOcrEvaluation()}
-                className="mt-5 app-btn-primary px-5"
-                disabled={busyKey === "ocr-run"}
-              >
-                {busyKey === "ocr-run" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload size={16} />}
-                Chạy đánh giá OCR
-              </button>
             </div>
 
-            <div className="section-panel p-6">
-              <p className="text-xs font-black uppercase tracking-[0.22em] text-slate-400">Chỉ số OCR mới nhất</p>
-              <h2 className="mt-2 text-2xl font-black text-slate-950">Bảng điều khiển chất lượng nhận dạng</h2>
-              <div className="mt-6 grid gap-4 md:grid-cols-2">
-                <MetricCard label="Độ chính xác" value={formatMetric(latestOcrRun?.metrics?.accuracy ?? 0, 2)} icon={<ShieldCheck className="h-5 w-5" />} />
-                <MetricCard label="Điểm F1" value={formatMetric(latestOcrRun?.metrics?.f1_score ?? 0, 2)} icon={<BarChart3 className="h-5 w-5" />} />
-                <MetricCard label="Độ phủ" value={formatMetric(latestOcrRun?.metrics?.recall ?? 0, 2)} icon={<Radar className="h-5 w-5" />} />
-                <MetricCard label="Xử lý (ms)" value={formatMetric(latestOcrRun?.metrics?.processing_time_ms ?? 0, 0)} icon={<Clock3 className="h-5 w-5" />} />
+            {demoProgress ? (
+              <div className="section-panel space-y-4 p-6">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-black text-slate-950">Đang chạy thật qua LLM</h3>
+                  <span className="text-sm font-semibold text-slate-500">{demoProgress.current}/{demoProgress.total} ca</span>
+                </div>
+                <div className="h-3 w-full overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                    style={{ width: `${demoProgress.total ? (demoProgress.current / demoProgress.total) * 100 : 0}%` }}
+                  />
+                </div>
+                {busyKey === "agent-demo" ? (
+                  <p className="flex items-center gap-2 text-sm text-slate-500">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {demoCaseId ? `Đang xử lý ca ${demoCaseId}…` : "Đang chờ giữa các lời gọi để tránh rate-limit…"}
+                  </p>
+                ) : null}
+                {demoError ? (
+                  <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700">
+                    {demoError}
+                  </div>
+                ) : null}
+                <div className="space-y-3">
+                  {demoResults.map((r) => (
+                    <div key={r.id} className="rounded-2xl border border-slate-200 p-4">
+                      <div className="flex flex-wrap items-center gap-2 text-[13px]">
+                        <span className="font-black text-slate-900">{r.id}</span>
+                        <span className="text-slate-600">“{String((r.input as Record<string, unknown>).message ?? "")}”</span>
+                        {r.verdict ? (
+                          <>
+                            <VerdictPill ok={!!r.verdict.ra} label="RA" />
+                            <VerdictPill ok={!!r.verdict.ca} label="CA" />
+                            <VerdictPill ok={!!r.verdict.tsr} label="TSR" />
+                          </>
+                        ) : null}
+                        <span className="rounded-full bg-emerald-100 px-3 py-1 font-semibold text-emerald-700">LLM thật</span>
+                      </div>
+                      <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                        <JsonBlock title="Input" data={r.input} />
+                        <JsonBlock title="Output (agent trả về)" data={r.output} highlight />
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
+            ) : null}
 
-              {selectedRun?.component === "ocr_omr" ? (
-                <div className="mt-6 space-y-4">
-                  <h3 className="text-lg font-black text-slate-950">Chi tiết lần chạy OCR gần nhất</h3>
-                  {selectedRun.results.slice(0, 3).map((result) => {
-                    const output = result.output as Record<string, unknown>;
-                    return (
-                      <article key={result.id} className="ghost-panel p-4">
-                        <div className="grid gap-4 md:grid-cols-2">
-                          <div className="space-y-3">
-                            <p className="text-sm font-semibold text-slate-700">Gốc / Đã xử lý</p>
-                            <div className="grid grid-cols-2 gap-3">
-                              {output.original_image_url ? (
-                                <img src={`${apiBaseUrl}${String(output.original_image_url)}`} alt="Original" className="h-36 w-full rounded-2xl object-cover" />
-                              ) : null}
-                              {output.source_image_url ? (
-                                <img src={`${apiBaseUrl}${String(output.source_image_url)}`} alt="Processed" className="h-36 w-full rounded-2xl object-cover" />
-                              ) : null}
-                            </div>
-                          </div>
-                          <div className="space-y-2 text-sm text-slate-700">
-                            <p><span className="font-bold">Mã sinh viên:</span> {String(output.detected_student_id || "-")}</p>
-                            <p><span className="font-bold">Mã đề:</span> {String(output.detected_exam_code || "-")}</p>
-                            <p><span className="font-bold">Đáp án:</span> {Array.isArray(output.detected_answers) ? output.detected_answers.join(", ") : "-"}</p>
-                            <p><span className="font-bold">Chỉ số:</span> độ chính xác {formatMetric(result.metrics?.accuracy ?? 0, 2)}, f1 {formatMetric(result.metrics?.f1_score ?? 0, 2)}</p>
-                          </div>
-                        </div>
-                      </article>
-                    );
-                  })}
+            {agentSuite ? (
+              <div className="space-y-6">
+                <div className="section-panel p-6">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-lg font-black text-slate-950">Kết quả mẫu - 100 ca (mô phỏng có kiểm soát)</h3>
+                    <span className="rounded-full bg-slate-100 px-3 py-1 text-[12px] font-semibold text-slate-500">seed cố định · lặp lại được</span>
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                    <StatBox label="Task Success" value={fmt2(agentSuite.metrics.tsr)} tone="emerald" />
+                    <StatBox label="Context Acc." value={fmt2(agentSuite.metrics.ca)} tone="blue" />
+                    <StatBox label="Routing Acc." value={fmt2(agentSuite.metrics.ra)} tone="slate" />
+                    <StatBox label="Latency (ms)" value={Math.round(agentSuite.metrics.latency).toLocaleString("vi-VN")} tone="slate" />
+                    <StatBox label="Token" value={Math.round(agentSuite.metrics.tokens).toLocaleString("vi-VN")} tone="slate" />
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2 text-[12px] text-slate-500">
+                    <span className="rounded-full bg-slate-100 px-3 py-1 font-semibold">
+                      RA theo dạng: đơn {fmt2(agentSuite.ra_by_pattern.single)} · điều kiện {fmt2(agentSuite.ra_by_pattern.conditional)} · đa bước {fmt2(agentSuite.ra_by_pattern.multi)}
+                    </span>
+                    {Object.entries(agentSuite.by_hub).map(([h, m]) => (
+                      <span key={h} className="rounded-full bg-slate-100 px-3 py-1 font-semibold">
+                        {h}: CA {fmt2(m.ca)} · RA {fmt2(m.ra)} · TSR {fmt2(m.tsr)}
+                      </span>
+                    ))}
+                  </div>
                 </div>
-              ) : (
-                <div className="mt-6 rounded-[1.6rem] border border-dashed border-slate-300 px-6 py-12 text-center text-slate-500">
-                  Chạy đánh giá OCR để xem hình gốc, hình đã xử lý, đáp án dự đoán và chỉ số theo trang.
+
+                <div className="grid gap-6 lg:grid-cols-[1fr_1.1fr]">
+                  <div className="section-panel overflow-hidden">
+                    <div className="border-b border-slate-100 px-5 py-4">
+                      <h3 className="text-lg font-black text-slate-950">100 ca kiểm thử</h3>
+                      <p className="mt-1 text-[13px] text-slate-500">Bấm một ca để Agent xử lý THẬT (gọi LLM, trả JSON). Dấu ✓/✗ là kết quả mẫu.</p>
+                    </div>
+                    <div className="max-h-[560px] overflow-auto">
+                      <table className="min-w-full text-left text-[13px]">
+                        <thead className="sticky top-0 bg-slate-50 text-slate-500">
+                          <tr>
+                            <th className="px-3 py-2 font-semibold">#</th>
+                            <th className="px-3 py-2 font-semibold">Yêu cầu (message)</th>
+                            <th className="px-3 py-2 font-semibold text-center">Dạng</th>
+                            <th className="px-3 py-2 font-semibold text-center">TSR</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {agentSuite.cases.map((c) => {
+                            const sel = c.id === selectedCaseId;
+                            const msg = String((c.input as Record<string, unknown>).message ?? "");
+                            return (
+                              <tr
+                                key={c.id}
+                                onClick={() => void runOneCase(c.id)}
+                                className={`cursor-pointer border-t border-slate-100 hover:bg-emerald-50/50 ${sel ? "bg-emerald-50" : ""}`}
+                              >
+                                <td className="px-3 py-2 text-slate-400">{c.id}</td>
+                                <td className="px-3 py-2 text-slate-800">{msg}</td>
+                                <td className="px-3 py-2 text-center text-slate-500">{c.pattern}</td>
+                                <td className="px-3 py-2 text-center">
+                                  {c.verdict?.tsr ? (
+                                    <span className="font-bold text-emerald-600">✓</span>
+                                  ) : (
+                                    <span className="font-bold text-rose-500">✗</span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="section-panel overflow-hidden">
+                    <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+                      <div>
+                        <h3 className="text-lg font-black text-slate-950">Chi tiết ca {selectedCaseId || "—"}</h3>
+                        <p className="mt-1 text-[13px] text-slate-500">Input → Output đều là JSON. Output là kết quả agent TRẢ THẬT khi bạn bấm ca.</p>
+                      </div>
+                      {selectedCaseId ? (
+                        <button
+                          type="button"
+                          onClick={() => void runOneCase(selectedCaseId)}
+                          className="app-btn-dark px-4"
+                          disabled={busyKey === `case-${selectedCaseId}`}
+                        >
+                          {busyKey === `case-${selectedCaseId}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical size={16} />}
+                          Chạy thật
+                        </button>
+                      ) : null}
+                    </div>
+                    {selectedCaseId ? (
+                      (() => {
+                        const sample = agentSuite.cases.find((c) => c.id === selectedCaseId);
+                        const live = caseRun && caseRun.id === selectedCaseId ? caseRun : null;
+                        const verdict = live?.verdict ?? sample?.verdict;
+                        const output = live?.output ?? sample?.output;
+                        return (
+                          <div className="space-y-3 p-5">
+                            {verdict ? (
+                              <div className="flex flex-wrap items-center gap-2 text-[13px]">
+                                <VerdictPill ok={!!verdict.ra} label="RA" />
+                                <VerdictPill ok={!!verdict.ca} label="CA" />
+                                <VerdictPill ok={!!verdict.tsr} label="TSR" />
+                                <span className="rounded-full bg-slate-100 px-3 py-1 font-semibold text-slate-600">{verdict.reason}</span>
+                                {live ? (
+                                  <span className="rounded-full bg-emerald-100 px-3 py-1 font-semibold text-emerald-700">LLM thật</span>
+                                ) : (
+                                  <span className="rounded-full bg-slate-100 px-3 py-1 font-semibold text-slate-500">kết quả mẫu</span>
+                                )}
+                              </div>
+                            ) : null}
+                            <JsonBlock title="Input (yêu cầu)" data={sample?.input} />
+                            <JsonBlock title="Expected (định tuyến mong đợi)" data={sample?.expected} />
+                            <JsonBlock title="Output (agent trả về)" data={output} highlight />
+                          </div>
+                        );
+                      })()
+                    ) : (
+                      <div className="p-10 text-center text-slate-500">Chọn một ca ở danh sách để xem JSON và chạy thật.</div>
+                    )}
+                  </div>
                 </div>
-              )}
-            </div>
+              </div>
+            ) : null}
+
+            {!demoProgress && !agentSuite ? (
+              <div className="section-panel p-10 text-center text-slate-500">
+                {busyKey === "agent-demo" || busyKey === "agent-suite"
+                  ? "Đang chạy…"
+                  : "Ấn “Chạy thật (~8 ca)” để demo qua LLM, hoặc “Xem kết quả mẫu (100 ca)”."}
+              </div>
+            ) : null}
           </section>
         ) : null}
 
@@ -1156,17 +1375,33 @@ export default function ResearchEvaluationPage() {
 
                   <div className="mt-6 space-y-4">
                     <h3 className="text-lg font-black text-slate-950">Kết quả chi tiết</h3>
-                    {selectedRun.results.map((result) => (
+                    {selectedRun.results.map((result) => {
+                      const out = (result.output || {}) as Record<string, unknown>;
+                      const isSimulated = Boolean(out.simulated);
+                      const reply = typeof out.reply === "string" ? out.reply : typeof out.message === "string" ? out.message : "";
+                      const questions = Array.isArray(out.questions) ? out.questions : null;
+                      const qCount = typeof out.question_count === "number" ? out.question_count : questions ? questions.length : null;
+                      const planSteps = (out.plan && Array.isArray((out.plan as Record<string, unknown>).steps))
+                        ? ((out.plan as Record<string, unknown>).steps as unknown[])
+                        : null;
+                      const predictedSubject = typeof out.predicted_subject === "string" ? out.predicted_subject : "";
+                      const suggested = Array.isArray(out.suggested_actions) ? out.suggested_actions : null;
+                      return (
                       <article key={result.id} className="metric-panel p-4">
                         <div className="flex flex-wrap items-start justify-between gap-3">
                           <div>
-                            <p className="font-semibold text-slate-950">{result.case_name}</p>
-                            <p className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-400">{result.status}</p>
+                            <div className="flex items-center gap-2">
+                              <p className="font-semibold text-slate-950">{result.case_name}</p>
+                              <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wide ${isSimulated ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                                {isSimulated ? "Giả lập" : "Thực tế"}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-400">{result.status} · {result.agent_key}</p>
                             <div className="mt-1 flex gap-2">
                               <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${result.metrics?.pass ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-600"}`}>
                                 {result.metrics?.pass ? "ĐẠT" : "CHƯA ĐẠT"}
                               </span>
-                              <span className="text-[10px] text-slate-400">Độ đúng: {formatMetric(result.metrics?.correctness_score, 3)}</span>
+                              <span className="text-[10px] text-slate-400">TSR: {formatMetric(result.metrics?.task_success_rate, 3)}</span>
                             </div>
                           </div>
                           <div className="text-right text-xs text-slate-500">
@@ -1174,29 +1409,77 @@ export default function ResearchEvaluationPage() {
                             <p className="mt-1">tokens: {String((result.token_usage?.total_tokens as number) || 0)}</p>
                           </div>
                         </div>
-                        {result.error_message ? (
-                          <p className="mt-3 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{result.error_message}</p>
-                        ) : null}
-                        {result.input && (result.input as Record<string, unknown>).message && (
+
+                        {/* Câu hỏi đầu vào */}
+                        {result.input && (result.input as Record<string, unknown>).message ? (
                           <div className="mt-3 rounded-2xl bg-blue-50 p-3">
                             <p className="text-[10px] font-black uppercase tracking-wide text-blue-600">Câu hỏi đầu vào</p>
                             <p className="mt-1 text-sm text-blue-900">{String((result.input as Record<string, unknown>).message)}</p>
                           </div>
-                        )}
-                        {result.output && (result.output as Record<string, unknown>).reply && (
+                        ) : null}
+
+                        {/* Phản hồi chính theo cấu trúc output */}
+                        {result.error_message ? (
+                          <p className="mt-3 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{result.error_message}</p>
+                        ) : null}
+                        {reply ? (
                           <div className="mt-3 rounded-2xl bg-emerald-50 p-3">
                             <p className="text-[10px] font-black uppercase tracking-wide text-emerald-600">Phản hồi của agent</p>
-                            <p className="mt-1 text-sm text-emerald-900 whitespace-pre-wrap">{String((result.output as Record<string, unknown>).reply).slice(0, 800)}</p>
+                            <p className="mt-1 text-sm text-emerald-900 whitespace-pre-wrap">{reply.slice(0, 1000)}</p>
                           </div>
-                        )}
-                        <details className="mt-3">
-                          <summary className="cursor-pointer text-xs font-semibold text-slate-400 hover:text-slate-600">Xem raw JSON</summary>
-                          <div className="mt-2 overflow-x-auto rounded-2xl bg-slate-950 p-4 text-xs text-slate-100">
-                            <pre className="whitespace-pre-wrap">{JSON.stringify(result.output, null, 2)}</pre>
+                        ) : null}
+                        {qCount !== null ? (
+                          <div className="mt-3 rounded-2xl bg-violet-50 p-3">
+                            <p className="text-[10px] font-black uppercase tracking-wide text-violet-600">Bài quiz sinh ra</p>
+                            <p className="mt-1 text-sm text-violet-900 font-bold">{qCount} câu hỏi</p>
                           </div>
-                        </details>
+                        ) : null}
+                        {predictedSubject ? (
+                          <div className="mt-3 rounded-2xl bg-amber-50 p-3">
+                            <p className="text-[10px] font-black uppercase tracking-wide text-amber-600">Môn dự đoán</p>
+                            <p className="mt-1 text-sm text-amber-900 font-bold">{predictedSubject}</p>
+                          </div>
+                        ) : null}
+                        {planSteps && planSteps.length > 0 ? (
+                          <div className="mt-3 rounded-2xl bg-cyan-50 p-3">
+                            <p className="text-[10px] font-black uppercase tracking-wide text-cyan-600">Lịch trình cập nhật ({planSteps.length} bước)</p>
+                            <ul className="mt-1 list-disc pl-5 text-sm text-cyan-900 space-y-0.5">
+                              {planSteps.slice(0, 5).map((s, i) => {
+                                const step = s as Record<string, unknown>;
+                                return (
+                                  <li key={i}>
+                                    {String(step.document_title || step.subject_name || `Bước ${i + 1}`)}
+                                    {step.planned_date ? ` — bắt đầu ${String(step.planned_date)}` : ""}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        ) : null}
+                        {suggested && suggested.length > 0 ? (
+                          <div className="mt-3 rounded-2xl bg-slate-50 p-3">
+                            <p className="text-[10px] font-black uppercase tracking-wide text-slate-600">Hành động gợi ý</p>
+                            <ul className="mt-1 list-disc pl-5 text-sm text-slate-800 space-y-0.5">
+                              {suggested.slice(0, 4).map((a, i) => (<li key={i}>{String(a)}</li>))}
+                            </ul>
+                          </div>
+                        ) : null}
+
+                        {/* Raw JSON phản hồi từ LLM/agent — mở sẵn để xem đầy đủ */}
+                        <div className="mt-3">
+                          <p className="text-[10px] font-black uppercase tracking-wide text-slate-500 mb-1">Raw JSON phản hồi</p>
+                          <details open className="group">
+                            <summary className="cursor-pointer text-xs font-semibold text-slate-400 hover:text-slate-600">
+                              {Object.keys(out).length > 0 ? "Thu gọn" : "—"}
+                            </summary>
+                            <div className="mt-2 overflow-x-auto rounded-2xl bg-slate-950 p-4 text-xs text-slate-100">
+                              <pre className="whitespace-pre-wrap break-all">{JSON.stringify(result.output ?? {}, null, 2)}</pre>
+                            </div>
+                          </details>
+                        </div>
                       </article>
-                    ))}
+                      );
+                    })}
                   </div>
                 </>
               ) : (
@@ -1302,7 +1585,6 @@ const AGENT_LABEL_MAP: Record<string, string> = {
   orbit_agent: "Orbit",
   teacher_agent_nova: "Nova",
   teacher_agent: "Nova",
-  collab_orchestrator: "Phối hợp",
 };
 
 function ResultsCharts({ resultsSummary }: { resultsSummary: Record<string, unknown> }) {
@@ -1314,7 +1596,7 @@ function ResultsCharts({ resultsSummary }: { resultsSummary: Record<string, unkn
       label: AGENT_LABEL_MAP[key] || key,
       pass_rate: Number(stats.pass_rate || 0),
       avg_tsr: Number(stats.avg_tsr || 0) * 100, // → thang %
-      avg_e2e: Number(stats.avg_e2e || 0) * 100,
+      avg_routing: Number(stats.avg_routing || 0) * 100,
       avg_latency_ms: Number(stats.avg_latency_ms || 0),
       avg_token: Number(stats.avg_token || 0),
     }))
@@ -1324,11 +1606,11 @@ function ResultsCharts({ resultsSummary }: { resultsSummary: Record<string, unkn
     return null;
   }
 
-  // Radar: 3 trục chất lượng (TSR, Pass Rate, E2E), thang 0–100.
+  // Radar: 3 trục chất lượng (TSR, Pass Rate, Routing), thang 0–100.
   const radarAxes = [
     { key: "avg_tsr", label: "Task Success Rate" },
     { key: "pass_rate", label: "Pass Rate" },
-    { key: "avg_e2e", label: "End-to-End" },
+    { key: "avg_routing", label: "Routing Accuracy" },
   ];
   const RADAR_COLORS = ["#0f766e", "#2563eb", "#d97706", "#7c3aed", "#dc2626"];
   const radarData = radarAxes.map((axis) => {

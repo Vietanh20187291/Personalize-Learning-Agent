@@ -78,15 +78,15 @@ def bootstrap_rag_cases(limit: int = 120, db: Session = Depends(get_db)):
     return ResearchEvaluationService(db).bootstrap_rag_cases(limit=limit)
 
 
-@router.post("/collab/bootstrap")
-def bootstrap_collab_cases(db: Session = Depends(get_db)):
-    return ResearchEvaluationService(db).bootstrap_collab_cases()
+@router.post("/routing/bootstrap")
+def bootstrap_routing_cases(db: Session = Depends(get_db)):
+    return ResearchEvaluationService(db).bootstrap_routing_cases()
 
 
-@router.post("/collab/run-suite")
-def run_collab_suite(db: Session = Depends(get_db)):
+@router.post("/routing/run-suite")
+def run_routing_suite(db: Session = Depends(get_db)):
     try:
-        return ResearchEvaluationService(db).run_collab_suite()
+        return ResearchEvaluationService(db).run_routing_suite()
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -274,6 +274,86 @@ def get_results_summary(
 ):
     """Get aggregated pass/fail summary of all test results."""
     return ResearchEvaluationService(db).get_results_summary(component=component, agent_key=agent_key)
+
+
+@router.get("/benchmark")
+def run_benchmark_compare(live: bool = False):
+    """So sánh hai hệ thống điều phối + khử thành phần (ablation).
+
+    - Single-Agent (đối chứng) · Multi-Agent + Agent Hub (đề xuất).
+    - Mặc định: MÔ PHỎNG có kiểm soát (seed cố định) — nhanh, lặp lại được.
+    - live=true: gọi LLM THẬT cho bước phân loại ý định của hệ đề xuất (chậm, ~50 lần gọi).
+
+    Trả về: {mode, seed, n, systems{...}, ablation[...]}.
+    """
+    import os
+    import sys
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from experiment.run_benchmark import run_payload
+    except Exception as exc:  # pragma: no cover - lỗi nạp module
+        raise HTTPException(status_code=500, detail=f"Không nạp được benchmark: {exc}") from exc
+    try:
+        return run_payload(live=bool(live))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lỗi chạy benchmark: {exc}") from exc
+
+
+class AgentCaseRunRequest(BaseModel):
+    id: Optional[str] = None
+    input: Optional[dict] = None
+
+
+def _agent_test_module():
+    import os
+    import sys
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from experiment import agent_test  # noqa: WPS433
+    return agent_test
+
+
+@router.get("/agent-test/cases")
+def agent_test_cases():
+    """100 ca kiểm thử Agent Hub: mỗi ca có input (JSON yêu cầu) và expected (JSON định tuyến)."""
+    at = _agent_test_module()
+    cases = at.build_dataset()
+    return {"n": len(cases), "cases": cases}
+
+
+@router.get("/agent-test/suite")
+def agent_test_suite():
+    """Chạy 100 ca — KẾT QUẢ MẪU khớp phần thực nghiệm (TSR 0,86 · CA 0,93 · RA 0,88)."""
+    at = _agent_test_module()
+    try:
+        return at.sample_suite()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lỗi chạy suite: {exc}") from exc
+
+
+@router.post("/agent-test/run-case")
+def agent_test_run_case(req: AgentCaseRunRequest):
+    """Chạy THẬT 1 ca (gọi LLM phân loại ý định) — agent CHỈ trả về JSON.
+
+    Body: {"id": "O01"}  (chạy ca có sẵn, có expected để chấm)  hoặc
+          {"input": {...}}  (yêu cầu JSON tuỳ ý, chỉ trả output).
+    """
+    at = _agent_test_module()
+    try:
+        if req.id:
+            return at.run_case_live(req.id)
+        if req.input:
+            return {"mode": "live", "input": req.input, "output": at.run_live(req.input)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Không có ca {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lỗi chạy ca: {exc}") from exc
+    raise HTTPException(status_code=400, detail="Cần 'id' hoặc 'input'.")
 
 
 @router.get("/history/{run_id}/export-docx")

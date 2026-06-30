@@ -329,32 +329,31 @@ class TestOCRService:
             original_candidate = next((item for name, item in candidate_images if name == "original"), None)
             original_image = original_candidate if original_candidate is not None else loaded_page.image
             best_processed = None
-            best_predicted_name = None
             best_candidate_name = "default"
             best_quality = None
+            # CHỈ chạy xử lý OMR (nhanh) trên từng candidate để chọn bản tốt nhất.
+            # KHÔNG chạy nhận diện tên trong vòng lặp này — name OCR rất nặng và
+            # không ảnh hưởng điểm (điểm chỉ cần MSSV + mã đề + đáp án). Tránh treo.
             for candidate_name, candidate_image in candidate_images:
                 current_processed = processor.process_page(candidate_image)
-                current_predicted_name = self.student_name_ocr.recognize(
-                    current_processed.name_crop,
-                    fallback_image=current_processed.name_box_crop,
-                )
                 current_quality = self._processed_candidate_quality(
                     current_processed.status,
                     current_processed.student_id,
                     current_processed.exam_code,
                     current_processed.answers,
-                    predicted_name_score=current_predicted_name.score,
                 )
                 if best_processed is None or current_quality > best_quality:
                     best_processed = current_processed
-                    best_predicted_name = current_predicted_name
                     best_candidate_name = candidate_name
                     best_quality = current_quality
 
             processed = best_processed
-            predicted_name = best_predicted_name or self.student_name_ocr.recognize(
+            # Nhận diện tên ĐÚNG 1 LẦN trên bản tốt nhất đã chọn, ở chế độ FAST
+            # (tên chỉ để hiển thị, không ảnh hưởng điểm → không cần OCR nặng).
+            predicted_name = self.student_name_ocr.recognize(
                 processed.name_crop,
                 fallback_image=processed.name_box_crop,
+                fast=True,
             )
 
             page_image_path = run_dir / "pages" / f"page_{page_number:03d}.png"
@@ -372,6 +371,14 @@ class TestOCRService:
             exam_code = processed.exam_code.strip()
             grading_status = processed.status
             answer_key = answer_key_by_code.get(exam_code)
+            # Khớp mã đề mềm dẻo: nếu không khớp tuyệt đối, thử so theo số (bỏ số 0 đầu)
+            # để tránh lệch như "1" vs "01" vs "001" giữa mã đề tô trên phiếu và mã đề trong Excel.
+            if answer_key is None and exam_code:
+                normalized_code = exam_code.lstrip("0") or "0"
+                for code, key in answer_key_by_code.items():
+                    if (code or "").lstrip("0") == normalized_code:
+                        answer_key = key
+                        break
             if answer_key is None:
                 grading_status = "unknown_exam_code"
                 scored = {

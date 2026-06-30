@@ -5,6 +5,8 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   AlertCircle,
   Bot,
+  ChevronDown,
+  ChevronUp,
   Loader,
   Minimize2,
   Send,
@@ -83,6 +85,7 @@ export default function NovaTeacherAgent() {
 
   const [bootstrapped, setBootstrapped] = useState(false);
   const [open, setOpen] = useState(true);
+  const [showSuggestions, setShowSuggestions] = useState(true);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [loading, setLoading] = useState(false);
@@ -249,9 +252,25 @@ export default function NovaTeacherAgent() {
 
           router.push(query.toString() ? `/teacher/subjects?${query.toString()}` : "/teacher/subjects");
         } else if (action.tab_name === "exam") {
-          router.push("/teacher/exam");
+          // Nova mở trang tạo đề + tự điền sẵn số câu/số mã đề rồi bấm sinh đề,
+          // mô phỏng đúng thao tác người dùng (?auto=1&q=<số câu>&v=<số mã đề>).
+          const examQuery = new URLSearchParams();
+          examQuery.set("auto", "1");
+          const examNumQuestions = Number(action.params?.num_questions);
+          const examNumVersions = Number(action.params?.num_versions);
+          if (Number.isFinite(examNumQuestions) && examNumQuestions > 0) {
+            examQuery.set("q", String(Math.min(40, Math.max(1, Math.floor(examNumQuestions)))));
+          }
+          if (Number.isFinite(examNumVersions) && examNumVersions > 0) {
+            examQuery.set("v", String(Math.min(4, Math.max(1, Math.floor(examNumVersions)))));
+          }
+          router.push(`/teacher/exam?${examQuery.toString()}`);
+        } else if (action.tab_name === "question-bank") {
+          // Nova mở Ngân hàng câu hỏi (nơi nạp & quản lý tài liệu) khi hỏi về tài liệu/thiếu tài liệu.
+          const subjectName = String(action.params?.subject_name || "").trim();
+          router.push(subjectName ? `/teacher/question-bank?subject=${encodeURIComponent(subjectName)}` : "/teacher/question-bank");
         } else if (action.tab_name === "documents") {
-          router.push("/teacher/documents");
+          router.push("/teacher/question-bank");
         }
         break;
       default:
@@ -348,7 +367,7 @@ export default function NovaTeacherAgent() {
 
   return (
     <section
-      className="fixed bottom-5 right-5 z-[80] flex max-h-[82vh] w-[420px] max-w-[94vw] flex-col overflow-hidden rounded-[2rem] border border-cyan-300/18 bg-[linear-gradient(180deg,rgba(5,10,24,0.98),rgba(7,18,39,0.98))] shadow-[0_36px_96px_rgba(2,8,23,0.62)] backdrop-blur-2xl"
+      className="fixed bottom-5 right-5 z-[80] flex h-[82vh] w-[420px] max-w-[94vw] flex-col overflow-hidden rounded-[2rem] border border-cyan-300/18 bg-[linear-gradient(180deg,rgba(5,10,24,0.98),rgba(7,18,39,0.98))] shadow-[0_36px_96px_rgba(2,8,23,0.62)] backdrop-blur-2xl"
       aria-label="Nova Agent"
     >
       <div className="pointer-events-none absolute inset-0">
@@ -376,7 +395,7 @@ export default function NovaTeacherAgent() {
         </div>
       </header>
 
-      <div className="relative flex-1 overflow-hidden">
+      <div className="relative min-h-0 flex-1 overflow-hidden">
         <div className="h-full space-y-3 overflow-y-auto px-4 py-4">
           {messages.length === 0 ? (
             <div className="rounded-[1.6rem] border border-cyan-300/14 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.04))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
@@ -438,19 +457,31 @@ export default function NovaTeacherAgent() {
         <div className="mb-2 flex items-center gap-2 text-cyan-100/70">
           <Sparkles size={13} className="text-cyan-300" />
           <span className="text-[11px] font-semibold uppercase tracking-[0.18em]">Gợi ý nhanh</span>
+          <button
+            type="button"
+            onClick={() => setShowSuggestions((prev) => !prev)}
+            title={showSuggestions ? "Thu gọn gợi ý" : "Mở gợi ý"}
+            className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded-md border border-cyan-300/20 bg-white/5 text-cyan-100/80 transition hover:bg-white/10 hover:text-cyan-50"
+          >
+            {showSuggestions ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+          </button>
         </div>
+        {showSuggestions ? (
         <div className="grid gap-2">
           {suggestedQuestions.map((question) => (
             <button
               key={question}
               type="button"
               onClick={() => handleSelectSuggestedQuestion(question)}
-              className="rounded-[1.15rem] border border-cyan-300/12 bg-slate-950/42 px-3 py-3 text-left transition hover:border-cyan-300/22 hover:bg-slate-900/60"
+              className="rounded-[0.85rem] border border-cyan-300/12 bg-slate-950/42 px-2.5 py-1.5 text-left transition hover:border-cyan-300/22 hover:bg-slate-900/60"
             >
-              <span className="text-[13px] font-medium leading-5 text-cyan-50">{question}</span>
+              <span className="text-[11px] font-medium leading-4 text-cyan-50">{question}</span>
             </button>
           ))}
         </div>
+        ) : (
+          <p className="text-[11px] italic text-cyan-100/40">Gợi ý đã được thu gọn.</p>
+        )}
       </div>
 
       <footer className="relative border-t border-cyan-300/12 px-4 py-4">

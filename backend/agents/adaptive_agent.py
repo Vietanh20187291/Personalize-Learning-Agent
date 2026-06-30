@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from config import settings
 from db.models import Document, DocumentPublication, LearnerProfile, LearningRoadmap, StudentDocumentEvaluation, Subject, User
 from llm_trace import log_llm_error, log_llm_request, log_llm_response
+from memory.conversation_memory import get_conversation_memory
 from rag.vector_store import get_vector_store
 
 # Tải biến môi trường
@@ -816,10 +817,209 @@ NỘI DUNG ĐÃ LÀM SẠCH:
     # ==========================================
     # 2. HÀM GIA SƯ AI CHAT — CÁ NHÂN HÓA
     # ==========================================
+    # ================================================================== #
+    #  Agentic RAG (tool-calling)                                         #
+    #  Thay cho naive RAG: thay vì nhét 22k ký tự tài liệu vào prompt,   #
+    #  để LLM tự gọi tool retrieve(query) để lấy đúng đoạn liên quan.     #
+    # ================================================================== #
+    _RETRIEVE_TOOL = {
+        "type": "function",
+        "function": {
+            "name": "retrieve_document_context",
+            "description": (
+                "Truy xuất các đoạn tài liệu liên quan đến truy vấn để trả lời câu hỏi của học sinh. "
+                "BẮT BUỘC gọi tool này trước khi trả lời; chỉ dùng thông tin trả về để trả lời; "
+                "nếu chưa đủ hãy gọi thêm lần nữa với truy vấn cụ thể hơn."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Truy vấn tiếng Việt mô tả thông tin cần tìm trong tài liệu "
+                            "(ví dụ: 'định nghĩa giao của hai dãy số và ví dụ minh họa')."
+                        ),
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    }
+
+    def _retrieve_chunks(
+        self,
+        query: str,
+        subject: str,
+        source_file: str = "",
+        allowed_filenames: list = None,
+        document_id: Optional[int] = None,
+        top_k: int = 6,
+    ) -> List[Dict[str, str]]:
+        """Semantic search thật theo query của LLM, filter theo tài liệu đang mở."""
+        if self.vector_store is None or not (query or "").strip():
+            return []
+
+        search_filter = {"subject": {"$eq": subject}}
+        if allowed_filenames:
+            search_filter = {"$and": [{"subject": {"$eq": subject}}, {"source": {"$in": allowed_filenames}}]}
+        if source_file:
+            search_filter = {"$and": [{"subject": {"$eq": subject}}, {"source": {"$eq": source_file}}]}
+        if document_id:
+            doc = self._fetch_document(subject, source_file=source_file, document_id=document_id)
+            if doc and doc.filename:
+                search_filter = {"$and": [{"subject": {"$eq": subject}}, {"source": {"$eq": doc.filename}}]}
+
+        try:
+            docs = self.vector_store.similarity_search(query, k=top_k, filter=search_filter)
+            if not docs and source_file:
+                docs_all = self.vector_store.similarity_search(query, k=top_k * 3, filter={"subject": {"$eq": subject}})
+                docs = [d for d in docs_all if os.path.basename(str((d.metadata or {}).get("source", ""))) == source_file]
+        except Exception as exc:
+            print(f"⚠️ Agentic retrieve failed: {exc}")
+            return []
+
+        chunks: List[Dict[str, str]] = []
+        seen = set()
+        for doc in docs:
+            text = self._clean_text(getattr(doc, "page_content", ""))
+            if len(text) < 20:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            source = (doc.metadata or {}).get("source", source_file or "")
+            chunks.append({"source": os.path.basename(str(source)), "content": text})
+        return chunks
+
+    def _run_agentic_rag(
+        self,
+        subject: str,
+        user_message: str,
+        system_prompt: str,
+        history: list,
+        source_file: str = "",
+        allowed_filenames: list = None,
+        document_id: Optional[int] = None,
+        max_iterations: int = 3,
+    ) -> str:
+        """
+        Agentic RAG loop: để LLM tự gọi tool retrieve để lấy đúng đoạn tài liệu.
+        Trả về câu trả lời cuối cùng (đã bám tài liệu). Fallback nếu vector_store lỗi.
+        """
+        api_messages: List[Dict] = [{"role": "system", "content": system_prompt}]
+        for msg in (history or [])[-8:]:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role in ["user", "assistant"] and content:
+                api_messages.append({"role": role, "content": content})
+        api_messages.append({"role": "user", "content": user_message})
+
+        retrieved_so_far: List[Dict[str, str]] = []
+
+        for iteration in range(max_iterations):
+            try:
+                completion = self.client.chat.completions.create(
+                    messages=api_messages,
+                    model=self.model,
+                    temperature=0.35,
+                    tools=[self._RETRIEVE_TOOL],
+                    tool_choice="auto",
+                )
+            except Exception as exc:
+                print(f"⚠️ Agentic LLM call failed at iteration {iteration}: {exc}")
+                return ""
+
+            message = completion.choices[0].message
+            tool_calls = getattr(message, "tool_calls", None) or []
+
+            if not tool_calls:
+                # LLM không cần thêm ngữ cảnh nữa → trả lời cuối.
+                return str(getattr(message, "content", "") or "").strip()
+
+            # LLM yêu cầu retrieve: append message assistant (với tool_calls) rồi xử lý từng tool call.
+            api_messages.append(message.model_dump())
+
+            for call in tool_calls:
+                function = getattr(call, "function", None)
+                if not function or getattr(function, "name", "") != "retrieve_document_context":
+                    continue
+                try:
+                    arguments = json.loads(function.arguments or "{}")
+                except Exception:
+                    arguments = {}
+                query = self._clean_text(arguments.get("query", "")) or self._clean_text(user_message)
+
+                chunks = self._retrieve_chunks(
+                    query=query,
+                    subject=subject,
+                    source_file=source_file,
+                    allowed_filenames=allowed_filenames,
+                    document_id=document_id,
+                )
+                retrieved_so_far.extend(chunks)
+
+                # Đóng gói context trả về cho LLM (có gắn nguồn để citation).
+                if chunks:
+                    context_block = "\n\n".join(
+                        [f"[Nguồn: {c['source']}]\n{c['content']}" for c in chunks]
+                    )
+                    tool_content = f"Các đoạn tài liệu liên quan đến truy vấn '{query}':\n\n{context_block}"
+                else:
+                    tool_content = (
+                        f"Không tìm thấy đoạn nào khớp truy vấn '{query}' trong tài liệu. "
+                        "Nếu tài liệu không chứa nội dung này, hãy trả lời học sinh là không thấy thông tin trong tài liệu."
+                    )
+
+                api_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": getattr(call, "id", ""),
+                        "content": tool_content,
+                    }
+                )
+
+        # Hết số lần cho phép: ép LLM tổng hợp câu trả lời với context đã có.
+        api_messages.append(
+            {
+                "role": "user",
+                "content": "Đã đủ ngữ cảnh. Hãy trả lời câu hỏi ban đầu CHỈ dựa trên các đoạn tài liệu đã truy xuất ở trên. Nếu không có thông tin liên quan, nói rõ là không thấy trong tài liệu.",
+            }
+        )
+        try:
+            completion = self.client.chat.completions.create(
+                messages=api_messages,
+                model=self.model,
+                temperature=0.35,
+            )
+            return str(completion.choices[0].message.content or "").strip()
+        except Exception as exc:
+            print(f"⚠️ Agentic final answer failed: {exc}")
+            return ""
+
+    @staticmethod
+    def _tutor_session_key(user_id: Optional[int], subject: str, source_file: str = "") -> Optional[str]:
+        """Build a stable memory key per (user, subject, document) so each document keeps its own chat context."""
+        if not user_id:
+            return None
+        return f"tutor|u{user_id}|s{(subject or '').strip().lower()}|d{(source_file or '').strip().lower()}"
+
+    @staticmethod
+    def _save_assistant_reply(memory_key: Optional[str], reply: str) -> None:
+        """Persist the assistant reply into conversation memory so later turns have context."""
+        if not memory_key or not (reply or "").strip():
+            return
+        try:
+            get_conversation_memory().add_message_generic(memory_key, "assistant", reply.strip())
+        except Exception as exc:
+            print(f"⚠️ Không lưu câu trả lời vào memory: {exc}")
+
     def chat_with_tutor(self, subject: str, user_message: str, roadmap_context: str, allowed_filenames: list = None, session_topic: str = "", source_file: str = "", history: list = None, document_id: Optional[int] = None, user_id: Optional[int] = None):
         if history is None:
             history = []
 
+        # Vẫn cần tên file (effective_source) để filter retrieval theo đúng tài liệu đang mở.
         document_context = self._get_document_chat_context(
             subject,
             source_file=source_file,
@@ -829,8 +1029,23 @@ NỘI DUNG ĐÃ LÀM SẠCH:
         document_text = document_context.get("content", "")
         effective_source = document_context.get("source_file", "") or self._clean_text(source_file)
 
-        if not document_text:
-            return "Mình chưa đọc được nội dung của tài liệu đang mở. Hãy mở lại đúng tài liệu này rồi gửi câu hỏi thêm một lần nữa."
+        # --- LƯU NGỮ CẢNH CHAT (ConversationMemory) ---
+        # Luôn ưu tiên history do caller truyền (vd Orbit lấy từ DB). Nếu không có,
+        # tự load từ ConversationMemory theo (user, subject, document) để giữ context
+        # qua nhiều câu hỏi liên tiếp ("giải thích rõ hơn" phải hiểu câu trước đó).
+        memory_key = self._tutor_session_key(user_id, subject, effective_source)
+        conversation_memory = get_conversation_memory()
+        if not history and memory_key:
+            try:
+                history = conversation_memory.get_history_generic(memory_key)
+            except Exception as exc:
+                print(f"⚠️ Không load được lịch sử chat: {exc}")
+        # Ghi câu hỏi hiện tại vào memory ngay để các lượt sau thấy.
+        if memory_key and (user_message or "").strip():
+            try:
+                conversation_memory.add_message_generic(memory_key, "user", user_message.strip())
+            except Exception as exc:
+                print(f"⚠️ Không lưu câu hỏi vào memory: {exc}")
 
         # --- CÁ NHÂN HÓA: Lấy hồ sơ học sinh ---
         student_context = ""
@@ -858,6 +1073,54 @@ NỘI DUNG ĐÃ LÀM SẠCH:
 - Không cần nhắc lại profile học sinh trong câu trả lời, chỉ CỨNG DẠY KHÁC NHAU.
 """
 
+        if not self.client:
+            return "Tutor Agent hiện chưa kết nối được Groq. Hãy kiểm tra khóa Groq của hệ thống rồi thử lại."
+
+        # --- AGENTIC RAG (ưu tiên): LLM tự gọi tool retrieve để lấy đúng đoạn tài liệu ---
+        # Bỏ cách cũ nhét 22k ký tự document_text vào prompt. Chỉ dùng khi vector_store sẵn sàng.
+        if self.vector_store is not None:
+            agentic_system_prompt = f"""Bạn là Tutor Agent CÁ NHÂN HÓA của môn {subject}.
+
+{personalization_block}
+### NHIỆM VỤ CỐT LÕI (BẮT BUỘC):
+- TRƯỚC KHI trả lời, BẮT BUỘC gọi tool `retrieve_document_context` với truy vấn mô tả thông tin cần tìm trong tài liệu.
+- CHỈ dùng thông tin tool trả về để trả lời. KHÔNG bịa đặt kiến thức ngoài tài liệu.
+- Nếu sau khi truy xuất vẫn không thấy thông tin, nói rõ: "Tài liệu hiện tại không đề cập nội dung này".
+- Trả lời tiếng Việt, rõ ràng, dễ hiểu, đi thẳng vào yêu cầu.
+
+### NGỮ CẢNH PHIÊN HỌC:
+- Buổi học hiện tại: {roadmap_context or session_topic or effective_source or subject}
+- Tài liệu đang mở: {effective_source or "Tài liệu hiện tại"}
+"""
+            started = time.perf_counter()
+            trace_prompt = f"USER: {user_message}\n(history {len(history)} lượt, agentic RAG với tool retrieve)"
+            log_llm_request("groq", self.model, prompt=trace_prompt, system_prompt=agentic_system_prompt)
+            try:
+                response_text = self._run_agentic_rag(
+                    subject=subject,
+                    user_message=user_message,
+                    system_prompt=agentic_system_prompt,
+                    history=history,
+                    source_file=effective_source or source_file,
+                    allowed_filenames=allowed_filenames,
+                    document_id=document_id,
+                )
+                duration_ms = (time.perf_counter() - started) * 1000.0
+                if response_text:
+                    log_llm_response("groq", self.model, response=str(response_text), duration_ms=duration_ms)
+                    self._save_assistant_reply(memory_key, response_text)
+                    return response_text
+                # Agentic trả rỗng (vd LLM lỗi) → fallback sang cách cũ bên dưới.
+                print("⚠️ Agentic RAG trả kết quả rỗng, fallback sang naive RAG.")
+            except Exception as exc:
+                log_llm_error("groq", self.model, error_message=str(exc), duration_ms=0.0)
+                print(f"⚠️ Agentic RAG lỗi, fallback sang naive RAG: {exc}")
+
+        # --- FALLBACK (naive RAG, cách cũ): nhét document_text vào prompt ---
+        # Dùng khi vector_store bị tắt hoặc agentic loop lỗi, để hệ thống vẫn chạy (degraded).
+        if not document_text:
+            return "Mình chưa đọc được nội dung của tài liệu đang mở. Hãy mở lại đúng tài liệu này rồi gửi câu hỏi thêm một lần nữa."
+
         system_prompt = f"""Bạn là Tutor Agent CÁ NHÂN HÓA của môn {subject}.
 
 {personalization_block}
@@ -884,9 +1147,6 @@ NỘI DUNG ĐÃ LÀM SẠCH:
                 api_messages.append({"role": role, "content": content})
         api_messages.append({"role": "user", "content": user_message})
 
-        if not self.client:
-            return "Tutor Agent hiện chưa kết nối được Groq. Hãy kiểm tra khóa Groq của hệ thống rồi thử lại."
-
         try:
             trace_prompt = "\n\n".join([
                 f"{msg.get('role', 'user').upper()}: {msg.get('content', '')}"
@@ -903,6 +1163,7 @@ NỘI DUNG ĐÃ LÀM SẠCH:
             response_text = str(chat_completion.choices[0].message.content or "").strip()
             duration_ms = (time.perf_counter() - started) * 1000.0
             log_llm_response("groq", self.model, response=str(response_text), duration_ms=duration_ms)
+            self._save_assistant_reply(memory_key, response_text)
             return response_text or "Mình chưa nhận được câu trả lời từ Groq cho tài liệu này. Bạn hãy gửi lại câu hỏi ngắn hơn."
         except Exception as e:
             log_llm_error("groq", self.model, error_message=str(e), duration_ms=0.0)

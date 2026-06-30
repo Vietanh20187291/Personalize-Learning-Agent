@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 
 import { apiClient, longRequestConfig, normalizeApiError, runLongRequest } from '../../../services/api';
@@ -15,6 +15,7 @@ import {
   Save,
   Sparkles,
   Trash2,
+  Upload,
   Wand2,
 } from 'lucide-react';
 
@@ -26,6 +27,12 @@ interface DocumentData {
   subject_id?: number;
   class_id?: number;
   upload_time?: string;
+}
+
+interface ClassroomItem {
+  id: number;
+  name: string;
+  subject_id?: number;
 }
 
 interface SubjectItem {
@@ -73,8 +80,12 @@ const normalizeOptions = (raw: unknown): string[] => {
 
 export default function TeacherQuestionBankPage() {
   const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8010';
+  const subjectQuery = typeof window !== 'undefined'
+    ? new URLSearchParams(window.location.search).get('subject')?.trim() || ''
+    : '';
   const [subjects, setSubjects] = useState<SubjectItem[]>([]);
   const [documents, setDocuments] = useState<DocumentData[]>([]);
+  const [classrooms, setClassrooms] = useState<ClassroomItem[]>([]);
   const [selectedSubjectId, setSelectedSubjectId] = useState<number | null>(null);
   const [selectedDocId, setSelectedDocId] = useState<number | null>(null);
   const [questions, setQuestions] = useState<QuestionBankItem[]>([]);
@@ -88,11 +99,19 @@ export default function TeacherQuestionBankPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [editDraft, setEditDraft] = useState<Partial<QuestionBankItem>>({});
   const [newQuestion, setNewQuestion] = useState(initialFormState);
+  const [uploading, setUploading] = useState(false);
+  const [deletingDocId, setDeletingDocId] = useState<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedSubject = useMemo(
     () => subjects.find((item) => item.id === selectedSubjectId) || null,
     [subjects, selectedSubjectId]
   );
+  const subjectClassrooms = useMemo(
+    () => classrooms.filter((c) => c.subject_id === selectedSubjectId),
+    [classrooms, selectedSubjectId]
+  );
+  const activeClassId = subjectClassrooms[0]?.id ?? null;
   const selectedDocument = useMemo(
     () => documents.find((doc) => doc.id === selectedDocId) || null,
     [documents, selectedDocId]
@@ -125,6 +144,81 @@ export default function TeacherQuestionBankPage() {
       toast.error('Không thể tải danh sách môn học');
       setSubjects([]);
       setSelectedSubjectId(null);
+    }
+  };
+
+  const fetchClassrooms = async () => {
+    try {
+      const teacherId = (localStorage.getItem('userId') || '').trim();
+      if (!teacherId) return;
+      const res = await apiClient.get(`${apiBaseUrl}/api/classroom/teacher/${teacherId}`);
+      const payload = Array.isArray(res.data) ? res.data : [];
+      setClassrooms(
+        payload.map((item: any) => ({
+          id: Number(item.id),
+          name: String(item.name || '').trim(),
+          subject_id: item.subject_id != null ? Number(item.subject_id) : undefined,
+        }))
+      );
+    } catch {
+      setClassrooms([]);
+    }
+  };
+
+  const handleUploadDocument = async (file: File) => {
+    if (!selectedSubjectId || !activeClassId) {
+      toast.error('Hãy chọn môn học (có lớp) trước khi tải tài liệu lên.');
+      return;
+    }
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('class_id', String(activeClassId));
+      const teacherId = (localStorage.getItem('userId') || '').trim();
+      if (teacherId) formData.append('teacher_id', teacherId);
+      await runLongRequest(
+        () =>
+          apiClient.post(`${apiBaseUrl}/api/documents/upload`, formData, {
+            ...longRequestConfig,
+            headers: { 'Content-Type': 'multipart/form-data' },
+          }),
+        { onSlowStateChange: setSlowAppendNotice, slowDelayMs: 4000 }
+      );
+      toast.success(`Đã tải lên "${file.name}".`);
+      await fetchDocuments(selectedSubjectId);
+    } catch (error: unknown) {
+      toast.error(normalizeApiError(error, 'Không thể tải tài liệu lên'));
+    } finally {
+      setUploading(false);
+      setSlowAppendNotice(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleDeleteDocument = async (doc: DocumentData) => {
+    const confirmed = await confirmAlert({
+      title: 'Xóa tài liệu',
+      message: `Xóa tài liệu "${doc.title || doc.filename}"? Toàn bộ câu hỏi gắn với tài liệu này cũng sẽ bị ảnh hưởng.`,
+      confirmText: 'Xóa ngay',
+      cancelText: 'Hủy',
+      tone: 'danger',
+    });
+    if (!confirmed) return;
+    setDeletingDocId(doc.id);
+    try {
+      await apiClient.delete(`${apiBaseUrl}/api/documents/delete/${doc.id}`);
+      toast.success('Đã xóa tài liệu');
+      // Nếu đang xem câu hỏi của tài liệu vừa xóa thì dọn sạch
+      if (selectedDocId === doc.id) {
+        setSelectedDocId(null);
+        setQuestions([]);
+      }
+      if (selectedSubjectId) await fetchDocuments(selectedSubjectId);
+    } catch (error: unknown) {
+      toast.error(normalizeApiError(error, 'Không thể xóa tài liệu'));
+    } finally {
+      setDeletingDocId(null);
     }
   };
 
@@ -186,6 +280,7 @@ export default function TeacherQuestionBankPage() {
 
   useEffect(() => {
     void fetchSubjects();
+    void fetchClassrooms();
   }, []);
 
   useEffect(() => {
@@ -197,6 +292,15 @@ export default function TeacherQuestionBankPage() {
     }
     void fetchDocuments(selectedSubjectId);
   }, [selectedSubjectId]);
+
+  // Khi mở trang qua Nova (?subject=...), tự chọn môn khớp.
+  useEffect(() => {
+    if (!subjectQuery || selectedSubjectId || subjects.length === 0) return;
+    const match = subjects.find(
+      (s) => s.name.toLowerCase() === subjectQuery.toLowerCase() || s.name.toLowerCase().includes(subjectQuery.toLowerCase())
+    );
+    if (match) setSelectedSubjectId(match.id);
+  }, [subjectQuery, subjects, selectedSubjectId]);
 
   useEffect(() => {
     if (!selectedDocId) {
@@ -370,15 +474,11 @@ export default function TeacherQuestionBankPage() {
           <div className="grid gap-0 lg:grid-cols-[0.78fr_1.22fr]">
             <div className="section-panel rounded-none border-0 border-b border-r border-[rgba(24,24,27,0.08)] p-6 text-zinc-950 lg:border-b-0">
               <p className="text-[10px] font-black uppercase tracking-[0.34em] text-zinc-500">
-                Question forge
+                Câu hỏi & tài liệu
               </p>
               <h1 className="mt-3 text-3xl font-black uppercase md:text-4xl">
-                Kho điều chế câu hỏi
+                Tổng kết câu hỏi
               </h1>
-              <p className="mt-4 text-sm leading-7 text-zinc-700">
-                Không gian này được dựng lại theo dạng control room: chọn môn, khóa tài liệu,
-                sinh thêm 10 câu và rà từng dòng đã lưu trong database.
-              </p>
 
               <div className="mt-6 grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
                 <div className="metric-panel p-4">
@@ -415,7 +515,7 @@ export default function TeacherQuestionBankPage() {
                     </div>
                     <div>
                       <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-400">
-                        Subject lock
+                        Môn học & tài liệu
                       </p>
                       <h2 className="text-lg font-black uppercase text-[#251917]">
                         Chọn môn và tài liệu
@@ -440,9 +540,44 @@ export default function TeacherQuestionBankPage() {
                       ))}
                     </select>
 
+                    {/* Tải tài liệu lên */}
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".pdf,.doc,.docx,.ppt,.pptx,.txt"
+                      className="hidden"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) void handleUploadDocument(file);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={!selectedSubjectId || !activeClassId || uploading}
+                      className="app-btn-primary w-full"
+                    >
+                      {uploading ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Đang tải lên
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="h-4 w-4" />
+                          Tải tài liệu lên
+                        </>
+                      )}
+                    </button>
+                    {!activeClassId && selectedSubjectId ? (
+                      <p className="text-[11px] font-medium text-amber-600">
+                        Môn này chưa có lớp học nào của bạn để gắn tài liệu.
+                      </p>
+                    ) : null}
+
                     <div className="ghost-panel p-3">
                       <p className="mb-3 text-[10px] font-black uppercase tracking-[0.3em] text-slate-400">
-                        Document queue
+                        Danh sách tài liệu
                       </p>
                       {loadingDocs ? (
                         <div className="flex items-center gap-2 px-2 py-3 text-sm text-slate-500">
@@ -458,23 +593,40 @@ export default function TeacherQuestionBankPage() {
                           {documents.map((doc) => {
                             const isActive = doc.id === selectedDocId;
                             return (
-                              <button
+                              <div
                                 key={doc.id}
-                                type="button"
-                                onClick={() => handleSelectDocument(doc.id)}
-                                className={`w-full rounded-[1rem] border px-4 py-3 text-left transition-all ${
+                                className={`flex items-center gap-2 rounded-[1rem] border px-3 py-2 transition-all ${
                                   isActive
                                     ? 'border-[var(--brand)] bg-[linear-gradient(135deg,rgba(185,28,28,0.08),rgba(15,118,110,0.05))] shadow-[0_10px_24px_rgba(95,33,23,0.08)]'
                                     : 'border-slate-200 bg-white hover:border-[var(--accent)]'
                                 }`}
                               >
-                                <p className="line-clamp-2 text-sm font-black uppercase text-[#251917]">
-                                  {doc.title || doc.filename || `Tài liệu #${doc.id}`}
-                                </p>
-                                <p className="mt-1 text-xs font-medium text-slate-500">
-                                  {doc.subject}
-                                </p>
-                              </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleSelectDocument(doc.id)}
+                                  className="min-w-0 flex-1 text-left"
+                                >
+                                  <p className="line-clamp-2 text-sm font-black uppercase text-[#251917]">
+                                    {doc.title || doc.filename || `Tài liệu #${doc.id}`}
+                                  </p>
+                                  <p className="mt-1 text-xs font-medium text-slate-500">
+                                    {doc.subject}
+                                  </p>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteDocument(doc)}
+                                  disabled={deletingDocId === doc.id}
+                                  title="Xóa tài liệu"
+                                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 disabled:opacity-50"
+                                >
+                                  {deletingDocId === doc.id ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Trash2 className="h-4 w-4" />
+                                  )}
+                                </button>
+                              </div>
                             );
                           })}
                         </div>
@@ -487,16 +639,12 @@ export default function TeacherQuestionBankPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <p className="text-[10px] font-black uppercase tracking-[0.3em] text-zinc-500">
-                        Batch generation
+                        Tạo câu hỏi
                       </p>
                       <h2 className="mt-2 text-xl font-black uppercase">Sinh thêm 10 câu</h2>
                     </div>
                     <Sparkles className="h-5 w-5 text-[#fbd7ad]" />
                   </div>
-                  <p className="mt-3 text-sm leading-7 text-zinc-700">
-                    Yêu cầu sẽ đi qua endpoint append 10 câu cho đúng tài liệu đang chọn. Nếu Groq
-                    trả về đủ 10 câu và backend lưu thành công, số lượng bên dưới tăng ngay.
-                  </p>
                   {slowAppendNotice ? (
                     <div className="mt-3 rounded-xl border border-indigo-200 bg-white/80 px-3 py-2 text-[12px] font-semibold text-indigo-700">
                       Hệ thống vẫn đang sinh thêm câu hỏi, backend chưa mất kết nối. Vui lòng chờ thêm một chút.

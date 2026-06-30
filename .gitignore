@@ -28,3 +28,23 @@ replace_prompt*.py
 backend/*.log
 backend/*.status
 
+# --- Thesis / report / docs (KHÔNG đẩy lên GitHub) ---
+docs/
+build_report/
+build_*.py
+_thesis*.txt
+_khung*.txt
+*.pptx
+*.docx
+*.pdf
+experiment/
+sql_db/
+test.db.bak_*
+backend/logs/
+backend_dev.log
+frontend_dev.log
+frontend/dev.log
+
+# --- IDE / local config ---
+.vscode/
+.claude/

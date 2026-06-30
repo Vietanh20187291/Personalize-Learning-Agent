@@ -995,14 +995,29 @@ class TeacherAgent:
 
         unique_questions = bank[:]
         random.shuffle(unique_questions)
+
+        # LUÔN đảm bảo đủ số câu cho mỗi mã đề:
+        # - Nếu bank đủ (>= num_questions): lấy ngẫu nhiên num_questions câu.
+        # - Nếu bank KHÔNG đủ: lặp lại pool câu (mỗi lần tráo vị trí) để lấp cho đủ
+        #   num_questions. Trùng câu giữa các vị trí là chấp nhận được; việc tráo
+        #   vị trí khiến các mã đề vẫn khác nhau. Không bao giờ cắt giảm số câu.
+        pool_size = len(unique_questions)
         needed = num_questions
-        if len(unique_questions) < needed:
-            needed = len(unique_questions)
+
+        def _select_one_version() -> List[QuestionBank]:
+            if pool_size >= needed:
+                random.shuffle(unique_questions)
+                return unique_questions[:needed]
+            # Thiếu câu: lặp pool với tráo vị trí mỗi vòng cho đến khi đủ needed.
+            filled: List[QuestionBank] = []
+            while len(filled) < needed:
+                random.shuffle(unique_questions)
+                filled.extend(unique_questions)
+            return filled[:needed]
 
         versions = []
         for version_index in range(num_versions):
-            random.shuffle(unique_questions)
-            selected = unique_questions[:needed]
+            selected = _select_one_version()
             version_lines = [f"Đề {version_index + 1} - Môn {subject.name} - {exam_type} - {needed} câu"]
             for idx, item in enumerate(selected, start=1):
                 title = self._clean_text(item.content or f"Câu hỏi {item.id}")
@@ -1022,11 +1037,18 @@ class TeacherAgent:
                 "text": "\n".join(version_lines),
             })
 
-        reply = (
-            f"Tôi đã chuẩn bị {len(versions)} mã đề trắc nghiệm cho môn {subject.name} với {needed} câu mỗi đề. "
-            f"Ngân hàng hiện có ít hơn số câu bạn yêu cầu nên tôi chỉ có thể dùng {len(unique_questions)} câu sẵn có. "
-            f"Nếu bạn muốn đủ 30 câu, cần bổ sung thêm câu hỏi vào ngân hàng đề."
-        )
+        if pool_size >= needed:
+            reply = (
+                f"Tôi đã chuẩn bị {len(versions)} mã đề trắc nghiệm cho môn {subject.name} với {needed} câu mỗi đề. "
+                f"Ngân hàng hiện có {pool_size} câu, đủ để tạo đề. Mỗi mã đề đã được tráo vị trí câu hỏi."
+            )
+        else:
+            reply = (
+                f"Tôi đã chuẩn bị {len(versions)} mã đề trắc nghiệm cho môn {subject.name} với {needed} câu mỗi đề. "
+                f"Ngân hàng hiện chỉ có {pool_size} câu (ít hơn {needed} câu bạn yêu cầu), nên tôi đã tráo vị trí "
+                f"và lặp lại để đảm bảo mỗi đề vẫn có đủ {needed} câu. Mỗi mã đề có thứ tự câu khác nhau. "
+                f"Để có câu hỏi phong phú hơn, bạn có thể bổ sung thêm vào ngân hàng đề."
+            )
         actions = [
             "Xuất đề sang file Word",
             "Xem lại câu hỏi theo mức độ khó",
@@ -1585,7 +1607,15 @@ class TeacherAgent:
                 "confidence": analysis["confidence"],
                 "needs_more_info": True,
                 "missing_fields": missing_fields,
-                "action_metadata": self.router.route_action(intent_type, context=context, class_id=class_id, student_name=getattr(student, "full_name", None), subject_name=getattr(subject, "name", None)),
+                "action_metadata": self.router.route_action(
+                    intent_type,
+                    context=context,
+                    class_id=class_id,
+                    student_name=getattr(student, "full_name", None),
+                    subject_name=getattr(subject, "name", None),
+                    num_questions=entities.get("num_questions"),
+                    num_versions=entities.get("num_versions"),
+                ),
             }
             self._emit_respond_breakdown(total_start, before_analyze_ms, analyze_ms, (time.perf_counter() - t_preprocess) * 1000.0, 0.0, 0.0, analysis)
             self._perf_local.active = False
@@ -1641,6 +1671,8 @@ class TeacherAgent:
             class_id=classroom.id if classroom else class_id,
             student_name=self._clean_text(student.full_name or student.username) if student else None,
             subject_name=subject.name if subject else None,
+            num_questions=entities.get("num_questions"),
+            num_versions=entities.get("num_versions"),
         )
 
         memory.add_message(

@@ -304,7 +304,7 @@ export default function AdaptiveLearningPage() {
               </div>
               <h1 className="mt-4 text-2xl font-black tracking-tight text-slate-950">Tutor Agent theo từng môn và từng tài liệu</h1>
               <p className="mt-2 max-w-2xl text-[13px] font-medium leading-6 text-slate-600">
-                Bên trái là tài liệu đang mở. Bên phải là Tutor Agent và danh sách môn học. Khi bạn hỏi, hệ thống sẽ gửi prompt của bạn kèm đúng tài liệu đang hiển thị cho AI để trả lời.
+                Trợ giảng theo ngữ cảnh tài liệu đang mở và môn học.
               </p>
             </div>
 

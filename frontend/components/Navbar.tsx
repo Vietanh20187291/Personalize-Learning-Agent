@@ -158,23 +158,19 @@ export default function Navbar() {
       return [
         { name: "Tổng quan", href: "/teacher", icon: LayoutDashboard },
         { name: "Môn học", href: "/teacher/subjects", icon: GraduationCap },
-        { name: "Tài liệu", href: "/teacher/documents", icon: BookOpen },
         { name: "Ngân hàng câu hỏi", href: "/teacher/question-bank", icon: LibraryBig },
         { name: "Học viên", href: "/teacher/members", icon: Users },
         { name: "Đề thi", href: "/teacher/exam", icon: FileText },
-        { name: "Thực nghiệm", href: "/test", icon: FlaskConical },
       ];
     }
 
     if (user.role === "student") {
       return [
         { name: "Gia sư", href: "/adaptive", icon: GraduationCap },
-        { name: "Lộ trình", href: "/planning", icon: BrainCircuit },
-        { name: "Học tập", href: "/my-learning", icon: BookOpenCheck },
+        { name: "Lộ trình", href: "/my-learning", icon: BookOpenCheck },
         { name: "Kiểm tra", href: "/assessment", icon: FileText },
         { name: "Đánh giá", href: "/evaluation", icon: LineChart },
         { name: "Thư viện", href: "/library", icon: BookOpen },
-        { name: "Thực nghiệm", href: "/test", icon: FlaskConical },
       ];
     }
 

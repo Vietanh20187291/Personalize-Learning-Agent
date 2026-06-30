@@ -512,13 +512,13 @@ export default function MyLearningPage() {
           <div className="px-6 py-7">
             <div className="inline-flex items-center gap-2 rounded-full border border-white/70 bg-white/70 px-3 py-1 text-[10px] font-black uppercase tracking-[0.22em] text-indigo-800">
               <BookOpenCheck size={13} />
-              Tab học tập
+              Tab lộ trình
             </div>
             <h1 className="mt-4 text-2xl font-black tracking-tight text-slate-950">
-              Tổng quan học tập cá nhân
+              Lộ trình học tập cá nhân
             </h1>
             <p className="mt-2 max-w-2xl text-[13px] font-medium leading-6 text-slate-600">
-              Xem tất cả môn học đã tham gia, điểm số theo tài liệu, các câu làm sai và sinh tài liệu ôn tập từ những phần chưa nắm vững.
+              Lịch học tuần, điểm theo tài liệu và các câu cần ôn lại.
             </p>
           </div>
         </section>
@@ -870,6 +870,23 @@ function PlanColumn({
     }
   };
 
+  // Mở tài liệu được chọn sang tab Gia sư (/adaptive) để học luôn.
+  const openInTutor = (step: PlanStep) => {
+    if (!userId || !step.document_id) return;
+    localStorage.setItem(
+      `tutor_pending_document_${userId}`,
+      JSON.stringify({
+        subject: step.subject_name || "",
+        document_id: step.document_id,
+        note: step.reason || "",
+        latest_score: step.latest_score ?? null,
+      })
+    );
+    window.location.href = `/adaptive?subject=${encodeURIComponent(step.subject_name || "")}&document_id=${encodeURIComponent(
+      String(step.document_id)
+    )}`;
+  };
+
   const steps = plan?.steps ?? [];
   const total = plan?.summary?.total_steps ?? steps.length;
 
@@ -914,48 +931,61 @@ function PlanColumn({
               {total} mục cần học — Ưu tiên tài liệu chưa qua / điểm thấp
             </div>
             <ol className="space-y-2.5">
-              {steps.map((step) => (
-                <li
-                  key={step.id}
-                  className={`rounded-2xl border bg-white/80 px-3.5 py-3 shadow-sm transition ${
-                    step.priority_group === "teacher_directive"
-                      ? "border-amber-200 ring-1 ring-amber-100"
-                      : "border-slate-100"
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-bold text-slate-800">
-                        <span className="mr-1.5 text-cyan-500">{step.step_order}.</span>
-                        {step.document_title || step.document_filename || `Tài liệu #${step.document_id}`}
-                      </p>
-                      {step.subject_name && (
-                        <p className="mt-0.5 truncate text-[11px] font-medium text-slate-500">
-                          {step.subject_name}
+              {steps.map((step) => {
+                const isPriority =
+                  step.priority_group === "teacher_directive" ||
+                  step.priority_group === "low_score" ||
+                  step.priority_group === "no_score";
+                return (
+                  <li
+                    key={step.id}
+                    className={`rounded-2xl border px-3.5 py-3 shadow-sm transition ${
+                      isPriority
+                        ? "border-cyan-300 bg-gradient-to-r from-cyan-50 to-white ring-1 ring-cyan-100"
+                        : "border-slate-100 bg-white/80"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-bold text-slate-800">
+                          <span className="mr-1.5 text-cyan-500">{step.step_order}.</span>
+                          {step.document_title || step.document_filename || `Tài liệu #${step.document_id}`}
                         </p>
-                      )}
-                      {step.deadline_date && (
-                        <p className="mt-1 flex items-center gap-1 text-[11px] text-slate-500">
-                          <Clock size={10} />
-                          Hạn: {new Date(step.deadline_date).toLocaleDateString("vi-VN")}
-                        </p>
-                      )}
+                        {step.subject_name && (
+                          <p className="mt-0.5 truncate text-[11px] font-medium text-slate-500">
+                            {step.subject_name}
+                          </p>
+                        )}
+                        {step.deadline_date && (
+                          <p className="mt-1 flex items-center gap-1 text-[11px] text-slate-500">
+                            <Clock size={10} />
+                            Hạn: {new Date(step.deadline_date).toLocaleDateString("vi-VN")}
+                          </p>
+                        )}
+                      </div>
+                      <span
+                        className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-bold ring-1 ${priorityBadgeCls(
+                          step.priority_group
+                        )}`}
+                      >
+                        {priorityLabel(step.priority_group)}
+                      </span>
                     </div>
-                    <span
-                      className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-bold ring-1 ${priorityBadgeCls(
-                        step.priority_group
-                      )}`}
+                    {step.reason && step.priority_group === "teacher_directive" && (
+                      <p className="mt-1.5 rounded-lg bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-700">
+                        {step.reason}
+                      </p>
+                    )}
+                    <button
+                      onClick={() => openInTutor(step)}
+                      className="mt-2.5 inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.1em] text-white shadow-sm transition hover:from-cyan-500 hover:to-blue-500"
                     >
-                      {priorityLabel(step.priority_group)}
-                    </span>
-                  </div>
-                  {step.reason && step.priority_group === "teacher_directive" && (
-                    <p className="mt-1.5 rounded-lg bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-700">
-                      {step.reason}
-                    </p>
-                  )}
-                </li>
-              ))}
+                      <BookOpen size={12} />
+                      Học tài liệu
+                    </button>
+                  </li>
+                );
+              })}
             </ol>
           </>
         )}
